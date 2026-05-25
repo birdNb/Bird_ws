@@ -116,9 +116,9 @@ FSM_WAIT_TIMEOUT = 30.0
 
 # ----- 找不到人脸超时(秒): 超过则平滑回中 -----
 # >0 启用; 0 表示"保持最后位置不动"
-NO_FACE_RETURN_HOME_SEC = 2.0
+NO_FACE_RETURN_HOME_SEC = 1.0
 # 回中速率(度/秒): 越大回得越快;过大会瞬间甩头
-RETURN_HOME_RATE_DEG_PER_SEC = 30.0
+RETURN_HOME_RATE_DEG_PER_SEC = 45.0
 
 # =====================================================
 #                    工具函数 / 类
