@@ -1,49 +1,66 @@
-# hand_identify — ZED Mini 手势与 3D 跟踪
+# hand_identify — ZED Mini 手部感知
 
-## 功能
+两大功能模块，共用 `common/` 下的手势定义与 ROS 工具。
 
-- MediaPipe Hands 检测单手 21 关键点
-- 手势数字识别 **0~5**（伸直手指数）
-- ZED 深度/点云计算手掌中心 **3D 坐标**（米）
-- 帧间位移判断移动方向：**前/后/左/右/上/下**
-- OpenCV 画面叠加 + 终端彩色日志
+## 目录结构
+
+```
+hand_identify/
+├── start_gesture_recognition.sh   # 根目录快捷启动 → 手势识别
+├── start_hand_tracking.sh         # 根目录快捷启动 → 手部跟踪
+├── requirements.txt
+├── common/                        # 公共
+│   ├── gesture_actions.py         # 手势 0~5 定义、稳定判定
+│   ├── ros_setup.py               # sim2real Python 路径
+│   ├── ros_control.py             # FSM / 手柄仲裁
+│   ├── paths.py                   # 模块路径
+│   └── ros_env.sh                 # source ROS 环境
+├── gesture_recognition/           # 手势识别 + 动作触发
+│   ├── start.sh
+│   ├── zed_gesture_recognition.py
+│   ├── gesture_motion.py
+│   └── motion/                    # /joy_msg、撒娇扭腰
+└── hand_tracking/                 # 手部跟踪（底盘跟手）
+    ├── start.sh
+    ├── hand_perception.py         # ZED 感知库
+    ├── distance_hold.py           # 手势5 距离保持
+    └── locomotion.py              # 全轴跟手备份
+```
 
 ## 依赖
 
-1. 安装 [ZED SDK](https://www.stereolabs.com/developers/release/)（建议 4.2+）
-2. Python 包：
-
 ```bash
 pip install -r requirements.txt
-# ZED SDK 安装后:
-pip install pyzed
+pip install pyzed   # 安装 ZED SDK 后
 ```
 
-## 运行
+## 一键启动
+
+### 手势识别（0~5 + 动作 1~4）
 
 ```bash
-cd hand_identify
-python3 zed_gesture_recognition.py
+cd ~/Bird_ws/hand_identify
+./start_gesture_recognition.sh
 ```
 
-无界面（仅终端日志）：
+仅识别、不控机器人：`./start_gesture_recognition.sh --preview`
+
+详见 [gesture_recognition/README.md](gesture_recognition/README.md)
+
+### 手部跟踪（手势 5 距离保持）
 
 ```bash
-python3 zed_gesture_recognition.py --no-gui
+cd ~/Bird_ws/hand_identify
+./start_hand_tracking.sh
 ```
 
-按 **q** 退出。
+详见 [hand_tracking/README.md](hand_tracking/README.md)
 
-## 参数
+## 手势一览
 
-| 参数 | 说明 |
-|------|------|
-| `--no-gui` | 不弹窗 |
-| `--move-threshold 0.03` | 移动判定阈值(米)，默认 0.02 |
-
-## 调试
-
-- 深度不准：在脚本里把 `DEPTH_MODE.QUALITY` 改为 `ULTRA`
-- 手势不稳：提高 `min_detection_confidence`（默认 0.7）
-- 方向太敏感：增大 `--move-threshold`
-- 检测距离：修改 `depth_maximum_distance`（默认 3.0m）
+| 手势 | 手势识别 | 手部跟踪 |
+|------|----------|----------|
+| 0 | 急停 / 按住 5s 退出 | — |
+| 1 | 撒娇扭腰 | — |
+| 2~4 | 抬手 / 挥双手 / 踢球 | — |
+| 5 | 识别显示 | 前后距离保持 → `/cmd_vel` |
