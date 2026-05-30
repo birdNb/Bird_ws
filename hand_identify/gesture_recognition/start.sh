@@ -15,6 +15,28 @@ echo "[gesture_recognition] 脸跟踪常开(locate_face) | 手势 0急停 1撒�
 echo "[gesture_recognition] ESC 退出窗口 | Ctrl+C 强制退出终端"
 echo "[gesture_recognition] 仅预览请加参数: --preview"
 
+PY_ARGS=()
+FORCE=0
+for a in "$@"; do
+  if [[ "$a" == "--force" ]]; then
+    FORCE=1
+  else
+    PY_ARGS+=("$a")
+  fi
+done
+
+if pgrep -f 'zed_gesture_recognition.py' >/dev/null 2>&1; then
+  echo "[gesture_recognition] 警告: 已有 zed_gesture_recognition 在运行或挂起(Ctrl+Z)，ZED 无法二次打开"
+  echo "  处理: pkill -f zed_gesture_recognition.py"
+  echo "  或: fg 到前台后 Esc 退出窗口 / Ctrl+C"
+  if [[ "${FORCE}" -eq 0 ]]; then
+    exit 1
+  fi
+  echo "[gesture_recognition] --force: 结束旧进程后继续..."
+  pkill -f 'zed_gesture_recognition.py' 2>/dev/null || true
+  sleep 1
+fi
+
 CHILD_PID=""
 _cleanup() {
   if [[ -n "${CHILD_PID}" ]] && kill -0 "${CHILD_PID}" 2>/dev/null; then
@@ -38,7 +60,7 @@ _cleanup() {
 }
 trap _cleanup INT TERM
 
-python3 "${SCRIPT_DIR}/zed_gesture_recognition.py" "$@" &
+python3 "${SCRIPT_DIR}/zed_gesture_recognition.py" "${PY_ARGS[@]}" &
 CHILD_PID=$!
 wait "${CHILD_PID}"
 exit $?

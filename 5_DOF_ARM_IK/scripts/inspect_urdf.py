@@ -9,7 +9,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from arm_ik.right_arm_ik import RightArmIKSolver  # noqa: E402
+from arm_ik.right_arm_ik import RightArmIKSolver, load_standing_home_q  # noqa: E402
 from arm_ik.urdf_package import default_urdf_file, resolve_urdf_path  # noqa: E402
 
 
@@ -49,7 +49,16 @@ def main():
     import numpy as np
 
     qz = np.zeros(5)
-    print("FK @ q=0 xyz (torso):", solver.fk(qz)[:3, 3])
+    print("FK @ q=0 伸直 xyz (torso):", solver.fk(qz)[:3, 3])
+    try:
+        qs = load_standing_home_q(args.config)
+        print(
+            "FK @ standing_home_q 站立 xyz (torso):",
+            solver.fk(qs)[:3, 3],
+            "q=", [round(v, 3) for v in qs],
+        )
+    except KeyError as e:
+        print("standing_home_q:", e)
     if solver.torso_mount is not None:
         t_bt = solver.torso_mount.compute(0.0)
         print("T_base_torso @ waist=0, xyz:", t_bt[:3, 3])

@@ -14,6 +14,8 @@ chmod +x start.sh
 
 ```bash
 ./start_gesture_recognition.sh
+
+若报 `CAMERA STREAM FAILED TO START`：多为 ZED 已被占用（勿用 Ctrl+Z 挂起程序）。执行 `pkill -f zed_gesture_recognition.py` 或 `./start_gesture_recognition.sh --force`。
 ```
 
 ## 常用参数
@@ -44,6 +46,6 @@ chmod +x start.sh
 | `face_tracker.py` | 内嵌脸跟踪（locate_face 控制律） |
 | `gesture_motion.py` | ROS 动作调度 |
 | `motion/hand_action_library.py` | 手势 2~4 → `/joy_msg` |
-| `motion/waist_coquette_*.py` | 手势 1 撒娇扭腰 |
+| `motion/waist_coquette_*.py` | 手势 1 撒娇扭腰（匀速连续、端点不停） |
 
 公共模块见 `../common/`。

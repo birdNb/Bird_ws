@@ -299,37 +299,74 @@ def compute_proc_size(src_w, src_h, max_w):
     return int(src_w * scale), int(src_h * scale)
 
 
+def _zed_busy_hint() -> str:
+    try:
+        import subprocess
+
+        out = subprocess.check_output(
+            ["pgrep", "-af", "zed_gesture_recognition"],
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).strip()
+        if out:
+            return (
+                "\n可能仍有进程占用 ZED（勿 Ctrl+Z 挂起）：\n"
+                f"{out}\n"
+                "处理: pkill -f zed_gesture_recognition.py  或 fg 后 Esc/Ctrl+C 正常退出"
+            )
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        pass
+    return (
+        "\n可尝试: 拔掉 ZED USB 等 3s 再插；"
+        "确认无 locate_face / 其它 ZED 程序；"
+        "pkill -f zed_gesture_recognition.py"
+    )
+
+
 def open_zed_camera(use_hd1080=True, dist_min=DIST_MIN_M, dist_max=DIST_MAX_M):
+    """打开 ZED；失败时降分辨率/帧率重试。"""
+    attempts = []
+    if use_hd1080:
+        attempts.append((sl.RESOLUTION.HD1080, TARGET_FPS))
+    attempts.extend([
+        (sl.RESOLUTION.HD720, TARGET_FPS),
+        (sl.RESOLUTION.HD720, 15),
+        (sl.RESOLUTION.VGA, 15),
+    ])
+
+    last_err = sl.ERROR_CODE.CAMERA_NOT_DETECTED
     zed = sl.Camera()
-    init_params = sl.InitParameters()
-    init_params.camera_resolution = (
-        sl.RESOLUTION.HD1080 if use_hd1080 else sl.RESOLUTION.HD720
+    for res, fps in attempts:
+        init_params = sl.InitParameters()
+        init_params.camera_resolution = res
+        init_params.camera_fps = fps
+        init_params.depth_mode = sl.DEPTH_MODE.QUALITY
+        init_params.coordinate_units = sl.UNIT.METER
+        init_params.depth_minimum_distance = dist_min
+        init_params.depth_maximum_distance = dist_max
+
+        for try_i in range(3):
+            err = zed.open(init_params)
+            if err == sl.ERROR_CODE.SUCCESS:
+                cam_info = zed.get_camera_information()
+                r = cam_info.camera_configuration.resolution
+                print(
+                    Fore.GREEN
+                    + f"ZED 已打开: {r.width}x{r.height}@{fps}fps  "
+                    f"识别距离 {dist_min:.1f}~{dist_max:.1f}m  "
+                    f"MediaPipe proc<={PROC_MAX_W}px"
+                )
+                return zed
+            last_err = err
+            zed.close()
+            if try_i < 2:
+                time.sleep(0.8)
+        label = f"{res}@{fps}fps"
+        print(Fore.YELLOW + f"ZED 打开失败 ({label}): {err}")
+
+    raise RuntimeError(
+        f"ZED 相机打开失败: {last_err}{_zed_busy_hint()}",
     )
-    init_params.camera_fps = TARGET_FPS
-    init_params.depth_mode = sl.DEPTH_MODE.QUALITY
-    init_params.coordinate_units = sl.UNIT.METER
-    init_params.depth_minimum_distance = dist_min
-    init_params.depth_maximum_distance = dist_max
-
-    err = zed.open(init_params)
-    if err != sl.ERROR_CODE.SUCCESS and use_hd1080:
-        print(Fore.YELLOW + "HD1080 打开失败, 回退 HD720...")
-        zed.close()
-        init_params.camera_resolution = sl.RESOLUTION.HD720
-        err = zed.open(init_params)
-    if err != sl.ERROR_CODE.SUCCESS:
-        raise RuntimeError(f"ZED 相机打开失败: {err}")
-
-    cam_info = zed.get_camera_information()
-    res = cam_info.camera_configuration.resolution
-    print(
-        Fore.GREEN
-        + f"ZED 已打开: {res.width}x{res.height}@{TARGET_FPS}fps  "
-        f"识别距离 {dist_min:.1f}~{dist_max:.1f}m  "
-        f"MediaPipe proc<={PROC_MAX_W}px"
-    )
-    return zed
-
 
 def main():
     parser = argparse.ArgumentParser(description="ZED Mini 手势数字 + 3D 跟踪")

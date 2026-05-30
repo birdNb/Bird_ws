@@ -29,6 +29,50 @@ def _load_yaml(path: Path) -> dict:
         return yaml.safe_load(f)
 
 
+_TELEOP_AXIS_NAMES = ("forward", "back", "right", "left", "up", "down")
+_DEFAULT_TELEOP_AXES = {
+    "forward": [0, 0, -1],
+    "back": [0, -1, 0],
+    "right": [1, 0, 0],
+    "left": [0, 0, 1],
+    "up": [0, 1, 0],
+    "down": [-1, 0, 0],
+}
+
+
+def load_teleop_axes(config_path: Union[str, Path]) -> dict[str, np.ndarray]:
+    """键盘平移单位方向（base_link），见 config teleop 段。"""
+    data = _load_yaml(Path(config_path))
+    block = data.get("teleop") or {}
+    out: dict[str, np.ndarray] = {}
+    for name in _TELEOP_AXIS_NAMES:
+        raw = block.get(name, _DEFAULT_TELEOP_AXES[name])
+        v = np.asarray(raw, dtype=float).reshape(3)
+        n = float(np.linalg.norm(v))
+        if n < 1e-9:
+            raise ValueError(f"teleop.{name} 方向向量不能为零")
+        out[name] = v / n
+    return out
+
+
+def load_standing_home_q(config_path: Union[str, Path]) -> np.ndarray:
+    """
+    站立默认关节角，作为 IK/键盘末端的参考原点。
+
+    非 URDF q=0（手臂伸直）构型。配置键 standing_home_q，兼容 default_arm_q。
+    """
+    data = _load_yaml(Path(config_path))
+    raw = data.get("standing_home_q") or data.get("default_arm_q")
+    if raw is None:
+        raise KeyError(
+            f"{config_path} 缺少 standing_home_q（站立 IK 原点，非 q=0 伸直姿）",
+        )
+    q = np.asarray(raw, dtype=float).reshape(-1)
+    if q.size != 5:
+        raise ValueError(f"standing_home_q 需 5 维，收到 {q.size}")
+    return q
+
+
 def pose_from_xyz_rpy(
     xyz: Union[List[float], np.ndarray],
     rpy: Union[List[float], np.ndarray],

@@ -3,11 +3,8 @@
 """
 键盘控制右臂末端位姿 → IK → 关节角；可选下发实机。
 
-坐标系: base_link（整机器人，右手定则）
-  X 前, Y 左, Z 上
-
-平移:
-  W/S 前/后 (X±)    A/D 左/右 (Y±)    R 上 (Z+)
+平移（config teleop 实机标定方向，base_link）:
+  W/S 前/后    A/D 左/右    Q/E 上/下
   方向键: ↑↓ 前/后  ←→ 左/右  PgUp/PgDn 上/下
 
 旋转 (RPY 增量, 绕 base_link 固定轴):
@@ -18,8 +15,10 @@
   F     开合切换
 
 其它:
-  空格  以当前关节角重置 IK 目标（不位移）
-  H     帮助   Q/ESC  退出
+  空格  一键回到站立默认位（standing_home_q，立即下发）
+  H     帮助   ESC  退出
+
+IK 原点: 站立默认关节角；解算尽力贴近目标，不丢弃近似解。
 """
 
 from __future__ import annotations
@@ -35,12 +34,17 @@ from pathlib import Path
 from typing import Optional
 
 import numpy as np
-import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from arm_ik import IKTaskMode, RightArmIKSolver  # noqa: E402
+from arm_ik import (  # noqa: E402
+    IKResult,
+    IKTaskMode,
+    RightArmIKSolver,
+    load_standing_home_q,
+    load_teleop_axes,
+)
 from arm_ik.robot_bridge import RightArmRobotBridge, load_robot_config  # noqa: E402
 from arm_ik.transforms import rpy_matrix  # noqa: E402
 
@@ -135,23 +139,38 @@ def run_teleop(
     ik_mode: IKTaskMode,
     q_waist: float = 0.0,
     robot: Optional[RightArmRobotBridge] = None,
-    default_q: Optional[np.ndarray] = None,
+    ik_origin_q: Optional[np.ndarray] = None,
+    teleop_axes: Optional[dict[str, np.ndarray]] = None,
 ) -> None:
-    if robot is not None:
-        q = robot.get_arm_q().copy()
-    elif default_q is not None:
-        q = np.asarray(default_q, dtype=float).copy()
-    else:
-        q = np.zeros(solver.dof)
+    if ik_origin_q is None:
+        raise ValueError("缺少 standing_home_q（IK 站立原点）")
+    ik_origin_q = np.asarray(ik_origin_q, dtype=float).copy()
+    axes = teleop_axes or load_teleop_axes(
+        ROOT / "config" / "right_arm.yaml",
+    )
+    q = ik_origin_q.copy()
 
     target_base = fk_in_base(solver, q, q_waist)
     target_cmd = target_base.copy()
     rot_step = math.radians(rot_step_deg)
     last_key_t = 0.0
-    key_debounce_s = 0.12
+    key_debounce_s = 0.05
+    last_print_t = 0.0
+    status_print_interval = 0.2
 
-    def sync_target_from_q() -> None:
-        nonlocal target_base, target_cmd
+    if solver.torso_mount is not None:
+        _t_tb = np.linalg.inv(solver.torso_mount.compute(q_waist))
+
+        def target_torso_fn(target_base: np.ndarray) -> np.ndarray:
+            return _t_tb @ target_base
+    else:
+
+        def target_torso_fn(target_base: np.ndarray) -> np.ndarray:
+            return target_base
+
+    def reset_to_standing_origin() -> None:
+        nonlocal q, target_base, target_cmd
+        q = ik_origin_q.copy()
         target_base = fk_in_base(solver, q, q_waist)
         target_cmd = target_base.copy()
 
@@ -159,33 +178,59 @@ def run_teleop(
         if robot is not None:
             robot.set_arm_goal(q, smooth=smooth)
 
-    def do_ik() -> bool:
-        nonlocal q
-        res = ik_from_base_target(solver, target_cmd, q, q_waist, ik_mode)
-        if not res.success:
-            print(
-                f"\rIK FAIL err={res.position_error_m*1000:.1f}mm "
-                f"({res.message})",
-                end="",
-                flush=True,
+    def solve_ik_fast(q_seed: np.ndarray) -> IKResult:
+        tgt = target_torso_fn(target_cmd)
+        return solver.ik(tgt, q_seed=q_seed, mode=ik_mode)
+
+    def do_ik() -> None:
+        nonlocal q, last_print_t
+        res = solve_ik_fast(q)
+        if (
+            res.position_error_m > 0.025
+            and ik_mode != IKTaskMode.POSITION
+        ):
+            res_pos = solver.ik(
+                target_torso_fn(target_cmd),
+                q_seed=res.q,
+                mode=IKTaskMode.POSITION,
             )
-            return False
+            if res_pos.position_error_m < res.position_error_m:
+                res = res_pos
         q = res.q.copy()
-        push_robot()
+        push_robot(smooth=True)
+        now = time.time()
+        if now - last_print_t < status_print_interval:
+            return
+        last_print_t = now
         rpy_cmd = matrix_to_rpy_deg(target_cmd[:3, :3])
         claw_s = ""
         if robot is not None:
             claw_s = f" claw={'开' if robot.claw_is_open else '合'}"
+        tag = "OK" if res.message == "converged" else "~"
         print(
-            f"\rIK OK   "
+            f"\rIK {tag}  "
             f"cmd=[{target_cmd[0,3]:+.3f},{target_cmd[1,3]:+.3f},{target_cmd[2,3]:+.3f}] "
-            f"rpy=[{rpy_cmd[0]:+.0f},{rpy_cmd[1]:+.0f},{rpy_cmd[2]:+.0f}]° "
             f"err={res.position_error_m*1000:.1f}mm "
-            f"q=[{', '.join(f'{v:+.2f}' for v in q)}]{claw_s}",
+            f"it={res.iterations}{claw_s}   ",
             end="",
             flush=True,
         )
-        return True
+
+    def go_home_stand() -> None:
+        nonlocal q
+        reset_to_standing_origin()
+        if robot is not None:
+            robot.set_arm_goal(q, smooth=False)
+        print(
+            "\n→ 已回站立默认位 "
+            f"q=[{', '.join(f'{v:+.2f}' for v in q)}]",
+            end="",
+            flush=True,
+        )
+
+    def move_axis(direction: str, sign: float = 1.0) -> None:
+        vec = axes[direction] * (sign * pos_step)
+        move(dpos=vec)
 
     def move(dpos=None, drot=None) -> None:
         nonlocal target_cmd
@@ -213,12 +258,25 @@ def run_teleop(
         backend = getattr(robot, "effective_backend", "?")
         mode_note = f"实机 → {backend}"
     print(f"{FRAME_NAME} 末端键盘控制已启动 — {mode_note}")
-    sync_target_from_q()
+    ax_s = " ".join(
+        f"{k}=[{v[0]:+.0f},{v[1]:+.0f},{v[2]:+.0f}]"
+        for k, v in axes.items()
+    )
+    print(f"平移标定(base_link): {ax_s}")
+    origin_xyz = target_cmd[:3, 3]
     if robot is not None:
+        q_robot = robot.get_arm_q()
         robot.hold_current_pose()
+        delta = float(np.linalg.norm(q_robot - ik_origin_q))
+        if delta > 0.15:
+            print(
+                f"提示: 实机关节与 standing_home_q 差 {delta:.2f} rad，"
+                "请确认已 Start 站立或更新 config",
+            )
     print(
-        f"\n当前姿态为 IK 起点 q=[{', '.join(f'{v:+.2f}' for v in q)}] "
-        f"(不自动解 IK，按空格可重新对齐)",
+        f"\nIK 原点=站立默认 q=[{', '.join(f'{v:+.2f}' for v in ik_origin_q)}] "
+        f"base xyz=[{origin_xyz[0]:+.3f},{origin_xyz[1]:+.3f},{origin_xyz[2]:+.3f}] "
+        f"(非 q=0 伸直姿；启动不下发，空格站立复原)",
         flush=True,
     )
 
@@ -227,7 +285,7 @@ def run_teleop(
             k = keys.read_key()
             if not k:
                 continue
-            if k in ("\x03", "\x1b", "q", "Q"):
+            if k in ("\x03", "\x1b"):
                 if k == "\x1b":
                     print("\n退出")
                 break
@@ -235,10 +293,7 @@ def run_teleop(
                 print(HELP)
                 continue
             if k == " ":
-                sync_target_from_q()
-                if robot is not None:
-                    robot.hold_current_pose()
-                print("\n已用当前关节角重置 IK 目标", end="", flush=True)
+                go_home_stand()
                 continue
             if k in ("f", "F"):
                 if robot is None:
@@ -253,27 +308,29 @@ def run_teleop(
 
             arrow = ARROW_MAP.get(k[1:] if k.startswith("\x1b") else "", "")
             if arrow == "up":
-                move(dpos=[pos_step, 0, 0])
+                move_axis("forward")
             elif arrow == "down":
-                move(dpos=[-pos_step, 0, 0])
+                move_axis("back")
             elif arrow == "left":
-                move(dpos=[0, pos_step, 0])
+                move_axis("left")
             elif arrow == "right":
-                move(dpos=[0, -pos_step, 0])
+                move_axis("right")
             elif arrow == "pgup":
-                move(dpos=[0, 0, pos_step])
+                move_axis("up")
             elif arrow == "pgdown":
-                move(dpos=[0, 0, -pos_step])
+                move_axis("down")
             elif k in ("w", "W"):
-                move(dpos=[pos_step, 0, 0])
+                move_axis("forward")
             elif k in ("s", "S"):
-                move(dpos=[-pos_step, 0, 0])
+                move_axis("back")
             elif k in ("a", "A"):
-                move(dpos=[0, pos_step, 0])
+                move_axis("left")
             elif k in ("d", "D"):
-                move(dpos=[0, -pos_step, 0])
-            elif k in ("r", "R"):
-                move(dpos=[0, 0, pos_step])
+                move_axis("right")
+            elif k in ("q", "Q"):
+                move_axis("up")
+            elif k in ("e", "E"):
+                move_axis("down")
             elif k in ("7", "i", "I"):
                 move(drot=[rot_step, 0, 0])
             elif k in ("8", "k", "K"):
@@ -347,9 +404,8 @@ def main():
         "position": IKTaskMode.POSITION,
     }
     solver = RightArmIKSolver.from_config(args.config)
-    with open(args.config, encoding="utf-8") as f:
-        cfg_all = yaml.safe_load(f) or {}
-    default_q = cfg_all.get("default_arm_q")
+    ik_origin_q = load_standing_home_q(args.config)
+    teleop_axes = load_teleop_axes(args.config)
 
     robot_bridge: Optional[RightArmRobotBridge] = None
     use_robot = args.robot or not args.sim_only
@@ -391,7 +447,8 @@ def main():
             ik_mode=mode_map[args.ik_mode],
             q_waist=args.q_waist,
             robot=robot_bridge,
-            default_q=default_q,
+            ik_origin_q=ik_origin_q,
+            teleop_axes=teleop_axes,
         )
     finally:
         if robot_bridge is not None:

@@ -34,8 +34,8 @@ from ros_control import ABSOLUTE_TOPIC, FsmStateMonitor
 # ----- 时序（与 waist_coquette_player 中 COQUETTE_BUSY_SEC 对齐） -----
 SWAY_AMPLITUDE_DEG = 45.0
 SWAY_CYCLES = 2
-RAMP_SEC = 1.0          # 每段转腰时长(秒)，越大越慢
-SWAY_HOLD_SEC = 0.1    # 到达左右端点后停留(秒)
+# 匀速角速度 (deg/s)，全程线性插值、端点不停留
+SWAY_ANGULAR_VEL_DEG_PER_SEC = 60.0
 ACTION_DURATION_SEC = 5.0
 ARM_RESET_WAIT_SEC = 0.5
 TRIGGER_PULSE_SEC = 0.5
@@ -46,13 +46,33 @@ PUBLISH_HZ = 50
 WAIST_YAW_JOINT = "waist_yaw_joint"
 CHEER_KEYS = {"rt", "a"}
 
-SWAY_SEGMENT_COUNT = SWAY_CYCLES * 2 + 1  # 每半周一段，最后回中
-SWAY_HOLD_COUNT = SWAY_CYCLES * 2         # 左右端点停留次数
+
+def _sway_waypoints_rad(amplitude_rad: float) -> list[float]:
+    """0 → (+,-) 交替 cycles 次 → 回 0。"""
+    pts = [0.0]
+    for i in range(SWAY_CYCLES * 2):
+        pts.append(amplitude_rad if (i % 2 == 0) else -amplitude_rad)
+    if abs(pts[-1]) > 1e-9:
+        pts.append(0.0)
+    return pts
+
+
+def _sway_motion_duration_sec(waypoints_rad: list[float]) -> float:
+    speed = math.radians(max(SWAY_ANGULAR_VEL_DEG_PER_SEC, 1e-3))
+    total = 0.0
+    for i in range(1, len(waypoints_rad)):
+        total += abs(waypoints_rad[i] - waypoints_rad[i - 1]) / speed
+    return total
+
+
+_SWAY_WAYPOINTS = _sway_waypoints_rad(math.radians(SWAY_AMPLITUDE_DEG))
+SWAY_MOTION_SEC = _sway_motion_duration_sec(_SWAY_WAYPOINTS)
 ACTION_TOTAL_SEC = (
-    SWAY_SEGMENT_COUNT * RAMP_SEC
-    + SWAY_HOLD_COUNT * SWAY_HOLD_SEC
+    TRIGGER_PULSE_SEC
+    + SWAY_MOTION_SEC
     + ACTION_DURATION_SEC
     + ARM_RESET_WAIT_SEC
+    + TRIGGER_PULSE_SEC
 )
 
 
@@ -112,67 +132,63 @@ def _pulse_joy(
         time.sleep(interval)
 
 
-def _quintic_alpha(t: float, duration: float) -> float:
-    if duration <= 0:
-        return 1.0
-    x = min(1.0, max(0.0, t / duration))
-    return 10 * x ** 3 - 15 * x ** 4 + 6 * x ** 5
+def _interp_waypoints(
+    waypoints_rad: list[float],
+    elapsed: float,
+    seg_starts: list[float],
+) -> float:
+    if elapsed >= seg_starts[-1]:
+        return waypoints_rad[-1]
+    for i in range(1, len(seg_starts)):
+        if elapsed <= seg_starts[i]:
+            t0, t1 = seg_starts[i - 1], seg_starts[i]
+            alpha = (elapsed - t0) / max(t1 - t0, 1e-9)
+            p0, p1 = waypoints_rad[i - 1], waypoints_rad[i]
+            return p0 + (p1 - p0) * alpha
+    return waypoints_rad[-1]
 
 
-def _ramp_position(
+def _run_uniform_sway(
     pub: rospy.Publisher,
-    start_rad: float,
-    goal_rad: float,
+    waypoints_rad: list[float],
     *,
-    duration_sec: float,
     dry_run: bool,
     abort_evt,
-) -> None:
+) -> float:
+    """
+    按固定角速度在路径点间线性插值，中途不停、段间速度连续。
+    返回结束时腰 yaw (rad)。
+    """
+    if len(waypoints_rad) < 2:
+        return waypoints_rad[0] if waypoints_rad else 0.0
+
+    speed = math.radians(max(SWAY_ANGULAR_VEL_DEG_PER_SEC, 1e-3))
+    seg_starts = [0.0]
+    for i in range(1, len(waypoints_rad)):
+        dt = abs(waypoints_rad[i] - waypoints_rad[i - 1]) / speed
+        seg_starts.append(seg_starts[-1] + dt)
+    total = seg_starts[-1]
+
     msg = JointState()
     msg.name = [WAIST_YAW_JOINT]
     msg.velocity = []
     msg.effort = []
     interval = 1.0 / max(PUBLISH_HZ, 1)
     t0 = time.time()
+    pos = waypoints_rad[0]
     while not rospy.is_shutdown():
         if abort_evt is not None and abort_evt.is_set():
-            return
+            return pos
         elapsed = time.time() - t0
-        alpha = _quintic_alpha(elapsed, duration_sec)
-        pos = start_rad + (goal_rad - start_rad) * alpha
+        pos = _interp_waypoints(waypoints_rad, elapsed, seg_starts)
         if not dry_run:
             msg.header.stamp = rospy.Time.now()
             msg.position = [pos]
             pub.publish(msg)
-        if elapsed >= duration_sec:
+        if elapsed >= total:
             break
         time.sleep(interval)
-
-
-def _hold_position(
-    pub: rospy.Publisher,
-    pos_rad: float,
-    *,
-    duration_sec: float,
-    dry_run: bool,
-    abort_evt,
-) -> None:
-    if duration_sec <= 0:
-        return
-    msg = JointState()
-    msg.name = [WAIST_YAW_JOINT]
-    msg.velocity = []
-    msg.effort = []
-    interval = 1.0 / max(PUBLISH_HZ, 1)
-    end_t = time.time() + duration_sec
-    while time.time() < end_t and not rospy.is_shutdown():
-        if abort_evt is not None and abort_evt.is_set():
-            return
-        if not dry_run:
-            msg.header.stamp = rospy.Time.now()
-            msg.position = [pos_rad]
-            pub.publish(msg)
-        time.sleep(interval)
+    return pos
 
 
 def _wait_fsm(skip: bool) -> None:
@@ -193,14 +209,7 @@ def run_coquette_action(
     if abort_evt is not None and abort_evt.is_set():
         return
 
-    amp = math.radians(SWAY_AMPLITUDE_DEG)
-    targets = []
-    sign = 1.0
-    for _ in range(SWAY_CYCLES):
-        targets.append(sign * amp)
-        targets.append(-sign * amp)
-        sign *= -1.0
-    targets.append(0.0)
+    waypoints = _sway_waypoints_rad(math.radians(SWAY_AMPLITUDE_DEG))
 
     waist_pub = rospy.Publisher(ABSOLUTE_TOPIC, JointState, queue_size=10)
     joy_pub = rospy.Publisher(JOY_MSG_TOPIC, Joy, queue_size=1)
@@ -221,30 +230,13 @@ def run_coquette_action(
         abort_evt=abort_evt,
     )
 
-    cur = 0.0
     sway_t0 = time.time()
-    last_idx = len(targets) - 1
-    for idx, goal in enumerate(targets):
-        if abort_evt is not None and abort_evt.is_set():
-            break
-        _ramp_position(
-            waist_pub, cur, goal,
-            duration_sec=RAMP_SEC,
-            dry_run=dry_run,
-            abort_evt=abort_evt,
-        )
-        cur = goal
-        if (
-            idx < last_idx
-            and abs(goal) > 1e-6
-            and SWAY_HOLD_SEC > 0
-        ):
-            _hold_position(
-                waist_pub, cur,
-                duration_sec=SWAY_HOLD_SEC,
-                dry_run=dry_run,
-                abort_evt=abort_evt,
-            )
+    cur = _run_uniform_sway(
+        waist_pub,
+        waypoints,
+        dry_run=dry_run,
+        abort_evt=abort_evt,
+    )
 
     cheer_remain = max(
         0.0,
@@ -260,14 +252,6 @@ def run_coquette_action(
         _pulse_joy(
             joy_pub, cheer_keys,
             duration_sec=TRIGGER_PULSE_SEC,
-            dry_run=dry_run,
-            abort_evt=abort_evt,
-        )
-
-    if cur != 0.0 and (abort_evt is None or not abort_evt.is_set()):
-        _ramp_position(
-            waist_pub, cur, 0.0,
-            duration_sec=RAMP_SEC,
             dry_run=dry_run,
             abort_evt=abort_evt,
         )

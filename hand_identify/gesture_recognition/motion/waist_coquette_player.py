@@ -10,12 +10,7 @@ from typing import Optional
 
 import rospy
 
-from waist_coquette_sway import (
-    ACTION_TOTAL_SEC,
-    ARM_RESET_WAIT_SEC,
-    RAMP_SEC,
-    run_coquette_action,
-)
+from waist_coquette_sway import ACTION_TOTAL_SEC, run_coquette_action
 
 COQUETTE_LABEL = "撒娇扭腰"
 COQUETTE_BUSY_SEC = ACTION_TOTAL_SEC + 1.5

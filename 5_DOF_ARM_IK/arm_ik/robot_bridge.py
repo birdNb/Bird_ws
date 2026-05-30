@@ -229,7 +229,7 @@ class RightArmRobotBridge:
         self._stop = threading.Event()
         self._goal_dirty = False
         self._last_pub_time = 0.0
-        self._hold_pub_interval = 0.25
+        self._hold_pub_interval = 0.5
         self._thread = threading.Thread(target=self._loop, daemon=True)
         self._thread.start()
 

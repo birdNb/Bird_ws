@@ -43,6 +43,10 @@ class IKConfig:
     position_weight: float = 1.0
     orientation_weight: float = 0.35
     jacobian_delta: float = 1e-4
+    use_geometric_jacobian: bool = True
+    stall_iterations: int = 5
+    # True：未严格收敛也返回当前最优 q，便于 5-DOF 尽力贴近目标
+    accept_best_effort: bool = True
 
 
 @dataclass
@@ -85,15 +89,24 @@ class NumericalIK:
         best_q = q.copy()
         best_pos = float("inf")
         best_ori = float("inf")
+        stall = 0
+        tol = self.cfg.position_tolerance_m
+        last_it = 0
 
+        use_geom = self.cfg.use_geometric_jacobian
         for it in range(1, self.cfg.max_iterations + 1):
-            t_cur = self.fk.compute(q)
+            last_it = it
+            if use_geom:
+                j6, t_cur = self.fk.geometric_jacobian(q)
+            else:
+                t_cur = self.fk.compute(q)
+                j6 = None
             p_cur, r_cur = split_pose(t_cur)
             e_task, pos_err, ori_err = self._task_error(
                 p_cur, r_cur, p_tgt, r_tgt, mode,
             )
 
-            pos_ok = pos_err < self.cfg.position_tolerance_m
+            pos_ok = pos_err < tol
             ori_ok = (
                 mode == IKTaskMode.POSITION
                 or ori_err < self.cfg.orientation_tolerance_rad
@@ -108,26 +121,39 @@ class NumericalIK:
                     message="converged",
                 )
 
-            j = self._numeric_jacobian(q, p_tgt, r_tgt, mode)
+            if pos_err < best_pos - 1e-6:
+                stall = 0
+                best_pos = pos_err
+                best_ori = ori_err
+                best_q = q.copy()
+            else:
+                stall += 1
+                if stall >= self.cfg.stall_iterations:
+                    break
+
+            j = (
+                self._jacobian_from_geom(j6, mode)
+                if j6 is not None
+                else self._task_jacobian(q, r_cur, mode)
+            )
             jj_t = j @ j.T
             lam2 = self.cfg.damping ** 2
             try:
-                # e = x_des - x_cur，J = d(x)/dq → x_new ≈ x + J*dq，令 J*dq ≈ e
                 dq = j.T @ np.linalg.solve(
                     jj_t + lam2 * np.eye(jj_t.shape[0]), e_task,
                 )
             except np.linalg.LinAlgError:
-                return IKResult(
-                    success=False,
-                    q=best_q,
-                    iterations=it,
-                    position_error_m=best_pos,
-                    orientation_error_rad=best_ori,
-                    message="singular_jacobian",
-                )
-            best_step_q = q.copy()
+                dq = j.T @ np.linalg.lstsq(
+                    jj_t + lam2 * np.eye(jj_t.shape[0]),
+                    e_task,
+                    rcond=None,
+                )[0]
+                if not np.all(np.isfinite(dq)):
+                    continue
+            scales = (1.0, 0.5) if pos_err > tol * 2 else (1.0,)
+            best_step_q = q
             best_step_pos = pos_err
-            for scale in (1.0, 0.5, 0.25):
+            for scale in scales:
                 q_try = clamp_vector(
                     q + self.cfg.step_scale * scale * dq,
                     self.q_lo,
@@ -135,30 +161,36 @@ class NumericalIK:
                 )
                 t_try = self.fk.compute(q_try)
                 p_try, r_try = split_pose(t_try)
-                _, pe_try, _ = self._task_error(
+                _, pe_try, oe_try = self._task_error(
                     p_try, r_try, p_tgt, r_tgt, mode,
                 )
                 if pe_try < best_step_pos:
                     best_step_pos = pe_try
                     best_step_q = q_try
+                    if pe_try < best_pos - 1e-6:
+                        best_pos = pe_try
+                        best_ori = oe_try
+                        best_q = q_try.copy()
             q = best_step_q
-            t_new = self.fk.compute(q)
-            p_new, r_new = split_pose(t_new)
-            _, pos_new, ori_new = self._task_error(
-                p_new, r_new, p_tgt, r_tgt, mode,
-            )
-            if pos_new < best_pos:
-                best_pos = pos_new
-                best_ori = ori_new
-                best_q = q.copy()
 
+        msg = "best_effort"
+        ok = self.cfg.accept_best_effort
+        if (
+            best_pos < self.cfg.position_tolerance_m
+            and (
+                mode == IKTaskMode.POSITION
+                or best_ori < self.cfg.orientation_tolerance_rad
+            )
+        ):
+            msg = "converged"
+            ok = True
         return IKResult(
-            success=False,
+            success=ok,
             q=best_q,
-            iterations=self.cfg.max_iterations,
+            iterations=last_it if last_it > 0 else self.cfg.max_iterations,
             position_error_m=best_pos,
             orientation_error_rad=best_ori,
-            message="max_iterations",
+            message=msg,
         )
 
     def _task_error(
@@ -181,22 +213,41 @@ class NumericalIK:
         ori_err = float(np.linalg.norm(e_ori))
         return np.concatenate([e_pos, e_ori]), pos_err, ori_err
 
+    def _jacobian_from_geom(
+        self, j6: np.ndarray, mode: IKTaskMode,
+    ) -> np.ndarray:
+        if mode == IKTaskMode.POSITION:
+            return j6[0:3, :] * self.cfg.position_weight
+        return np.vstack(
+            [
+                j6[0:3, :] * self.cfg.position_weight,
+                j6[3:6, :] * self.cfg.orientation_weight,
+            ],
+        )
+
+    def _task_jacobian(
+        self,
+        q: np.ndarray,
+        r_cur: np.ndarray,
+        mode: IKTaskMode,
+    ) -> np.ndarray:
+        return self._numeric_jacobian(q, r_cur, mode)
+
     def _numeric_jacobian(
         self,
         q: np.ndarray,
-        p_tgt: np.ndarray,
-        r_tgt: np.ndarray,
+        r_cur: np.ndarray,
         mode: IKTaskMode,
     ) -> np.ndarray:
-        """几何雅可比 d(末端位姿)/dq；任务误差 e 满足 e_dot ≈ -J * dq。"""
+        """数值雅可比（回退）。"""
         n = self.chain.dof
         t0 = self.fk.compute(q)
         p0, r0 = split_pose(t0)
+        r_tgt = r_cur
         h = self.cfg.jacobian_delta
         if mode == IKTaskMode.POSITION:
             m = 3
         else:
-            # position(3) + tool_z(3) 或 rotation(3)
             m = 6
         j = np.zeros((m, n), dtype=float)
         for i in range(n):

@@ -46,23 +46,32 @@ pip install -r requirements.txt
 2. 手柄 **Start** 进入站立（`fsm_state=5`，EXEC_DEFAULT）
 3. 本程序**只控右臂** 5 关节 + 夹爪，不发布左臂
 
-### 操作（`base_link`，右手定则：X 前 / Y 左 / Z 上）
+### IK 参考原点
+
+- 键盘末端增量以 **`standing_home_q`**（Start 站立时右臂默认关节角）为零点，**不是** URDF 全零 `q=0`（手臂伸直）构型。
+- 在 `config/right_arm.yaml` 中按实机关节反馈微调；`python3 scripts/inspect_urdf.py` 可对比伸直 vs 站立 FK。
+- 实机启动只 **保持当前关节** 不下发；首次按键才从站立原点解 IK 并运动。
+
+### 操作（平移方向在 `config/right_arm.yaml` → `teleop` 标定）
 
 | 功能 | 按键 |
 |------|------|
 | 前 / 后 | `W` / `S` 或 ↑ / ↓ |
 | 左 / 右 | `A` / `D` 或 ← / → |
-| 上 | `R` 或 PgUp |
-| 下 | PgDn |
+| 上 / 下 | `Q` / `E` 或 PgUp / PgDn |
 | **夹爪开/合** | **`F`** |
 | Roll ±（绕 X） | `I` / `K` 或 `7` / `8` |
 | Pitch ±（绕 Y） | `J` / `L` 或 `4` / `5` |
 | Yaw ±（绕 Z） | `U` / `O` 或 `1` / `2` |
-| 重置目标为当前正解 | 空格 |
+| 一键回站立默认位 | 空格 |
 | 帮助 | `H` |
-| 退出 | `Q` 或 `Esc` |
+| 退出 | `Esc` |
 
 腰 yaw 非零：`--q-waist <rad>`。
+
+性能：IK 使用解析雅可比 + 早停（约数 ms/次）；实机斜坡 `joint_ramp_rad_per_sec: 7`、下发 50Hz。仍卡顿时可加大 `goal_max_step_rad` 或 `--ik-mode position`。
+
+若某键方向仍不对，改 `teleop.forward/back/left/right/up/down` 六个单位向量（实机标定表见 yaml 注释）。
 
 ```bash
 python3 scripts/keyboard_teleop_demo.py --pos-step 0.005 --rot-step-deg 3 --ik-mode tool_z
@@ -84,14 +93,15 @@ python3 scripts/keyboard_teleop_demo.py --robot --no-fsm   # 跳过 FSM 检查�
 ## Python API
 
 ```python
-from arm_ik import RightArmIKSolver
-import numpy as np
+from arm_ik import RightArmIKSolver, load_standing_home_q
 
 solver = RightArmIKSolver.from_config("config/right_arm.yaml")
-res = solver.ik_position_orientation(solver.fk(np.zeros(5)), q_seed=np.zeros(5))
+q_home = load_standing_home_q("config/right_arm.yaml")
+T_home = solver.fk(q_home)
+res = solver.ik_position_orientation(T_home, q_seed=q_home)
 ```
 
-目标在 `base_link` 系时用 `solver.ik_in_base_frame(T, q_seed=..., q_waist=0.0)`。
+目标在 `base_link` 系时用 `solver.ik_in_base_frame(T, q_seed=q_home, q_waist=0.0)`。
 
 ## 检查 URDF
 
