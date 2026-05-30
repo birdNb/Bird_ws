@@ -24,7 +24,7 @@ hand_identify/
 └── hand_tracking/                 # 手部跟踪（底盘跟手）
     ├── start.sh
     ├── hand_perception.py         # ZED 感知库
-    ├── distance_hold.py           # 手势5 距离保持
+    ├── distance_hold.py           # 左右居中 + 手势5 距离保持
     └── locomotion.py              # 全轴跟手备份
 ```
 
@@ -48,7 +48,7 @@ cd ~/Bird_ws/hand_identify
 
 详见 [gesture_recognition/README.md](gesture_recognition/README.md)
 
-### 手部跟踪（手势 5 距离保持）
+### 手部跟踪（左右居中 + 手势 5 距离）
 
 ```bash
 cd ~/Bird_ws/hand_identify
@@ -64,4 +64,4 @@ cd ~/Bird_ws/hand_identify
 | 0 | 急停 / 按住 5s 退出 | — |
 | 1 | 撒娇扭腰 | — |
 | 2~4 | 抬手 / 挥双手 / 踢球 | — |
-| 5 | 识别显示 | 前后距离保持 → `/cmd_vel` |
+| 5 | 识别显示 | 左右转 + 手势5 前后距离 → `/cmd_vel` |

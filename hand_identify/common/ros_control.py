@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""FSM / 手柄仲裁。手势1撒娇见 waist_coquette_player；五指跟手见 5_finger_locomotion.py。"""
+"""FSM / 手柄仲裁。手势动作用 JOY_IDLE_SEC；手部跟踪用 HAND_TRACKING_JOY_IDLE_SEC。"""
 
 import math
 import threading
@@ -16,6 +16,7 @@ JOY_TOPIC = "/joy"
 FSM_STATE_TOPIC = "/fsm_state"
 JOY_ACTIVE_THRESH = 0.15
 JOY_IDLE_SEC = 3.0
+HAND_TRACKING_JOY_IDLE_SEC = 5.0
 # Xbox LT/RT 轴：松开≈+1.0，按下≈-1.0；不能按 |axis|>阈值 判为手柄占用
 JOY_TRIGGER_AXIS_IDS = (2, 5)
 JOY_TRIGGER_REST = 1.0
@@ -76,6 +77,10 @@ class JoyMonitor:
             if self._last_active_t <= 0:
                 return False
             return (time.time() - self._last_active_t) < self._idle_sec
+
+    def blocks_hand_tracking(self) -> bool:
+        """手部跟踪应停止发布 /cmd_vel（与 blocks_gesture_control 相同逻辑）。"""
+        return not self.allow_program_cmd()
 
     def blocks_gesture_control(self) -> bool:
         """为 True 时手势动作库应让路给手柄。"""
