@@ -94,8 +94,14 @@ THUMB_WRIST_RATIO = 1.02
 # ZED Mini 双目 V4L2 可选: 4416x1242@15 / 3840x1080@30 / 2560x720@60 / 1344x376@100
 # ZED SDK 单目: HD1080=1920x1080@30 (比 HD720 更清晰, 与 1280x720 左眼同量级且更高)
 TARGET_FPS = 30
-PROC_MAX_W = 960                # MediaPipe 输入最大宽度(全分辨率显示+深度对齐)
-USE_HD1080 = True               # True=HD1080, False=HD720
+PROC_MAX_W = 560                # MediaPipe 输入宽度（手势优先）
+PROC_MAX_W_FULL = 960           # --full-res-gui 时用
+USE_HD1080 = False              # 默认 HD720 更流畅
+LITE_DISPLAY = True             # 显示用降采样画面
+DRAW_LANDMARKS = False          # 关闭骨架绘制以减负
+DEPTH_EVERY_N = 4               # 无手时降频取点云
+FACE_EVERY_N = 2                # 隔帧做人脸推理
+LOG_INTERVAL_SEC = 0.25         # 终端日志刷新间隔
 
 
 def clamp(v, lo, hi):
@@ -333,8 +339,8 @@ def main():
         help="移动判定阈值(米), 默认 0.02",
     )
     parser.add_argument(
-        "--hd720", action="store_true",
-        help="使用 HD720 (默认 HD1080 更清晰)",
+        "--hd1080", action="store_true",
+        help="使用 HD1080 (默认 HD720 更流畅)",
     )
     parser.add_argument(
         "--proc-max-w", type=int, default=PROC_MAX_W,
@@ -376,13 +382,32 @@ def main():
         "--gesture-hold-sec", type=float, default=GESTURE_ACTION_HOLD_SEC,
         help="手势1~4稳定多少秒后触发 (默认 2)",
     )
+    parser.add_argument(
+        "--no-face-track", action="store_true",
+        help="禁用内嵌脸部跟踪(默认开启, 与 locate_face 同控制律)",
+    )
+    parser.add_argument(
+        "--fast", action="store_true",
+        help="性能模式: proc 480 + 脸 mesh 更降频",
+    )
+    parser.add_argument(
+        "--full-res-gui", action="store_true",
+        help="全分辨率 1080p 显示(更清晰但更卡)",
+    )
     args = parser.parse_args()
+    if args.full_res_gui:
+        args.proc_max_w = max(args.proc_max_w, PROC_MAX_W_FULL)
+    elif args.fast:
+        args.proc_max_w = min(args.proc_max_w, 480)
+    elif not args.no_face_track and args.proc_max_w > PROC_MAX_W:
+        args.proc_max_w = PROC_MAX_W
     if args.dist_min >= args.dist_max:
         raise SystemExit("--dist-min 必须小于 --dist-max")
     dist_min, dist_max = args.dist_min, args.dist_max
 
     install_handlers()
     motion = None
+    face_track = None
 
     if not args.no_gui and not os.environ.get("DISPLAY"):
         os.environ["DISPLAY"] = ":0"
@@ -395,7 +420,7 @@ def main():
     )
 
     zed = open_zed_camera(
-        use_hd1080=not args.hd720, dist_min=dist_min, dist_max=dist_max,
+        use_hd1080=args.hd1080, dist_min=dist_min, dist_max=dist_max,
     )
     proc_max_w = max(320, args.proc_max_w)
     image = sl.Mat()
@@ -421,6 +446,16 @@ def main():
         + f"系统启动成功！请将手放在相机前 {dist_min:.1f}~{dist_max:.1f} 米范围内。"
     )
     print(Fore.YELLOW + "按 ESC 退出, 'f' 切换全屏, Ctrl+C 强制退出。")
+    need_ros = (not args.preview and not args.no_actions) or not args.no_face_track
+    if need_ros:
+        import rospy
+        from gesture_motion import GestureMotionController
+        from face_tracker import IntegratedFaceTracker
+        from ros_control import FsmStateMonitor
+
+        if not rospy.core.is_initialized():
+            rospy.init_node("zed_gesture_recognition", anonymous=True)
+
     if args.preview:
         print(
             Fore.YELLOW
@@ -428,11 +463,8 @@ def main():
         )
     elif args.no_actions:
         print(Fore.YELLOW + "动作执行已禁用 (--no-actions)")
-    else:
-        import rospy
-        from gesture_motion import GestureMotionController
 
-        rospy.init_node("zed_gesture_recognition", anonymous=True)
+    if need_ros and not args.preview and not args.no_actions:
         motion = GestureMotionController(
             dry_run=False,
             no_actions=False,
@@ -444,19 +476,47 @@ def main():
         if is_requested():
             return
 
+    if need_ros and not args.no_face_track:
+        fsm = None
+        if motion is not None and motion.fsm is not None:
+            fsm = motion.fsm
+        elif not args.no_fsm:
+            fsm = FsmStateMonitor()
+        face_dry = args.preview or args.no_actions
+        mesh_iv = 5 if args.fast else 3
+        roi_iv = 18 if args.fast else 12
+        face_track = IntegratedFaceTracker(
+            fsm,
+            dry_run=face_dry,
+            mesh_interval=mesh_iv,
+            roi_interval=roi_iv,
+        )
+        face_track.start()
+
+    use_lite_display = (
+        LITE_DISPLAY
+        and not args.full_res_gui
+        and not args.no_gui
+    )
+    face_hint = "关" if args.no_face_track else "常开(共用ZED)"
     action_desc = "关" if args.no_actions else "1撒娇扭腰 2抬手 3挥双手 4踢球"
     mode_desc = "预览" if args.preview or args.no_actions else "执行"
+    disp_hint = "640p轻量" if use_lite_display else "1080p全分辨率"
     print(
         Fore.GREEN
-        + f"手势动作[{mode_desc}]: 0急停/按住"
+        + f"显示: {disp_hint} | 脸部跟踪: {face_hint} | 手势动作[{mode_desc}]: 0急停/按住"
         f"{args.zero_exit_sec:.0f}s退出 "
         + f"{action_desc}; 稳定{args.gesture_hold_sec:.0f}s后触发",
     )
 
     last_logged_gesture = -1
     last_logged_confirmed = -1
+    last_log_t = 0.0
     zero_handler = GestureZeroHandler(exit_hold_sec=args.zero_exit_sec)
     action_hold = GestureActionHold(hold_sec=args.gesture_hold_sec)
+    frame_idx = 0
+    had_hand_prev = False
+    draw_landmarks = DRAW_LANDMARKS and not args.no_gui
 
     try:
         while not is_requested():
@@ -466,8 +526,6 @@ def main():
                 continue
 
             zed.retrieve_image(image, sl.VIEW.LEFT)
-            zed.retrieve_measure(depth_map, sl.MEASURE.DEPTH)
-            zed.retrieve_measure(point_cloud, sl.MEASURE.XYZ)
 
             frame = image.get_data()
             if frame is None:
@@ -477,14 +535,35 @@ def main():
             img_w = image.get_width()
             img_h = image.get_height()
 
+            need_depth = had_hand_prev or (frame_idx % DEPTH_EVERY_N == 0)
+            if need_depth:
+                zed.retrieve_measure(depth_map, sl.MEASURE.DEPTH)
+                zed.retrieve_measure(point_cloud, sl.MEASURE.XYZ)
+
             proc_w, proc_h = compute_proc_size(img_w, img_h, proc_max_w)
             if (proc_w, proc_h) != (img_w, img_h):
-                proc_bgr = cv2.resize(frame, (proc_w, proc_h))
+                proc_bgr = cv2.resize(
+                    frame, (proc_w, proc_h), interpolation=cv2.INTER_AREA,
+                )
             else:
                 proc_bgr = frame
+            display_bgr = proc_bgr if use_lite_display else frame
             rgb_mp = cv2.cvtColor(proc_bgr, cv2.COLOR_BGR2RGB)
+            if not rgb_mp.flags["C_CONTIGUOUS"]:
+                rgb_mp = np.ascontiguousarray(rgb_mp)
             rgb_mp.flags.writeable = False
+
             results = hands.process(rgb_mp)
+
+            run_face = (
+                face_track is not None
+                and face_track.is_active
+                and (frame_idx % FACE_EVERY_N == 0)
+            )
+            if run_face:
+                face_track.process_shared_rgb(
+                    rgb_mp, display_bgr, proc_w, proc_h,
+                )
 
             gesture = -1
             raw_gesture = -1
@@ -494,22 +573,28 @@ def main():
             palm_center_px = None
             palm_pos = None
 
+            had_hand_prev = bool(results.multi_hand_landmarks)
+
             if results.multi_hand_landmarks:
                 handedness_list = results.multi_handedness or []
                 for idx, hand_lm in enumerate(results.multi_hand_landmarks):
-                    mp_drawing.draw_landmarks(
-                        frame, hand_lm, mp_hands.HAND_CONNECTIONS,
-                        mp_drawing.DrawingSpec(
-                            color=(121, 22, 76), thickness=2, circle_radius=4,
-                        ),
-                        mp_drawing.DrawingSpec(
-                            color=(250, 44, 250), thickness=2, circle_radius=2,
-                        ),
-                    )
+                    if draw_landmarks:
+                        mp_drawing.draw_landmarks(
+                            display_bgr, hand_lm, mp_hands.HAND_CONNECTIONS,
+                            mp_drawing.DrawingSpec(
+                                color=(121, 22, 76), thickness=2, circle_radius=4,
+                            ),
+                            mp_drawing.DrawingSpec(
+                                color=(250, 44, 250), thickness=2, circle_radius=2,
+                            ),
+                        )
 
-                    palm_pos, palm_center_px = calculate_palm_position(
-                        hand_lm, img_w, img_h, point_cloud,
-                    )
+                    if need_depth:
+                        palm_pos, palm_center_px = calculate_palm_position(
+                            hand_lm, img_w, img_h, point_cloud,
+                        )
+                    else:
+                        palm_pos, palm_center_px = None, None
 
                     if palm_pos is not None:
                         distance = palm_pos[2]
@@ -518,20 +603,29 @@ def main():
                         )
                         if palm_center_px is not None:
                             dot_col = (0, 255, 0) if in_range else (0, 165, 255)
+                            if use_lite_display:
+                                sx = proc_w / max(img_w, 1)
+                                sy = proc_h / max(img_h, 1)
+                                dot_px = (
+                                    int(palm_center_px[0] * sx),
+                                    int(palm_center_px[1] * sy),
+                                )
+                            else:
+                                dot_px = palm_center_px
                             cv2.circle(
-                                frame, palm_center_px, 8, dot_col, -1,
+                                display_bgr, dot_px, 8, dot_col, -1,
                             )
                         draw_overlay_log(
-                            frame, f"X: {palm_pos[0]:+.2f}m",
+                            display_bgr, f"X: {palm_pos[0]:+.2f}m",
                             (10, 30), (255, 0, 0),
                         )
                         draw_overlay_log(
-                            frame, f"Y: {palm_pos[1]:+.2f}m",
+                            display_bgr, f"Y: {palm_pos[1]:+.2f}m",
                             (10, 60), (0, 255, 0),
                         )
                         z_col = (0, 0, 255) if in_range else (0, 165, 255)
                         draw_overlay_log(
-                            frame, f"Z: {palm_pos[2]:+.2f}m",
+                            display_bgr, f"Z: {palm_pos[2]:+.2f}m",
                             (10, 90), z_col,
                         )
                         if not in_range:
@@ -574,57 +668,79 @@ def main():
                 log_gesture_zero_exit(zero_hold)
                 break
 
+            disp_h = display_bgr.shape[0]
             draw_overlay_log(
-                frame,
+                display_bgr,
                 f"Range: {dist_min:.1f}~{dist_max:.1f}m",
-                (10, img_h - 20), (200, 200, 200), font_scale=0.5, thickness=1,
+                (10, disp_h - 20), (200, 200, 200), font_scale=0.5, thickness=1,
             )
 
             if zero_estop:
                 remain = zero_handler.hold_remaining(zero_hold)
                 draw_overlay_log(
-                    frame,
+                    display_bgr,
                     f"G0 {GESTURE_ZERO_LABEL} exit {remain:.1f}s",
                     (10, 130), (0, 0, 255), font_scale=0.9, thickness=2,
                 )
+            elif face_track is not None and face_track.is_active:
+                ov = face_track.overlay
+                if ov is not None and ov.has_face:
+                    yaw_d, pitch_d = face_track.get_neck_target_deg()
+                    face_txt = f"FACE yaw{yaw_d:+.0f} pitch{pitch_d:+.0f}"
+                    face_col = (0, 255, 128)
+                else:
+                    face_txt = "FACE search..."
+                    face_col = (0, 200, 255)
+                draw_overlay_log(
+                    display_bgr, face_txt, (10, 130), face_col,
+                    font_scale=0.75, thickness=2,
+                )
+                if run_face and ov is not None and ov.has_face:
+                    face_track.draw_overlay(display_bgr)
             elif gesture >= 0:
                 col = GESTURE_COLORS_BGR[min(gesture, 5)]
                 gtext = f"Gesture: {gesture}"
                 if raw_gesture >= 0 and raw_gesture != gesture:
                     gtext += f" (raw {raw_gesture})"
                 draw_overlay_log(
-                    frame, gtext, (10, 130),
+                    display_bgr, gtext, (10, 130),
                     col, font_scale=1.0, thickness=3,
                 )
                 dcol = (0, 255, 0) if direction == "静止" else (0, 255, 255)
                 draw_overlay_log(
-                    frame, f"Dir: {direction}", (10, 170), dcol,
+                    display_bgr, f"Dir: {direction}", (10, 170), dcol,
                 )
             elif results.multi_hand_landmarks and not in_range:
                 draw_overlay_log(
-                    frame, direction, (10, 130), (0, 165, 255),
+                    display_bgr, direction, (10, 130), (0, 165, 255),
                     font_scale=0.8, thickness=2,
                 )
             else:
                 draw_overlay_log(
-                    frame, "No hand", (10, 130), (128, 128, 128),
+                    display_bgr, "No hand", (10, 130), (128, 128, 128),
                 )
 
             if gesture == GESTURE_STOP:
                 action_hold.reset()
+                if motion is not None:
+                    motion.clear_pending_fire()
                 confirmed = -1
             else:
                 confirmed = action_hold.update(
                     gesture, has_hand=has_hand, in_range=in_range,
                 )
-            if confirmed >= 0 and confirmed != last_logged_confirmed:
+
+            if confirmed < 0 and motion is not None:
+                motion.clear_pending_fire()
+
+            if confirmed >= 0:
                 if motion is not None:
                     motion.on_confirmed(
                         confirmed,
                         has_hand=has_hand,
                         in_range=in_range,
                     )
-                else:
+                elif confirmed != last_logged_confirmed:
                     log_gesture_action_edge(
                         confirmed,
                         last_logged_confirmed,
@@ -632,16 +748,34 @@ def main():
                         has_hand=has_hand,
                         preview_only=True,
                     )
+
             last_logged_gesture = gesture
             last_logged_confirmed = confirmed if confirmed >= 0 else -1
 
-            print_terminal_log(
-                gesture, distance, direction,
-                in_range=in_range, has_hand=has_hand,
+            face_track_on = (
+                face_track is not None and face_track.is_active
             )
+            now_log = time.time()
+            if now_log - last_log_t >= LOG_INTERVAL_SEC:
+                last_log_t = now_log
+                hold_pct = ""
+                if action_hold.pending_gesture >= 0:
+                    hold_pct = f" 稳{action_hold.progress * 100:.0f}%"
+                print_terminal_log(
+                    gesture, distance, direction,
+                    in_range=in_range, has_hand=has_hand,
+                    face_track_on=face_track_on,
+                )
+                if hold_pct and gesture in (1, 2, 3, 4):
+                    emit_status_line(
+                        f"{Fore.CYAN}[{time.strftime('%H:%M:%S')}] "
+                        f"{Fore.WHITE}手势{gesture}确认中{hold_pct}",
+                    )
+
+            frame_idx += 1
 
             if not args.no_gui:
-                cv2.imshow(WINDOW_NAME, frame)
+                cv2.imshow(WINDOW_NAME, display_bgr)
                 key = cv2.waitKey(1) & 0xFF
                 if key == 27:
                     break
@@ -660,7 +794,13 @@ def main():
 
     finally:
         fast_exit = is_requested()
+        if face_track is not None:
+            try:
+                face_track.shutdown()
+            except Exception:
+                pass
         if motion is not None:
+            motion.clear_pending_fire()
             motion.shutdown(fast=fast_exit)
         rospy_shutdown_if_init()
         try:

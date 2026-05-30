@@ -15,9 +15,10 @@ hand_identify/
 │   ├── ros_control.py             # FSM / 手柄仲裁
 │   ├── paths.py                   # 模块路径
 │   └── ros_env.sh                 # source ROS 环境
-├── gesture_recognition/           # 手势识别 + 动作触发
+├── gesture_recognition/           # 手势识别 + 脸跟踪 + 动作
 │   ├── start.sh
 │   ├── zed_gesture_recognition.py
+│   ├── face_tracker.py            # locate_face 同律，共用 ZED
 │   ├── gesture_motion.py
 │   └── motion/                    # /joy_msg、撒娇扭腰
 └── hand_tracking/                 # 手部跟踪（底盘跟手）
@@ -36,7 +37,7 @@ pip install pyzed   # 安装 ZED SDK 后
 
 ## 一键启动
 
-### 手势识别（0~5 + 动作 1~4）
+### 手势识别（0~5 + 脸跟踪 + 动作 1~4）
 
 ```bash
 cd ~/Bird_ws/hand_identify

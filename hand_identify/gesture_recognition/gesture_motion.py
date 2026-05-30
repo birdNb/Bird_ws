@@ -19,6 +19,7 @@ require_sim2real_msg()
 import rospy
 
 from gesture_actions import (
+    ConfirmedActionGate,
     GESTURE_ACTION_SPECS,
     GESTURE_HEAD_NOD,
     GESTURE_STOP,
@@ -46,6 +47,7 @@ class GestureMotionController:
         self._joy = None if no_joy else JoyMonitor()
         self._action_player: Optional[GestureActionPlayer] = None
         self._coquette_player: Optional[WaistCoquettePlayer] = None
+        self._fire_gate = ConfirmedActionGate()
 
         if not no_actions:
             self._action_player = GestureActionPlayer(dry_run=dry_run)
@@ -61,6 +63,10 @@ class GestureMotionController:
             "跳过" if no_fsm else "等待5",
             "无" if no_joy else f"空闲{JOY_IDLE_SEC:.0f}s",
         )
+
+    @property
+    def fsm(self) -> Optional[FsmStateMonitor]:
+        return self._fsm
 
     def wait_fsm(
         self,
@@ -102,12 +108,15 @@ class GestureMotionController:
             self._coquette_player.abort()
 
     def on_confirmed(self, gesture: int, *, has_hand: bool, in_range: bool) -> bool:
-        """已稳定 hold 的手势触发一次动作。返回本帧是否新触发。"""
+        """已稳定 hold 的手势触发动作；未成功则下帧重试。返回本帧是否新触发。"""
         if gesture == GESTURE_STOP:
+            return False
+        if not self._fire_gate.need_fire(gesture):
             return False
 
         joy_blocking = self.joy_blocking
         fsm_ok = self.fsm_ok
+        allow_retry = True
 
         if self.poll_joy_takeover():
             busy = (
@@ -122,10 +131,6 @@ class GestureMotionController:
             rospy.loginfo("[gesture_motion] 手柄接管，已停手势动作")
 
         if joy_blocking:
-            if self._action_player is not None and self._action_player.is_busy:
-                self._action_player.abort()
-            if self._coquette_player is not None and self._coquette_player.is_busy:
-                self._coquette_player.abort()
             return False
 
         action_busy = (
@@ -144,6 +149,7 @@ class GestureMotionController:
                 joy_blocking=joy_blocking,
                 fsm_ok=fsm_ok,
                 other_busy=action_busy,
+                allow_retry=allow_retry,
             )
         elif (
             self._action_player is not None
@@ -156,10 +162,17 @@ class GestureMotionController:
                 in_range=in_range,
                 joy_blocking=joy_blocking,
                 fsm_ok=fsm_ok,
+                allow_retry=allow_retry,
             )
+        if fired:
+            self._fire_gate.mark_fired(gesture)
         return fired
 
+    def clear_pending_fire(self) -> None:
+        self._fire_gate.clear()
+
     def shutdown(self, *, fast: bool = False) -> None:
+        self._fire_gate.clear()
         if self._action_player is not None:
             self._action_player.abort(fast=fast)
         if self._coquette_player is not None:

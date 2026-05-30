@@ -202,9 +202,11 @@ class GestureActionPlayer:
         in_range: bool,
         joy_blocking: bool = False,
         fsm_ok: bool = True,
+        allow_retry: bool = False,
     ) -> bool:
         """
         检测手势上升沿并触发动作。返回本帧是否新触发。
+        allow_retry: 稳定确认后若上次因 busy/fsm 未触发，可重试。
         """
         if gesture not in GESTURE_ACTION_SPECS:
             self._last_gesture = -1
@@ -219,7 +221,7 @@ class GestureActionPlayer:
             return False
         if gesture == 0:
             return False
-        if gesture == prev:
+        if gesture == prev and not allow_retry:
             return False
         if time.time() - self._last_fire_t < self._cooldown_sec:
             return False

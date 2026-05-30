@@ -1,6 +1,6 @@
 # gesture_recognition — 手势识别与动作
 
-ZED + MediaPipe 识别手势 **0~5**、手掌 3D 位置与移动方向；手势 **1~4** 稳定 2s 后触发机器人动作。
+ZED + MediaPipe 识别手势 **0~5**、手掌 3D 位置与移动方向；**脸部跟踪**与 `locate_face/locate_face.py` 同控制律（共用相机 RGB，常开）；手势 **1~4** 稳定 2s 后触发机器人动作（手势 1 仅扭腰，不抢脖子）。
 
 ## 一键启动
 
@@ -20,8 +20,14 @@ chmod +x start.sh
 
 | 参数 | 说明 |
 |------|------|
-| `--preview` | 仅识别与日志，不初始化 ROS |
+| `--preview` | 仅识别与日志，不执行手势动作 |
 | `--no-gui` | 无窗口 |
+| `--no-face-track` | 禁用脸部跟踪 |
+| `--fast` | 更激进降频(proc 480) |
+| `--hd1080` | 使用 1080p 采集（默认 720p） |
+
+默认已优化：手势优先、隔帧人脸、动作失败自动重试、丢手 0.45s 内不计入复位。
+| `--full-res-gui` | 1080p 全分辨率显示(更卡) |
 | `--no-coquette` | 禁用手势 1 撒娇扭腰 |
 | `--no-actions` | 禁用全部动作 |
 | `--no-fsm` | 不等待 FSM=5 |
@@ -35,6 +41,7 @@ chmod +x start.sh
 |------|------|
 | `start.sh` | 一键启动 |
 | `zed_gesture_recognition.py` | 主程序 |
+| `face_tracker.py` | 内嵌脸跟踪（locate_face 控制律） |
 | `gesture_motion.py` | ROS 动作调度 |
 | `motion/hand_action_library.py` | 手势 2~4 → `/joy_msg` |
 | `motion/waist_coquette_*.py` | 手势 1 撒娇扭腰 |

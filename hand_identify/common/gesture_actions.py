@@ -31,6 +31,8 @@ GESTURE_ACTION_LABELS: Dict[int, str] = {
 }
 
 GESTURE_ACTION_HOLD_SEC = 2.0
+# 短暂丢手/出距时不立刻清零稳定计时（减轻卡顿导致的确认失败）
+HAND_LOST_GRACE_SEC = 0.45
 
 TERM_LINE_WIDTH = 96
 
@@ -162,17 +164,49 @@ def log_gesture_action_edge(
     print(f"{prefix}{line}", flush=True)
 
 
-class GestureActionHold:
-    """手势 2~4 需连续稳定 hold_sec 后才输出，供动作库触发。"""
+class ConfirmedActionGate:
+    """稳定确认后允许重试触发，直到动作真正启动。"""
 
-    def __init__(self, hold_sec: float = GESTURE_ACTION_HOLD_SEC):
+    def __init__(self):
+        self._episode = -1
+        self._fired = False
+
+    def clear(self) -> None:
+        self._episode = -1
+        self._fired = False
+
+    def need_fire(self, gesture: int) -> bool:
+        if gesture < 0:
+            self.clear()
+            return False
+        if gesture != self._episode:
+            self._episode = gesture
+            self._fired = False
+        return not self._fired
+
+    def mark_fired(self, gesture: int) -> None:
+        if gesture == self._episode:
+            self._fired = True
+
+
+class GestureActionHold:
+    """手势 1~4 需连续稳定 hold_sec 后才输出，供动作库触发。"""
+
+    def __init__(
+        self,
+        hold_sec: float = GESTURE_ACTION_HOLD_SEC,
+        lost_grace_sec: float = HAND_LOST_GRACE_SEC,
+    ):
         self.hold_sec = max(0.1, float(hold_sec))
+        self._lost_grace = max(0.0, float(lost_grace_sec))
         self._candidate = -1
         self._since = 0.0
+        self._lost_since: Optional[float] = None
 
     def reset(self):
         self._candidate = -1
         self._since = 0.0
+        self._lost_since = None
 
     @property
     def pending_gesture(self) -> int:
@@ -190,6 +224,16 @@ class GestureActionHold:
             return 0.0
         return max(0.0, self.hold_sec - (time.time() - self._since))
 
+    def _tracking_lost(self, has_hand: bool, in_range: bool, now: float) -> bool:
+        if has_hand and in_range:
+            self._lost_since = None
+            return False
+        if self._lost_grace <= 0:
+            return True
+        if self._lost_since is None:
+            self._lost_since = now
+        return (now - self._lost_since) >= self._lost_grace
+
     def update(
         self,
         gesture: int,
@@ -198,17 +242,17 @@ class GestureActionHold:
         in_range: bool,
     ) -> int:
         """
-        返回已确认的手势编号(2~4)，未满足稳定时长则返回 -1。
-        确认后会持续返回同一手势，直至手势变化或丢手。
+        返回已确认的手势(1~4)，未满足稳定时长则返回 -1。
+        确认后持续返回同一手势，直至手势变化或丢手超过 grace。
         """
-        if not has_hand or not in_range:
+        now = time.time()
+        if self._tracking_lost(has_hand, in_range, now):
             self.reset()
             return -1
         if gesture not in GESTURE_HOLD_GESTURES:
             self.reset()
             return -1
 
-        now = time.time()
         if gesture != self._candidate:
             self._candidate = gesture
             self._since = now

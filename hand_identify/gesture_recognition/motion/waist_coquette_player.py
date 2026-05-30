@@ -71,6 +71,7 @@ class WaistCoquettePlayer:
         joy_blocking: bool = False,
         fsm_ok: bool = True,
         other_busy: bool = False,
+        allow_retry: bool = False,
     ) -> bool:
         if gesture != 1:
             self._last_gesture = -1
@@ -83,7 +84,7 @@ class WaistCoquettePlayer:
             return False
         if not has_hand or not in_range:
             return False
-        if gesture == prev:
+        if gesture == prev and not allow_retry:
             return False
         if time.time() - self._last_fire_t < COQUETTE_COOLDOWN_SEC:
             return False
