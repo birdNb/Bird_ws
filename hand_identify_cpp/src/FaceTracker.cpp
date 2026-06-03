@@ -305,8 +305,9 @@ void FaceTracker::publishNeck(float yaw_rad, float pitch_rad) {
 void FaceTracker::publisherLoop() {
     ros::Rate rate(NECK_PUBLISH_RATE_HZ);
     while (running_.load() && ros::ok()) {
-        float y = 0.0f, p = 0.0f;
-        {
+        float y = 0.0f;
+        float p = 0.0f;
+        if (enabled_.load()) {
             std::lock_guard<std::mutex> lk(target_mu_);
             y = target_yaw_;
             p = target_pitch_;

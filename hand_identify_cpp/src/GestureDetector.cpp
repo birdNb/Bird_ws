@@ -31,6 +31,7 @@ bool GestureDetector::detectMaxHand(const cv::Mat& frame, HandDetectResult& out)
         out.has_landmarks = true;
     }
     out.dx_norm = mp.dx_norm;
+    out.dy_norm = mp.dy_norm;
     out.distance_m = mp.distance_m;
     out.in_range = mp.in_range;
     out.palm_or_back_facing = true;

@@ -5,6 +5,7 @@
 #include "FaceTracker.h"
 #include "GestureDecision.h"
 #include "GestureDetector.h"
+#include "HandFollowController.h"
 #include "HandTracker.h"
 #include "JoyMonitor.h"
 #include "TermDisplay.h"
@@ -340,6 +341,57 @@ static void processGestureActions(
     }
 }
 
+static void drawG5HoldHud(cv::Mat& frame, const HandFollowController& follow) {
+    if (!follow.holdPending()) {
+        return;
+    }
+    drawHud(
+        frame,
+        "G5 hold " + std::to_string(follow.holdProgressPct()) + "% / "
+            + std::to_string(GESTURE_FOLLOW_HOLD_MS / 1000) + "s",
+        gestureColorBgr(GESTURE_5),
+        240,
+        0.75,
+        2);
+}
+
+static void drawHandFollowHud(
+    cv::Mat& frame,
+    const HandFollowController& follow,
+    const HandTracker& tracker,
+    const JoyMonitor& joy,
+    const AppConfig& cfg,
+    int y_base = 110) {
+    if (!follow.g5Confirmed()) {
+        return;
+    }
+    drawHud(
+        frame,
+        "htrack " + follow.statusMode(),
+        cv::Scalar(0, 255, 128),
+        y_base,
+        0.65,
+        2);
+    if (!cfg.no_joy && joy.blocksHandTracking()) {
+        drawHud(
+            frame,
+            "joy " + std::to_string((joy.idleRemainingMs() + 999) / 1000) + "s",
+            cv::Scalar(0, 165, 255),
+            y_base + 32,
+            0.6,
+            2);
+    } else {
+        drawHud(
+            frame,
+            "x=" + std::to_string(tracker.lastLinearX())
+                + " rz=" + std::to_string(tracker.lastAngularZ()),
+            cv::Scalar(255, 255, 255),
+            y_base + 32,
+            0.55,
+            2);
+    }
+}
+
 static void drawGestureHoldHud(
     cv::Mat& frame,
     int gesture,
@@ -382,6 +434,7 @@ int main(int argc, char** argv) {
     HandTracker hand_tracker(nh);
     JoyMonitor joy_monitor(nh);
     Controller controller(nh, face_tracker, hand_tracker);
+    HandFollowController hand_follow;
 
     cv::Mat frame;
     int hold_candidate = GESTURE_NONE;
@@ -401,13 +454,17 @@ int main(int argc, char** argv) {
             ROS_INFO("gesture preview only (add --actions to send /joy_msg)");
         }
     } else if (cfg.mode == RunMode::HandFollow) {
-        ROS_INFO("hand follow only -> %s", CMD_VEL_TOPIC);
+        ROS_INFO(
+            "[htrack] distance_hold -> %s | G5即跟手 Z=%.2fm |X|=%.1f |Z|=%.1f",
+            CMD_VEL_TOPIC,
+            TARGET_DISTANCE_M,
+            LINEAR_X_MAG,
+            ANGULAR_Z_MAG);
     } else if (cfg.mode == RunMode::GestureAction) {
         ROS_INFO(
-            "gesture + face + actions -> %s / %s (hold %dms, palm or back)",
-            JOY_MSG_TOPIC,
-            ABSOLUTE_TOPIC,
-            GESTURE_HOLD_MS);
+            "gesture + face + actions | G5 hold %.0fs then distance_hold Z=%.2fm",
+            GESTURE_FOLLOW_HOLD_MS / 1000.0f,
+            TARGET_DISTANCE_M);
     } else if (cfg.mode == RunMode::Coquette) {
         ROS_INFO("coquette only: gesture 1 hold %dms", GESTURE_HOLD_MS);
     } else {
@@ -545,22 +602,21 @@ int main(int argc, char** argv) {
                 break;
 
             case RunMode::HandFollow:
-                face_tracker.setEnabled(false);
-                face_tracker.stopNeck();
                 controller.abortActions();
-                if (decision.follow_ready) {
-                    hand_tracker.followMaxHand(frame, hand);
-                    drawHud(frame, "HAND follow", cv::Scalar(255, 0, 255), 110);
-                } else {
-                    hand_tracker.stopChassis();
-                    drawHud(frame, "wait palm", cv::Scalar(128, 128, 128), 110);
-                }
+                drawGestureOverlay(frame, hand);
+                hand_follow.update(
+                    frame, hand_tracker, face_tracker, joy_monitor, cfg, decision, hand, false);
+                drawG5HoldHud(frame, hand_follow);
+                drawHandFollowHud(frame, hand_follow, hand_tracker, joy_monitor, cfg);
                 break;
 
-            case RunMode::GestureAction:
-                runCompanionFaceTrack(
-                    face_tracker, frame, use_gui, sched_tick, companion_face);
-                hand_tracker.stopChassis();
+            case RunMode::GestureAction: {
+                if (hand_follow.shouldPauseCompanionFace(companion_face)) {
+                    HandFollowController::pauseCompanionFace(face_tracker);
+                } else {
+                    runCompanionFaceTrack(
+                        face_tracker, frame, use_gui, sched_tick, companion_face);
+                }
                 drawGestureOverlay(frame, hand);
                 if (gesture_term_status) {
                     pollGestureTerminalStatus(
@@ -571,10 +627,20 @@ int main(int argc, char** argv) {
                         last_gesture_term_ms,
                         last_gesture_ros_log_ms);
                 }
-                drawGestureHoldHud(frame, gesture, hold_candidate, hold_since_ms);
-                processGestureActions(
-                    controller, decision, hand, hold_candidate, hold_since_ms);
+                hand_follow.update(
+                    frame, hand_tracker, face_tracker, joy_monitor, cfg, decision, hand,
+                    companion_face);
+                if (!hand_follow.g5Confirmed()) {
+                    drawGestureHoldHud(frame, gesture, hold_candidate, hold_since_ms);
+                    processGestureActions(
+                        controller, decision, hand, hold_candidate, hold_since_ms);
+                } else {
+                    controller.abortActions();
+                }
+                drawG5HoldHud(frame, hand_follow);
+                drawHandFollowHud(frame, hand_follow, hand_tracker, joy_monitor, cfg, 240);
                 break;
+            }
 
             case RunMode::Coquette:
                 face_tracker.setEnabled(false);
@@ -594,21 +660,26 @@ int main(int argc, char** argv) {
 
             case RunMode::All:
             default: {
-                if (decision.follow_ready) {
-                    face_tracker.setEnabled(false);
-                    face_tracker.stopNeck();
-                    hand_tracker.followMaxHand(frame, hand);
-                    controller.abortActions();
+                if (hand_follow.shouldPauseCompanionFace(true)) {
+                    HandFollowController::pauseCompanionFace(face_tracker);
                 } else if (decision.companion_face_phase) {
                     face_tracker.setEnabled(true);
-                    const bool run_face =
-                        shouldRunFaceDetectThisFrame(sched_tick, true);
-                    face_tracker.trackAndControlNeck(frame, run_face);
+                    face_tracker.trackAndControlNeck(
+                        frame, shouldRunFaceDetectThisFrame(sched_tick, true));
+                }
+                hand_follow.update(
+                    frame, hand_tracker, face_tracker, joy_monitor, cfg, decision, hand, true);
+                if (hand_follow.g5Confirmed()) {
+                    controller.abortActions();
+                    drawHandFollowHud(frame, hand_follow, hand_tracker, joy_monitor, cfg, 110);
+                } else if (decision.companion_face_phase) {
                     hand_tracker.stopChassis();
+                    drawG5HoldHud(frame, hand_follow);
                     if (gesture == GESTURE_0) {
                         controller.abortActions();
+                        hand_follow.reset(hand_tracker, &face_tracker);
                         drawHud(frame, "G0 estop", cv::Scalar(0, 0, 255), 110);
-                    } else {
+                    } else if (!hand_follow.holdPending()) {
                         const int confirmed = updateGestureHold(
                             gesture, hand.has_hand, hand.in_range, hold_candidate, hold_since_ms);
                         if (confirmed >= GESTURE_1 && !controller.isActionBusy()) {
@@ -616,9 +687,6 @@ int main(int argc, char** argv) {
                         }
                     }
                 } else {
-                    face_tracker.setEnabled(true);
-                    face_tracker.trackAndControlNeck(
-                        frame, shouldRunFaceDetectThisFrame(sched_tick, true));
                     hand_tracker.stopChassis();
                     controller.abortActions();
                 }

@@ -8,6 +8,8 @@ class JoyMonitor {
 public:
     explicit JoyMonitor(ros::NodeHandle& nh);
     bool allowProgramControl() const;
+    bool blocksHandTracking() const { return !allowProgramControl(); }
+    bool pollTakeoverEdge();
     bool isActiveNow() const;
     long long idleRemainingMs() const;
     void resetTimer();
@@ -20,4 +22,5 @@ private:
     ros::Subscriber joy_sub_;
     mutable std::mutex mu_;
     long long last_joy_ms_ = 0;
+    bool was_blocking_ = false;
 };

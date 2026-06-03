@@ -30,7 +30,6 @@ constexpr int FACE_EVERY_N = FACE_DETECT_EVERY_N;
 constexpr int GESTURE_IPC_MAX_W = 480;
 constexpr int FACE_IPC_MAX_W = 480;
 constexpr int GESTURE_HOLD_MS = 2000;
-constexpr int JOY_IDLE_MS = 5000;
 constexpr float JOY_ACTIVE_THRESH = 0.15f;
 constexpr int JOY_TRIGGER_AXIS_LT = 2;
 constexpr int JOY_TRIGGER_AXIS_RT = 5;
@@ -75,12 +74,18 @@ constexpr int NECK_PUBLISH_RATE_HZ = 50;
 constexpr float NO_FACE_RETURN_HOME_SEC = 1.0f;
 constexpr float RETURN_HOME_RATE_DEG_PER_SEC = 45.0f;
 
-// ----- 五指底盘跟随 (distance_hold.py) -----
-constexpr float LATERAL_DEADBAND_NORM = 0.20f;
-constexpr float ANGULAR_Z_MAG = 1.5f;
-constexpr float LINEAR_X_MAG = 0.5f;
+// ----- 五指跟手 (distance_hold.py) -----
 constexpr float TARGET_DISTANCE_M = 0.50f;
 constexpr float DIST_DEADBAND_M = 0.10f;
+constexpr float LATERAL_DEADBAND_NORM = 0.20f;
+constexpr float LINEAR_X_MAG = 0.5f;
+constexpr float ANGULAR_Z_MAG = 1.5f;
+constexpr float HAND_TRACK_LOG_HZ = 5.0f;
+constexpr int PALM_LOST_RESET_MS = 600;
+constexpr int GESTURE_FOLLOW_HOLD_MS = 5000;
+constexpr int GESTURE_FOLLOW_LOST_MS = 8000;
+constexpr int HAND_TRACKING_JOY_IDLE_MS = 5000;
+constexpr int JOY_IDLE_MS = HAND_TRACKING_JOY_IDLE_MS;
 
 constexpr const char* ABSOLUTE_TOPIC = "/pi_plus_absolute";
 constexpr const char* CMD_VEL_TOPIC = "/cmd_vel";
@@ -121,6 +126,7 @@ struct HandDetectResult {
     bool palm_or_back_facing = true;
     float distance_m = 0.0f;
     float dx_norm = 0.0f;
+    float dy_norm = 0.0f;
     std::vector<cv::Point> landmarks;
 };
 

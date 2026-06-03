@@ -52,3 +52,10 @@ void JoyMonitor::resetTimer() {
     std::lock_guard<std::mutex> lk(mu_);
     last_joy_ms_ = getCurrentTimeMs();
 }
+
+bool JoyMonitor::pollTakeoverEdge() {
+    const bool blocking = blocksHandTracking();
+    const bool edge = blocking && !was_blocking_;
+    was_blocking_ = blocking;
+    return edge;
+}
