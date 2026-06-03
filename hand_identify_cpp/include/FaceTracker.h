@@ -30,7 +30,7 @@ public:
     ~FaceTracker();
     void setEnabled(bool on);
     bool isEnabled() const { return enabled_.load(); }
-    void trackAndControlNeck(const cv::Mat& frame);
+    void trackAndControlNeck(const cv::Mat& frame, bool run_detect = true);
     FaceTelemetry getTelemetry() const;
     void stopNeck();
     void shutdown();
@@ -49,12 +49,15 @@ private:
         float dy_n,
         const cv::Rect& face_disp,
         float score,
-        long long now_ms);
+        long long now_ms,
+        float ema_alpha = TARGET_EMA_ALPHA);
     void applyNoFace(long long now_ms, float dt);
 
     void publisherLoop();
     void publishNeck(float yaw_rad, float pitch_rad);
-    void updateTargetFromError(float dx_n, float dy_n);
+    void updateTargetFromError(float dx_n, float dy_n, float ema_alpha = TARGET_EMA_ALPHA);
+    float predictHoldDx(float age_sec) const;
+    float predictHoldDy(float age_sec) const;
     bool runYuNet(
         const cv::Mat& proc_bgr,
         const cv::Rect& roi,
@@ -93,8 +96,17 @@ private:
     float ctrl_yaw_ = 0.0f;
     float ctrl_pitch_ = 0.0f;
     long long last_face_ms_ = 0;
+    long long last_track_ms_ = 0;
     cv::Rect last_face_bbox_;
     bool has_last_bbox_ = false;
+    bool hold_face_valid_ = false;
+    float hold_dx_norm_ = 0.0f;
+    float hold_dy_norm_ = 0.0f;
+    float prev_hold_dx_norm_ = 0.0f;
+    float prev_hold_dy_norm_ = 0.0f;
+    float hold_vx_norm_ = 0.0f;
+    float hold_vy_norm_ = 0.0f;
+    long long last_detect_ms_ = 0;
     mutable std::mutex telem_mu_;
     FaceTelemetry telem_;
 };

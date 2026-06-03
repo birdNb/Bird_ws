@@ -9,7 +9,7 @@ import mediapipe as mp
 DETECT_CONFIDENCE = 0.4
 TRACK_CONFIDENCE = 0.5
 ROI_PAD_RATIO = 0.30
-PROC_MAX_W = 640
+PROC_MAX_W = 480
 
 
 def _compute_proc_size(src_w, src_h, max_w):

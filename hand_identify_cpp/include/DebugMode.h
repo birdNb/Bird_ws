@@ -15,7 +15,9 @@ enum class RunMode {
 struct AppConfig {
     RunMode mode = RunMode::All;
     bool no_joy = false;   // 跳过手柄 5s 仲裁
-    bool no_gui = false;
+    bool no_gui = true;  // 默认无窗口，与 zed --no-gui 一致；用 --gui 开启
+    /** --actions：在 --gesture 预览下也下发 /joy_msg 动作（等同 --gesture_action） */
+    bool enable_gesture_actions = false;
 };
 
 /** 解析 argv；未知参数返回 false 并写入 err */

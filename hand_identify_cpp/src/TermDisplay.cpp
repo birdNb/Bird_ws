@@ -41,6 +41,94 @@ std::string TermStatusLine::formatFaceTrack(
     return std::string(buf);
 }
 
+namespace {
+
+const char* kAnsiYellow = "\033[33m";
+const char* kAnsiReset = "\033[0m";
+
+const char* gestureActionHint(int gesture) {
+    switch (gesture) {
+        case 0: return "estop/exit";
+        case 1: return "coquette sway";
+        case 2: return "hello";
+        case 3: return "cheer";
+        case 4: return "kick";
+        case 5: return "hand follow";
+        default: return "";
+    }
+}
+
+}  // namespace
+
+std::string TermStatusLine::formatGesturePreview(
+    bool has_hand,
+    int gesture,
+    int raw_gesture,
+    bool in_range,
+    float distance_m,
+    float fps,
+    float stable_pct,
+    int stable_hits,
+    int stable_window) {
+    char buf[320];
+    if (!has_hand || gesture < 0) {
+        std::snprintf(
+            buf,
+            sizeof(buf),
+            "%s[gesture]%s  no hand  FPS=%5.1f  stable=%3.0f%%(%d/%d)%s",
+            kAnsiYellow,
+            kAnsiYellow,
+            fps,
+            stable_pct,
+            stable_hits,
+            stable_window,
+            kAnsiReset);
+        return std::string(buf);
+    }
+
+    const char* hint = gestureActionHint(gesture);
+    char raw_part[32] = "";
+    if (raw_gesture >= 0 && raw_gesture != gesture) {
+        std::snprintf(raw_part, sizeof(raw_part), " raw=%d", raw_gesture);
+    }
+    const bool show_dist = (gesture == 5);
+    const char* range_tag = show_dist ? (in_range ? "ok" : "far") : "n/a";
+    if (show_dist) {
+        std::snprintf(
+            buf,
+            sizeof(buf),
+            "%s[gesture]%s  G:%d%s  dist:%.2fm  range:%s  | %s  FPS=%5.1f  stable=%3.0f%%(%d/%d)%s",
+            kAnsiYellow,
+            kAnsiYellow,
+            gesture,
+            raw_part,
+            distance_m,
+            range_tag,
+            hint,
+            fps,
+            stable_pct,
+            stable_hits,
+            stable_window,
+            kAnsiReset);
+    } else {
+        std::snprintf(
+            buf,
+            sizeof(buf),
+            "%s[gesture]%s  G:%d%s  | %s  FPS=%5.1f  stable=%3.0f%%(%d/%d)%s",
+            kAnsiYellow,
+            kAnsiYellow,
+            gesture,
+            raw_part,
+            hint,
+            fps,
+            stable_pct,
+            stable_hits,
+            stable_window,
+            kAnsiReset);
+    }
+    return std::string(buf);
+}
+
 void FpsCounter::tick() {
     const long long now = getCurrentTimeMs();
     if (t0_ms_ <= 0) {
@@ -77,4 +165,23 @@ void FaceDetectRate::tick(bool detected) {
 float FaceDetectRate::percent() const {
     if (total_ <= 0) return 0.0f;
     return 100.0f * static_cast<float>(hits_) / static_cast<float>(total_);
+}
+
+void GestureStableRate::tick(bool stable) {
+    if (filled_ < kWindow) {
+        ++filled_;
+    }
+    if (buf_[idx_] != 0) {
+        --hits_;
+    }
+    buf_[idx_] = stable ? 1 : 0;
+    if (stable) {
+        ++hits_;
+    }
+    idx_ = (idx_ + 1) % kWindow;
+}
+
+float GestureStableRate::percent() const {
+    if (filled_ <= 0) return 0.0f;
+    return 100.0f * static_cast<float>(hits_) / static_cast<float>(filled_);
 }

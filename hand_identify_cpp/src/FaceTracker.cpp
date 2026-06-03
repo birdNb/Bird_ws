@@ -72,9 +72,11 @@ FaceTracker::FaceTracker(ros::NodeHandle& nh) {
     initFaceBackend();
     if (backend_ != FaceDetectBackend::None) {
         ROS_INFO(
-            "face control: K_yaw=%.0f ema=%.2f deadband=%.2f/%.2f",
+            "face control: K_yaw=%.0f ema=%.2f/%.2f detect_every=%d deadband=%.2f/%.2f",
             K_YAW_DEG,
             TARGET_EMA_ALPHA,
+            TARGET_EMA_ALPHA_FRESH,
+            FACE_DETECT_EVERY_N,
             DEAD_BAND_X,
             DEAD_BAND_Y);
     }
@@ -314,7 +316,7 @@ void FaceTracker::publisherLoop() {
     }
 }
 
-void FaceTracker::updateTargetFromError(float dx_n, float dy_n) {
+void FaceTracker::updateTargetFromError(float dx_n, float dy_n, float ema_alpha) {
     if (std::abs(dx_n) < DEAD_BAND_X) dx_n = 0.0f;
     if (std::abs(dy_n) < DEAD_BAND_Y) dy_n = 0.0f;
 
@@ -326,17 +328,28 @@ void FaceTracker::updateTargetFromError(float dx_n, float dy_n) {
     const float yaw_lim_rad = deg2rad(YAW_LIMIT_DEG);
     const float pitch_up_rad = deg2rad(PITCH_UP_DEG);
     const float pitch_dn_rad = deg2rad(PITCH_DOWN_DEG);
+    const float alpha = clampf(ema_alpha, 0.15f, 0.95f);
 
     std::lock_guard<std::mutex> lk(target_mu_);
     const float raw_yaw_rad = ctrl_yaw_ + deg2rad(delta_yaw_deg);
     const float raw_pitch_rad = ctrl_pitch_ + deg2rad(delta_pitch_deg);
 
-    ctrl_yaw_ = ctrl_yaw_ * (1.0f - TARGET_EMA_ALPHA) + raw_yaw_rad * TARGET_EMA_ALPHA;
-    ctrl_pitch_ = ctrl_pitch_ * (1.0f - TARGET_EMA_ALPHA) + raw_pitch_rad * TARGET_EMA_ALPHA;
+    ctrl_yaw_ = ctrl_yaw_ * (1.0f - alpha) + raw_yaw_rad * alpha;
+    ctrl_pitch_ = ctrl_pitch_ * (1.0f - alpha) + raw_pitch_rad * alpha;
     ctrl_yaw_ = clampf(ctrl_yaw_, -yaw_lim_rad, yaw_lim_rad);
     ctrl_pitch_ = clampf(ctrl_pitch_, pitch_up_rad, pitch_dn_rad);
     target_yaw_ = ctrl_yaw_;
     target_pitch_ = ctrl_pitch_;
+}
+
+float FaceTracker::predictHoldDx(float age_sec) const {
+    const float t = clampf(age_sec, 0.0f, FACE_PREDICT_MAX_SEC);
+    return hold_dx_norm_ + hold_vx_norm_ * t;
+}
+
+float FaceTracker::predictHoldDy(float age_sec) const {
+    const float t = clampf(age_sec, 0.0f, FACE_PREDICT_MAX_SEC);
+    return hold_dy_norm_ + hold_vy_norm_ * t;
 }
 
 void FaceTracker::applyFaceTracking(
@@ -345,8 +358,9 @@ void FaceTracker::applyFaceTracking(
     float dy_n,
     const cv::Rect& face_disp,
     float score,
-    long long now_ms) {
-    updateTargetFromError(dx_n, dy_n);
+    long long now_ms,
+    float ema_alpha) {
+    updateTargetFromError(dx_n, dy_n, ema_alpha);
     last_face_ms_ = now_ms;
     last_face_bbox_ = face_disp;
     has_last_bbox_ = true;
@@ -418,13 +432,28 @@ void FaceTracker::applyNoFace(long long now_ms, float dt) {
     }
 }
 
-void FaceTracker::trackAndControlNeck(const cv::Mat& frame) {
+void FaceTracker::trackAndControlNeck(const cv::Mat& frame, bool run_detect) {
     if (!enabled_.load() || backend_ == FaceDetectBackend::None || frame.empty()) {
         return;
     }
 
     const long long now_ms = getCurrentTimeMs();
-    const float dt = 0.033f;
+    float dt = 0.083f;
+    if (last_track_ms_ > 0) {
+        dt = std::max(0.02f, std::min(0.25f, (now_ms - last_track_ms_) / 1000.0f));
+    }
+    last_track_ms_ = now_ms;
+
+    const float lost_sec = (now_ms - last_face_ms_) / 1000.0f;
+    if (!run_detect && hold_face_valid_ && lost_sec < FACE_TRACK_GRACE_SEC) {
+        const float age_sec =
+            last_detect_ms_ > 0 ? (now_ms - last_detect_ms_) / 1000.0f : 0.0f;
+        const float pred_dx = predictHoldDx(age_sec);
+        const float pred_dy = predictHoldDy(age_sec);
+        applyFaceTracking(
+            frame, pred_dx, pred_dy, last_face_bbox_, 1.0f, now_ms, TARGET_EMA_ALPHA);
+        return;
+    }
 
     if (backend_ == FaceDetectBackend::MediaPipe) {
         float dx_n = 0.0f;
@@ -439,8 +468,21 @@ void FaceTracker::trackAndControlNeck(const cv::Mat& frame) {
                 kPad * 2,
                 kPad * 2);
             face_disp = clampRect(face_disp, frame.size());
-            applyFaceTracking(frame, dx_n, dy_n, face_disp, 1.0f, now_ms);
+            if (last_detect_ms_ > 0) {
+                const float dt_det = std::max(0.02f, (now_ms - last_detect_ms_) / 1000.0f);
+                hold_vx_norm_ = (dx_n - hold_dx_norm_) / dt_det;
+                hold_vy_norm_ = (dy_n - hold_dy_norm_) / dt_det;
+            }
+            prev_hold_dx_norm_ = hold_dx_norm_;
+            prev_hold_dy_norm_ = hold_dy_norm_;
+            hold_dx_norm_ = dx_n;
+            hold_dy_norm_ = dy_n;
+            hold_face_valid_ = true;
+            last_detect_ms_ = now_ms;
+            applyFaceTracking(
+                frame, dx_n, dy_n, face_disp, 1.0f, now_ms, TARGET_EMA_ALPHA_FRESH);
         } else {
+            hold_face_valid_ = false;
             applyNoFace(now_ms, dt);
         }
         return;
@@ -451,8 +493,19 @@ void FaceTracker::trackAndControlNeck(const cv::Mat& frame) {
     cv::Rect face_disp;
     float score = 0.0f;
     if (detectWithYuNet(frame, dx_n, dy_n, face_disp, score)) {
-        applyFaceTracking(frame, dx_n, dy_n, face_disp, score, now_ms);
+        if (last_detect_ms_ > 0) {
+            const float dt_det = std::max(0.02f, (now_ms - last_detect_ms_) / 1000.0f);
+            hold_vx_norm_ = (dx_n - hold_dx_norm_) / dt_det;
+            hold_vy_norm_ = (dy_n - hold_dy_norm_) / dt_det;
+        }
+        hold_dx_norm_ = dx_n;
+        hold_dy_norm_ = dy_n;
+        hold_face_valid_ = true;
+        last_detect_ms_ = now_ms;
+        applyFaceTracking(
+            frame, dx_n, dy_n, face_disp, score, now_ms, TARGET_EMA_ALPHA_FRESH);
     } else {
+        hold_face_valid_ = false;
         applyNoFace(now_ms, dt);
     }
 }

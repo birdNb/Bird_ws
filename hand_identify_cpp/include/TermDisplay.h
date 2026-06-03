@@ -1,9 +1,11 @@
 #pragma once
 
+#include "Common.h"
+
 #include <cstdio>
 #include <string>
 
-/** 终端单行刷新状态（对齐 locate_face.py / gesture emit_status_line） */
+/** 终端单行刷新状态（对齐 emit_status_line + colorama） */
 class TermStatusLine {
 public:
     void print(const std::string& text, int width = 96);
@@ -19,6 +21,17 @@ public:
         float pitch_deg,
         float dx_norm,
         float dy_norm);
+
+    static std::string formatGesturePreview(
+        bool has_hand,
+        int gesture,
+        int raw_gesture,
+        bool in_range,
+        float distance_m,
+        float fps,
+        float stable_pct,
+        int stable_hits,
+        int stable_window);
 };
 
 class FpsCounter {
@@ -43,6 +56,21 @@ private:
     static constexpr int kWindow = 30;
     int hits_ = 0;
     int total_ = 0;
+    int buf_[kWindow] = {};
+    int idx_ = 0;
+    int filled_ = 0;
+};
+
+class GestureStableRate {
+public:
+    void tick(bool stable);
+    float percent() const;
+    int hits() const { return hits_; }
+    int windowSize() const { return filled_; }
+
+private:
+    static constexpr int kWindow = 30;
+    int hits_ = 0;
     int buf_[kWindow] = {};
     int idx_ = 0;
     int filled_ = 0;

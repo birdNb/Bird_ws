@@ -21,11 +21,19 @@ GESTURE_FACE_TRACK_LABEL = "脸部跟踪(常开)"
 # 需稳定 hold 后才触发的手势（含 1 撒娇、2~4 动作库）
 GESTURE_HOLD_GESTURES = frozenset({1, 2, 3, 4})
 
-# gesture -> (action_name, joy_key_combo, keepalive_sec 已废弃)
-GESTURE_ACTION_SPECS: Dict[int, Tuple[str, str, float]] = {
+# G2/G3: /joy_msg 组合键；G4: /action_config 策略名（policy_change，非按键）
+ACTION_CONFIG_TOPIC = "/action_config"
+GESTURE_JOY_ACTION_SPECS: Dict[int, Tuple[str, str, float]] = {
     2: ("hello", "rt+x", 5.0),
     3: ("cheer", "rt+a", 5.0),
-    4: ("byd_small_kick", "x", 5.0),
+}
+GESTURE_POLICY_ACTION_SPECS: Dict[int, Tuple[str, float]] = {
+    4: ("byd_small_kick", 5.0),
+}
+# 兼容旧引用：踢球项 combo 为空表示走话题
+GESTURE_ACTION_SPECS: Dict[int, Tuple[str, str, float]] = {
+    **GESTURE_JOY_ACTION_SPECS,
+    **{g: (name, "", dur) for g, (name, dur) in GESTURE_POLICY_ACTION_SPECS.items()},
 }
 
 GESTURE_ACTION_LABELS: Dict[int, str] = {
@@ -66,7 +74,10 @@ def action_hint_for_gesture(gesture: int, *, face_track_on: bool = False) -> str
     if gesture == GESTURE_HEAD_NOD:
         return GESTURE_HEAD_NOD_LABEL
     if gesture in GESTURE_ACTION_LABELS:
-        spec = GESTURE_ACTION_SPECS[gesture]
+        if gesture in GESTURE_POLICY_ACTION_SPECS:
+            name, _ = GESTURE_POLICY_ACTION_SPECS[gesture]
+            return f"动作:{GESTURE_ACTION_LABELS[gesture]}({name}@{ACTION_CONFIG_TOPIC})"
+        spec = GESTURE_JOY_ACTION_SPECS[gesture]
         return f"动作:{GESTURE_ACTION_LABELS[gesture]}({spec[0]})"
     if gesture == GESTURE_FOLLOW:
         return GESTURE_FOLLOW_LABEL
@@ -82,15 +93,17 @@ def format_action_trigger_line(
     """上升沿触发时单独打印一整行（不覆盖状态行）。"""
     if gesture not in GESTURE_ACTION_LABELS:
         return ""
-    name, keys, _ = GESTURE_ACTION_SPECS[gesture]
     label = GESTURE_ACTION_LABELS[gesture]
+    if gesture in GESTURE_POLICY_ACTION_SPECS:
+        name, _ = GESTURE_POLICY_ACTION_SPECS[gesture]
+        trigger = f"{name}@{ACTION_CONFIG_TOPIC}"
+    else:
+        name, keys, _ = GESTURE_JOY_ACTION_SPECS[gesture]
+        trigger = f"{name}, {keys}"
     if skipped_reason:
-        return (
-            f">>> 动作未执行: {label} ({name}, {keys}) "
-            f"[跳过: {skipped_reason}]"
-        )
+        return f">>> 动作未执行: {label} ({trigger}) [跳过: {skipped_reason}]"
     mode = "DRY-RUN" if dry_run else "EXEC"
-    return f">>> 触发动作: {label} ({name}, {keys}) [{mode}]"
+    return f">>> 触发动作: {label} ({trigger}) [{mode}]"
 
 
 def log_gesture_coquette(*, dry_run: bool = False) -> None:

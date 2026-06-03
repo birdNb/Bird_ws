@@ -7,7 +7,7 @@ Camera::Camera() {
     }
     cap_.set(cv::CAP_PROP_FRAME_WIDTH, CAMERA_WIDTH);
     cap_.set(cv::CAP_PROP_FRAME_HEIGHT, CAMERA_HEIGHT);
-    cap_.set(cv::CAP_PROP_FPS, 30);
+    cap_.set(cv::CAP_PROP_FPS, CAMERA_TARGET_FPS);
     cap_.set(cv::CAP_PROP_BUFFERSIZE, 1);
     is_opened_ = cap_.isOpened();
     if (!is_opened_) {
@@ -16,7 +16,14 @@ Camera::Camera() {
     }
     frame_w_ = static_cast<int>(cap_.get(cv::CAP_PROP_FRAME_WIDTH));
     frame_h_ = static_cast<int>(cap_.get(cv::CAP_PROP_FRAME_HEIGHT));
-    ROS_INFO("camera opened %dx%d (ZED_STEREO=%d)", frame_w_, frame_h_, ZED_STEREO ? 1 : 0);
+    ROS_INFO(
+        "camera opened %dx%d ZED_STEREO=%d display=%dx%d@%dfps",
+        frame_w_,
+        frame_h_,
+        ZED_STEREO ? 1 : 0,
+        DISPLAY_W,
+        DISPLAY_H,
+        CAMERA_TARGET_FPS);
 }
 
 Camera::~Camera() { release(); }
@@ -34,7 +41,7 @@ bool Camera::read(cv::Mat& frame) {
     }
 
     if (frame.cols != DISPLAY_W || frame.rows != DISPLAY_H) {
-        cv::resize(frame, frame, cv::Size(DISPLAY_W, DISPLAY_H), 0, 0, cv::INTER_AREA);
+        resizeLetterbox(frame, frame, DISPLAY_W, DISPLAY_H);
     }
     return true;
 }

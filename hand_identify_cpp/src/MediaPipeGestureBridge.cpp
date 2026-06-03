@@ -1,4 +1,4 @@
-#include "MediaPipeFaceBridge.h"
+#include "MediaPipeGestureBridge.h"
 
 #include "Common.h"
 
@@ -34,9 +34,9 @@ bool readLineReady(int fd) {
 
 }  // namespace
 
-MediaPipeFaceBridge::~MediaPipeFaceBridge() { stop(); }
+MediaPipeGestureBridge::~MediaPipeGestureBridge() { stop(); }
 
-bool MediaPipeFaceBridge::writeAll(int fd, const void* data, size_t len) {
+bool MediaPipeGestureBridge::writeAll(int fd, const void* data, size_t len) {
     const char* p = static_cast<const char*>(data);
     while (len > 0) {
         const ssize_t n = write(fd, p, len);
@@ -55,7 +55,7 @@ bool MediaPipeFaceBridge::writeAll(int fd, const void* data, size_t len) {
     return true;
 }
 
-bool MediaPipeFaceBridge::readAll(int fd, void* data, size_t len) {
+bool MediaPipeGestureBridge::readAll(int fd, void* data, size_t len) {
     char* p = static_cast<char*>(data);
     while (len > 0) {
         const ssize_t n = read(fd, p, len);
@@ -74,19 +74,19 @@ bool MediaPipeFaceBridge::readAll(int fd, void* data, size_t len) {
     return true;
 }
 
-bool MediaPipeFaceBridge::start(const std::string& script_path) {
+bool MediaPipeGestureBridge::start(const std::string& script_path) {
     stop();
 
     int pipe_to_child[2] = {-1, -1};
     int pipe_from_child[2] = {-1, -1};
     if (pipe(pipe_to_child) != 0 || pipe(pipe_from_child) != 0) {
-        ROS_ERROR("MediaPipe bridge: pipe() failed");
+        ROS_ERROR("gesture bridge: pipe() failed");
         return false;
     }
 
     const pid_t pid = fork();
     if (pid < 0) {
-        ROS_ERROR("MediaPipe bridge: fork() failed");
+        ROS_ERROR("gesture bridge: fork() failed");
         close(pipe_to_child[0]);
         close(pipe_to_child[1]);
         close(pipe_from_child[0]);
@@ -112,14 +112,14 @@ bool MediaPipeFaceBridge::start(const std::string& script_path) {
     child_pid_ = pid;
 
     if (!readLineReady(stdout_fd_)) {
-        ROS_ERROR("MediaPipe bridge: worker did not send READY");
+        ROS_ERROR("gesture bridge: worker READY timeout");
         stop();
         return false;
     }
     return true;
 }
 
-void MediaPipeFaceBridge::stop() {
+void MediaPipeGestureBridge::stop() {
     if (stdin_fd_ >= 0) {
         close(stdin_fd_);
         stdin_fd_ = -1;
@@ -136,19 +136,15 @@ void MediaPipeFaceBridge::stop() {
     }
 }
 
-bool MediaPipeFaceBridge::detect(
-    const cv::Mat& bgr,
-    float& dx_norm,
-    float& dy_norm,
-    float& face_cx,
-    float& face_cy) {
+bool MediaPipeGestureBridge::detect(const cv::Mat& bgr, MediaPipeGestureResult& out) {
+    out = MediaPipeGestureResult{};
     if (!isRunning() || bgr.empty() || bgr.type() != CV_8UC3) {
         return false;
     }
 
     int ipc_w = 0;
     int ipc_h = 0;
-    computeProcSize(bgr.cols, bgr.rows, FACE_IPC_MAX_W, ipc_w, ipc_h);
+    computeProcSize(bgr.cols, bgr.rows, GESTURE_IPC_MAX_W, ipc_w, ipc_h);
     cv::Mat ipc;
     const float scale_x =
         ipc_w != bgr.cols ? static_cast<float>(bgr.cols) / static_cast<float>(ipc_w) : 1.0f;
@@ -183,13 +179,40 @@ bool MediaPipeFaceBridge::detect(
         return false;
     }
 
-    float vals[4] = {};
-    if (!readAll(stdout_fd_, vals, sizeof(vals))) {
+    int8_t gesture = -1;
+    int8_t raw = -1;
+    uint8_t in_range = 0;
+    float vals[3] = {};
+    int32_t bbox[4] = {};
+    if (!readAll(stdout_fd_, &gesture, 1) || !readAll(stdout_fd_, &raw, 1)
+        || !readAll(stdout_fd_, &in_range, 1) || !readAll(stdout_fd_, vals, sizeof(vals))
+        || !readAll(stdout_fd_, bbox, sizeof(bbox))) {
         return false;
     }
-    dx_norm = vals[0];
-    dy_norm = vals[1];
-    face_cx = vals[2] * scale_x;
-    face_cy = vals[3] * scale_y;
+
+    out.has_hand = true;
+    out.gesture_id = gesture;
+    out.raw_gesture_id = raw;
+    out.in_range = in_range != 0;
+    out.dx_norm = vals[0];
+    out.dy_norm = vals[1];
+    out.distance_m = vals[2];
+    out.hand_rect = cv::Rect(
+        static_cast<int>(bbox[0] * scale_x),
+        static_cast<int>(bbox[1] * scale_y),
+        static_cast<int>(bbox[2] * scale_x),
+        static_cast<int>(bbox[3] * scale_y));
+
+    float lm_xy[HAND_LANDMARK_COUNT * 2] = {};
+    if (!readAll(stdout_fd_, lm_xy, sizeof(lm_xy))) {
+        return false;
+    }
+    out.landmarks.clear();
+    out.landmarks.reserve(HAND_LANDMARK_COUNT);
+    for (int i = 0; i < HAND_LANDMARK_COUNT; ++i) {
+        out.landmarks.emplace_back(
+            static_cast<int>(lm_xy[i * 2] * scale_x),
+            static_cast<int>(lm_xy[i * 2 + 1] * scale_y));
+    }
     return true;
 }

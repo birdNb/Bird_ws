@@ -26,12 +26,14 @@ void printUsage(const char* prog) {
         << "  --all              full pipeline (default)\n"
         << "  --locate_face      face/neck track only\n"
         << "  --loacate_face     alias of --locate_face\n"
-        << "  --gesture          gesture preview, no robot cmd\n"
+        << "  --gesture          gesture preview (no robot cmd)\n"
+        << "  --gesture_action   gesture 0-4 + /joy_msg actions\n"
+        << "  --actions          with --gesture: enable action commands\n"
         << "  --hand_follow      chassis hand follow only\n"
-        << "  --gesture_action   gesture 0-4 + actions, no face\n"
         << "  --coquette         gesture 1 coquette sway only\n"
         << "  --no-joy           skip 5s joy gate\n"
-        << "  --no-gui           no OpenCV window\n"
+        << "  --no-gui           no OpenCV window (default)\n"
+        << "  --gui              show OpenCV preview window\n"
         << "  --help, -h         this help\n\n"
         << "Examples:\n"
         << "  ./start.sh --locate_face --no-joy --no-gui\n";
@@ -71,6 +73,14 @@ bool parseAppConfig(int argc, char** argv, AppConfig& cfg, std::string& err) {
         }
         if (std::strcmp(arg, "--no-gui") == 0) {
             cfg.no_gui = true;
+            continue;
+        }
+        if (std::strcmp(arg, "--gui") == 0) {
+            cfg.no_gui = false;
+            continue;
+        }
+        if (std::strcmp(arg, "--actions") == 0 || std::strcmp(arg, "--enable-actions") == 0) {
+            cfg.enable_gesture_actions = true;
             continue;
         }
         if (matchModeFlag(arg, cfg.mode, cfg)) {

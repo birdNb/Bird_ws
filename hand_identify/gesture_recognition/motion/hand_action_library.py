@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""通过 /joy_msg 触发 sim2real 动作库（与 custom_action.yaml 手柄组合键一致）。"""
+"""通过 /joy_msg 触发 waypoint 动作，通过 /action_config 触发 policy_change（踢球等）。"""
 
 import os
 import sys
@@ -21,23 +21,24 @@ require_sim2real_msg()
 
 import rospy
 from sim2real_msg.msg import Joy
+from std_msgs.msg import String
 
 from gesture_actions import (
+    ACTION_CONFIG_TOPIC,
     GESTURE_ACTION_LABELS,
-    GESTURE_ACTION_SPECS,
+    GESTURE_JOY_ACTION_SPECS,
+    GESTURE_POLICY_ACTION_SPECS,
     format_action_trigger_line,
 )
 
 JOY_MSG_TOPIC = "/joy_msg"
 JOY_PUBLISH_HZ = 20
 
-# 每个手势动作最长执行时长；到时再发一次相同组合键以停止
 ACTION_DURATION_SEC = 5.0
 TRIGGER_PULSE_SEC = 0.5
 ACTION_COOLDOWN_SEC = ACTION_DURATION_SEC + 1.0
 BUTTON_PRESS = 1.0
 BUTTON_RELEASE = 0.0
-# 与 joy_teleop / Xbox 一致：RT/LT 松开=+1.0，按下=-1.0
 TRIGGER_PRESS = -1.0
 TRIGGER_RELEASE = 1.0
 
@@ -53,7 +54,6 @@ def _joy_key_value(key: str, pressed: bool) -> float:
 
 
 def _joy_from_keys(keys: Set[str], pressed: bool) -> Joy:
-    """将组合键映射为 sim2real_msg/Joy（与手柄 joy_teleop 语义一致）。"""
     msg = Joy()
     field_map = {
         "a": "a", "b": "b", "x": "x", "y": "y",
@@ -78,7 +78,6 @@ def _pulse_keys(
     dry_run: bool,
     abort_evt: threading.Event,
 ) -> None:
-    """短时按下组合键（触发或再次触发停止）。"""
     if dry_run or not keys:
         return
     press = _joy_from_keys(keys, pressed=True)
@@ -97,8 +96,26 @@ def _pulse_keys(
         time.sleep(interval)
 
 
+def _publish_policy_name(
+    pub: rospy.Publisher,
+    policy_name: str,
+    *,
+    dry_run: bool,
+    abort_evt: threading.Event,
+) -> None:
+    if dry_run or not policy_name:
+        return
+    msg = String(data=policy_name)
+    interval = 1.0 / max(JOY_PUBLISH_HZ, 1)
+    for _ in range(3):
+        if rospy.is_shutdown() or abort_evt.is_set():
+            break
+        pub.publish(msg)
+        time.sleep(interval)
+
+
 @dataclass
-class GestureActionSpec:
+class JoyActionSpec:
     gesture: int
     action_name: str
     label: str
@@ -106,8 +123,8 @@ class GestureActionSpec:
     keepalive_sec: float
 
     @classmethod
-    def from_gesture(cls, gesture: int) -> Optional["GestureActionSpec"]:
-        row = GESTURE_ACTION_SPECS.get(gesture)
+    def from_gesture(cls, gesture: int) -> Optional["JoyActionSpec"]:
+        row = GESTURE_JOY_ACTION_SPECS.get(gesture)
         if row is None:
             return None
         name, combo, keepalive = row
@@ -120,8 +137,29 @@ class GestureActionSpec:
         )
 
 
+@dataclass
+class PolicyActionSpec:
+    gesture: int
+    policy_name: str
+    label: str
+    duration_sec: float
+
+    @classmethod
+    def from_gesture(cls, gesture: int) -> Optional["PolicyActionSpec"]:
+        row = GESTURE_POLICY_ACTION_SPECS.get(gesture)
+        if row is None:
+            return None
+        name, duration = row
+        return cls(
+            gesture=gesture,
+            policy_name=name,
+            label=GESTURE_ACTION_LABELS.get(gesture, name),
+            duration_sec=duration,
+        )
+
+
 class GestureActionPlayer:
-    """手势边沿触发动作库；播放期间 is_busy 为 True。"""
+    """手势边沿触发：G2/G3 joy_msg 脉冲；G4 policy_change 话题指令。"""
 
     def __init__(
         self,
@@ -130,18 +168,23 @@ class GestureActionPlayer:
     ):
         self._dry_run = dry_run
         self._cooldown_sec = cooldown_sec
-        self._pub = rospy.Publisher(JOY_MSG_TOPIC, Joy, queue_size=1)
+        self._joy_pub = rospy.Publisher(JOY_MSG_TOPIC, Joy, queue_size=1)
+        self._policy_pub = rospy.Publisher(ACTION_CONFIG_TOPIC, String, queue_size=1)
         if not self._dry_run:
             t0 = time.time()
             while (
-                self._pub.get_num_connections() == 0
+                self._joy_pub.get_num_connections() == 0
+                and self._policy_pub.get_num_connections() == 0
                 and not rospy.is_shutdown()
                 and time.time() - t0 < 5.0
             ):
                 time.sleep(0.05)
-            if self._pub.get_num_connections() == 0:
+            if self._joy_pub.get_num_connections() == 0:
+                rospy.logwarn("[gesture_action] 尚无 /joy_msg 订阅者")
+            if self._policy_pub.get_num_connections() == 0:
                 rospy.logwarn(
-                    "[gesture_action] 尚无 /joy_msg 订阅者, 动作可能无效",
+                    "[gesture_action] 尚无 %s 订阅者, policy 动作可能无效",
+                    ACTION_CONFIG_TOPIC,
                 )
         self._lock = threading.Lock()
         self._last_gesture = -1
@@ -161,7 +204,6 @@ class GestureActionPlayer:
         return self._last_label
 
     def abort(self, *, fast: bool = False):
-        """中止当前动作：再次发送动作组合键并松开。fast=True 用于 Ctrl+C 强制退出。"""
         keys = set(self._active_keys)
         label = self._last_label
         self._abort_evt.set()
@@ -169,7 +211,7 @@ class GestureActionPlayer:
         self._last_label = ""
         if not fast and not self._dry_run and keys:
             _pulse_keys(
-                self._pub, keys,
+                self._joy_pub, keys,
                 duration_sec=TRIGGER_PULSE_SEC,
                 dry_run=False,
                 abort_evt=threading.Event(),
@@ -180,12 +222,10 @@ class GestureActionPlayer:
             for _ in range(3):
                 if self._abort_evt.is_set():
                     break
-                self._pub.publish(release)
+                self._joy_pub.publish(release)
                 time.sleep(1.0 / max(JOY_PUBLISH_HZ, 1))
         if label and not fast:
-            stop_line = f">>> 动作中止: {label}"
-            rospy.logwarn("[gesture_action] %s", stop_line)
-            print(stop_line, flush=True)
+            rospy.logwarn("[gesture_action] >>> 动作中止: %s", label)
         with self._lock:
             worker = self._worker
         if worker is not None and worker.is_alive():
@@ -204,11 +244,9 @@ class GestureActionPlayer:
         fsm_ok: bool = True,
         allow_retry: bool = False,
     ) -> bool:
-        """
-        检测手势上升沿并触发动作。返回本帧是否新触发。
-        allow_retry: 稳定确认后若上次因 busy/fsm 未触发，可重试。
-        """
-        if gesture not in GESTURE_ACTION_SPECS:
+        is_joy = gesture in GESTURE_JOY_ACTION_SPECS
+        is_policy = gesture in GESTURE_POLICY_ACTION_SPECS
+        if not is_joy and not is_policy:
             self._last_gesture = -1
             return False
 
@@ -226,56 +264,65 @@ class GestureActionPlayer:
         if time.time() - self._last_fire_t < self._cooldown_sec:
             return False
 
-        spec = GestureActionSpec.from_gesture(gesture)
+        if is_policy:
+            spec = PolicyActionSpec.from_gesture(gesture)
+            if spec is None:
+                return False
+            self._last_fire_t = time.time()
+            self._busy_until = time.time() + spec.duration_sec + 0.5
+            self._last_label = spec.label
+            self._start_policy_play(spec)
+            return True
+
+        spec = JoyActionSpec.from_gesture(gesture)
         if spec is None:
             return False
-
         self._last_fire_t = time.time()
         self._busy_until = (
             time.time() + ACTION_DURATION_SEC + TRIGGER_PULSE_SEC * 2 + 0.5
         )
         self._last_label = spec.label
-        self._start_play(spec)
+        self._start_joy_play(spec)
         return True
 
-    def _start_play(self, spec: GestureActionSpec):
+    def _start_joy_play(self, spec: JoyActionSpec):
         with self._lock:
             if self._worker is not None and self._worker.is_alive():
-                rospy.logwarn(
-                    "[gesture_action] 上一动作未完成，跳过 %s", spec.label,
-                )
+                rospy.logwarn("[gesture_action] 上一动作未完成，跳过 %s", spec.label)
                 return
             self._worker = threading.Thread(
-                target=self._play_blocking,
+                target=self._play_joy_blocking,
                 args=(spec,),
                 daemon=True,
             )
             self._worker.start()
 
-    def _play_blocking(self, spec: GestureActionSpec):
+    def _start_policy_play(self, spec: PolicyActionSpec):
+        with self._lock:
+            if self._worker is not None and self._worker.is_alive():
+                rospy.logwarn("[gesture_action] 上一动作未完成，跳过 %s", spec.label)
+                return
+            self._worker = threading.Thread(
+                target=self._play_policy_blocking,
+                args=(spec,),
+                daemon=True,
+            )
+            self._worker.start()
+
+    def _play_joy_blocking(self, spec: JoyActionSpec):
         keys = _parse_key_combo(spec.key_combo)
         self._active_keys = set(keys)
-        line = format_action_trigger_line(
-            spec.gesture, dry_run=self._dry_run,
-        )
+        line = format_action_trigger_line(spec.gesture, dry_run=self._dry_run)
         rospy.loginfo("[gesture_action] %s", line)
         print(line, flush=True)
         if self._dry_run:
-            deadline = time.time() + ACTION_DURATION_SEC
-            while time.time() < deadline and not self._abort_evt.is_set():
-                time.sleep(0.05)
+            time.sleep(ACTION_DURATION_SEC)
             self._active_keys.clear()
-            if not self._abort_evt.is_set():
-                stop_line = (
-                    f">>> 动作停止: {spec.label} "
-                    f"({ACTION_DURATION_SEC:.0f}s 后再次发送指令)"
-                )
-                print(stop_line, flush=True)
             return
 
         try:
             _pulse_keys(
-                self._pub, keys,
+                self._joy_pub, keys,
                 duration_sec=TRIGGER_PULSE_SEC,
                 dry_run=False,
                 abort_evt=self._abort_evt,
@@ -296,7 +343,7 @@ class GestureActionPlayer:
                 rospy.loginfo("[gesture_action] %s", stop_line)
                 print(stop_line, flush=True)
                 _pulse_keys(
-                    self._pub, keys,
+                    self._joy_pub, keys,
                     duration_sec=TRIGGER_PULSE_SEC,
                     dry_run=False,
                     abort_evt=self._abort_evt,
@@ -309,5 +356,38 @@ class GestureActionPlayer:
                 for _ in range(3):
                     if rospy.is_shutdown():
                         break
-                    self._pub.publish(release)
+                    self._joy_pub.publish(release)
                     time.sleep(interval)
+
+    def _play_policy_blocking(self, spec: PolicyActionSpec):
+        self._active_keys.clear()
+        line = format_action_trigger_line(spec.gesture, dry_run=self._dry_run)
+        rospy.loginfo("[gesture_action] %s", line)
+        print(line, flush=True)
+        if self._dry_run:
+            time.sleep(spec.duration_sec)
+            return
+
+        try:
+            _publish_policy_name(
+                self._policy_pub,
+                spec.policy_name,
+                dry_run=False,
+                abort_evt=self._abort_evt,
+            )
+            start_t = time.time()
+            while (
+                time.time() - start_t < spec.duration_sec
+                and not rospy.is_shutdown()
+                and not self._abort_evt.is_set()
+            ):
+                time.sleep(0.05)
+            if not self._abort_evt.is_set():
+                done_line = (
+                    f">>> 动作完成: {spec.label} "
+                    f"(policy {spec.policy_name} 由控制器自动回 walk)"
+                )
+                rospy.loginfo("[gesture_action] %s", done_line)
+                print(done_line, flush=True)
+        finally:
+            self._active_keys.clear()

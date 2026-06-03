@@ -10,17 +10,20 @@ show_help() {
   --all              完整视觉控制（默认，无模式参数时）
   --locate_face      仅测试脸部/脖子跟踪（同 locate_face）
   --loacate_face     同上（拼写兼容）
-  --gesture          仅手势识别预览，不发机器人指令
+  --gesture          手势识别预览（不发机器人指令）
+  --gesture_action   手势0~4 + 动作库(/joy_msg)，推荐用于动作控制
+  --actions          与 --gesture 合用：启用动作下发
   --hand_follow      仅五指底盘跟随
-  --gesture_action   手势0~4 + 动作库，不启人脸跟踪
   --coquette         仅测手势1撒娇扭腰
   --no-joy           跳过手柄5秒仲裁，便于单机调试
-  --no-gui           不显示 OpenCV 窗口
+  --no-gui           不显示 OpenCV 窗口（默认已开启）
+  --gui              显示 OpenCV 预览窗口
   --help, -h         显示帮助
 
 示例:
   ./start.sh --locate_face --no-joy
-  ./start.sh --gesture
+  ./start.sh --gesture_action --no-joy
+  ./start.sh --gesture --actions --no-joy
   ./start.sh --hand_follow --no-joy
   ./build/vision_controller --locate_face --no-joy   # 也可直接运行
 
@@ -71,8 +74,20 @@ export DISPLAY="${DISPLAY:-:0}"
 if [ -z "${XAUTHORITY:-}" ] && [ -f "${HOME}/.Xauthority" ]; then
   export XAUTHORITY="${HOME}/.Xauthority"
 fi
-echo "Starting: DISPLAY=$DISPLAY ./build/vision_controller $*"
-./build/vision_controller "$@"
+VC_ARGS=("$@")
+HAS_GUI=0
+for a in "${VC_ARGS[@]}"; do
+  case "$a" in
+    --gui) HAS_GUI=1 ;;
+    --no-gui) HAS_GUI=1 ;;
+  esac
+done
+if [ "$HAS_GUI" -eq 0 ]; then
+  VC_ARGS+=(--no-gui)
+fi
+
+echo "Starting: DISPLAY=$DISPLAY ./build/vision_controller ${VC_ARGS[*]}"
+./build/vision_controller "${VC_ARGS[@]}"
 
 echo "Resetting robot..."
 rostopic pub -1 /pi_plus_absolute sensor_msgs/JointState \
