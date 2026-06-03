@@ -1,0 +1,26 @@
+# Controller Configuration
+# 群控端配置文件
+
+# 日志配置
+log_level: "INFO"  # DEBUG, INFO, WARNING, ERROR, CRITICAL
+
+# HTTP 服务器
+http_host: '0.0.0.0'
+http_port: 48081
+
+# UDP 配置
+udp_send_port: 48888         # UDP 发送端口
+udp_heartbeat_port: 48889    # UDP 心跳接收端口
+
+# 广播地址（自动获取本机网段的广播地址，无需手动配置）
+# 如果自动获取失败，将使用全局广播地址 255.255.255.255
+
+# 默认发送模式
+default_send_mode: 'broadcast'  # 'broadcast' 或 'unicast'
+
+# 心跳超时
+heartbeat_timeout: 10        # 秒
+
+# 控制器配置
+joystick_deadzone: 0.1
+send_rate: 30                # Hz

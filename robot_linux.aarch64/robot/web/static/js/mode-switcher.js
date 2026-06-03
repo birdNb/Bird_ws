@@ -1,0 +1,10 @@
+class ModeSwitcher{constructor(){this.currentMode="self",this.initUI(),this.loadCurrentMode()}initUI(){var e=document.getElementById("mode-self-btn"),t=document.getElementById("mode-group-btn");e&&e.addEventListener("click",()=>this.switchMode("self")),t&&t.addEventListener("click",()=>this.switchMode("group"))}async loadCurrentMode(){try{var e=await(await fetch("/api/mode/status")).json();e.success&&this.updateMode(e.mode)}catch(e){console.error("Failed to load mode:",e)}}async switchMode(e){try{var t=await(await fetch("/api/mode/switch",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({mode:e})})).json();t.success?(this.updateMode(e),console.log(`Switched to ${e} mode`)):(console.error("Mode switch failed:",t.message),alert("切换失败: "+t.message))}catch(e){console.error("Error switching mode:",e),alert("切换模式失败")}}updateMode(e){this.currentMode=e;var t=document.getElementById("current-mode"),t=(t&&(t.textContent="self"===e?"自控模式":"群控模式",t.className="current-mode "+e),document.getElementById("mode-self-btn")),o=document.getElementById("mode-group-btn");t&&(t.disabled="self"===e),o&&(o.disabled="group"===e),this.updateControlsState()}updateControlsState(){let t="group"===this.currentMode;var e;document.querySelectorAll(".cmd-btn, .clickable-btn").forEach(e=>{(e.disabled=t)?(e.style.opacity="0.5",e.style.cursor="not-allowed"):(e.style.opacity="",e.style.cursor="")});let o=document.getElementById("group-mode-notice");t?o||((o=document.createElement("div")).id="group-mode-notice",o.style.cssText=`
+                    background: rgba(255, 152, 0, 0.2);
+                    border: 2px solid rgba(255, 152, 0, 0.8);
+                    color: #fff;
+                    padding: 10px;
+                    border-radius: 8px;
+                    text-align: center;
+                    margin-bottom: 15px;
+                    font-size: 0.85rem;
+                `,o.textContent="⚠️ 当前处于群控模式，由控制端统一控制",(e=document.querySelector("main"))&&e.firstChild&&e.insertBefore(o,e.firstChild)):o&&o.remove()}isGroupMode(){return"group"===this.currentMode}isSelfMode(){return"self"===this.currentMode}}window.ModeSwitcher=ModeSwitcher;

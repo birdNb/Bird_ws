@@ -1,0 +1,290 @@
+# 机器人命令配置文件
+# 统一的数据驱动配置，所有映射关系都在这里定义
+
+# ==================== 键位映射表 ====================
+# 定义每个物理按键到 Joy 消息的映射关系
+key_mappings:
+  # 按钮 (buttons 数组)
+  A:
+    type: button
+    index: 0
+    pressed: 1
+    released: 0
+
+  B:
+    type: button
+    index: 1
+    pressed: 1
+    released: 0
+
+  X:
+    type: button
+    index: 2
+    pressed: 1
+    released: 0
+
+  Y:
+    type: button
+    index: 3
+    pressed: 1
+    released: 0
+
+  LB:
+    type: button
+    index: 4
+    pressed: 1
+    released: 0
+
+  RB:
+    type: button
+    index: 5
+    pressed: 1
+    released: 0
+
+  BACK:
+    type: button
+    index: 6
+    pressed: 1
+    released: 0
+
+  START:
+    type: button
+    index: 7
+    pressed: 1
+    released: 0
+
+  # 扳机 (axes 数组)
+  LT:
+    type: axis
+    index: 2
+    pressed: -1.0
+    released: 1.0
+
+  RT:
+    type: axis
+    index: 5
+    pressed: -1.0
+    released: 1.0
+
+  # 十字键 (axes 数组)
+  "↑":
+    type: axis
+    index: 7
+    pressed: 1.0
+    released: 0.0
+
+  "↓":
+    type: axis
+    index: 7
+    pressed: -1.0
+    released: 0.0
+
+  "←":
+    type: axis
+    index: 6
+    pressed: 1.0
+    released: 0.0
+
+  "→":
+    type: axis
+    index: 6
+    pressed: -1.0
+    released: 0.0
+
+
+# ==================== 摇杆配置 ====================
+# 定义左右摇杆的轴索引
+joystick_mappings:
+  left_stick:
+    x_axis: 0  # 左摇杆 X 轴索引，-1 为右，+1 为左
+    y_axis: 1  # 左摇杆 Y 轴索引，-1 为下，+1 为上
+
+  right_stick:
+    x_axis: 3  # 右摇杆 X 轴索引，-1 为右，+1 为左
+    y_axis: 4  # 右摇杆 Y 轴索引，-1 为下，+1 为上
+
+# ==================== 扳机配置 ====================
+# 定义左右扳机的轴索引
+trigger_mappings:
+  LT: 2  # 左扳机轴索引，按下=-1.0，释放=1.0
+  RT: 5  # 右扳机轴索引，按下=-1.0，释放=1.0
+
+# ==================== 十字键配置 ====================
+# 定义十字键的轴索引
+dpad_mappings:
+  x_axis: 6  # 十字键 X 轴索引（左右），左=1.0，右=-1.0
+  y_axis: 7  # 十字键 Y 轴索引（上下），上=1.0，下=-1.0
+
+
+# ==================== 命令定义 ====================
+# 定义所有可用的机器人命令
+commands:
+  # alphabet
+  - code: xjtq
+    name: "小脚踢球"
+    keys: [A]
+    descript: "A"
+    category: alphabet
+
+  - code: xj
+    name: "秀肌肉"
+    keys: [X]
+    descript: "X"
+    category: alphabet
+
+  - code: zhq
+    name: "组合拳"
+    keys: [Y]
+    descript: "Y"
+    category: alphabet
+
+  # RT组合键
+  - code: cheer # 动作唯一码
+    name: "双手欢呼"  # web 页面显示动作说明
+    keys: [RT, A] # 键位组合
+    descript: "RT+A" # web 页面显示键位说明
+    category: rt # 分类，跟本文档 categories 对应
+
+  - code: quick_cheer
+    name: "摇手欢呼"
+    keys: [RT, B]
+    descript: "RT+B"
+    category: rt
+
+  - code: sunrise
+    name: "右手打招呼"
+    keys: [RT, X]
+    descript: "RT+X"
+    category: rt
+
+  - code: woshou
+    name: "握手"
+    keys: [RT, Y]
+    descript: "RT+Y"
+    category: rt
+
+  # lt
+  - code: man
+    name: "男儿当自强"
+    keys: [LT, B]
+    descript: "LT+B"
+    category: lt
+
+  - code: sd
+    name: "圣诞舞"
+    keys: [LT, X]
+    descript: "LT+X"
+    category: lt
+
+  - code: hkf
+    name: "后空翻"
+    keys: [LT, "↑"]
+    descript: "LT+↑"
+    category: lt
+
+  - code: zq
+    name: "重拳"
+    keys: [LT, "↓"]
+    descript: "LT+↓"
+    category: lt
+
+  - code: sjq
+    name: "上勾拳"
+    keys: [LT, "←"]
+    descript: "LT+←"
+    category: lt
+
+  - code: tt
+    name: "踢腿"
+    keys: [LT,  "→"]
+    descript: "LT+→"
+    category: lt
+
+  # LT+RT组合键
+  - code: kungfu
+    name: "武术操"
+    keys: [LT, RT, X]
+    descript: "LT+RT+X"
+    category: lt_rt
+
+  - code: bb
+    name: "BB"
+    keys: [LT, RT, "↑"]
+    descript: "LT+RT+↑"
+    category: lt_rt
+
+  - code: wyb
+    name: "WYB"
+    keys: [LT, RT, "←"]
+    descript: "LT+RT+←"
+    category: lt_rt
+
+  - code: sp8
+    name: "SP8"
+    keys: [LT, RT, "↓"]
+    descript: "LT+RT+↓"
+    category: lt_rt
+
+  - code: zzx
+    name: "ZZX"
+    keys: [LT, RT, "→"]
+    descript: "LT+RT+→"
+    category: lt_rt
+
+  # 移动控制
+  - code: stand
+    name: "站立"
+    keys: [LT, RT, START]
+    descript: "LT+RT+Start"
+    category: movement
+
+  - code: start_walk
+    name: "启动行走"
+    keys: [LT, RT, LB]
+    descript: "LT+RT+LB"
+    category: movement
+
+  - code: crouch
+    name: "蹲下"
+    keys: [LT, RT, RB]
+    descript: "LT+RT+RB"
+    category: movement
+
+# others
+  - code: comfirm
+    name: "确认选中"
+    keys: [LT, RT, A]
+    descript: "LT+RT+A"
+    category: others
+
+  - code: protect
+    name: "保护模式"
+    keys: [LT, RT, B]
+    descript: "LT+RT+B"
+    category: others
+
+# ==================== 分类定义 ====================
+categories:
+  alphabet:
+    title: "字母按键"
+    order: 1
+
+  rt:
+    title: "RT组合键"
+    order: 2
+
+  lt:
+    title: "LT组合键"
+    order: 3
+
+  lt_rt:
+    title: "LT+RT组合键"
+    order: 4
+
+  movement:
+    title: "移动控制"
+    order: 5
+
+  others:
+    title: "其他"
+    order: 6

@@ -1,0 +1,19 @@
+#pragma once
+
+#include "Common.h"
+
+class Camera {
+public:
+    Camera();
+    ~Camera();
+    bool read(cv::Mat& frame);
+    void release();
+    int frameWidth() const { return frame_w_; }
+    int frameHeight() const { return frame_h_; }
+
+private:
+    cv::VideoCapture cap_;
+    bool is_opened_ = false;
+    int frame_w_ = 0;
+    int frame_h_ = 0;
+};
