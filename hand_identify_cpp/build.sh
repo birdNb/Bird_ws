@@ -19,4 +19,4 @@ mkdir -p build
 cd build
 cmake ..
 make -j"$(nproc)"
-echo "编译完成！可执行文件: $(pwd)/vision_controller"
+echo "Build OK: $(pwd)/vision_controller"

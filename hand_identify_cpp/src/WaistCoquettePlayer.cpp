@@ -42,7 +42,7 @@ WaistCoquettePlayer::WaistCoquettePlayer(ros::NodeHandle& nh) {
     joy_pub_ = nh.advertise<sim2real_msg::Joy>(JOY_MSG_TOPIC, 1);
 #endif
     ROS_INFO(
-        "[coquette] 撒娇扭腰就绪 幅值±%.0f° x%d 周期 总时长≈%.1fs",
+        "[coquette] ready amp=+/-%.0f deg x%d cycles total~%.1fs",
         COQUETTE_SWAY_AMPLITUDE_DEG,
         COQUETTE_SWAY_CYCLES,
         actionTotalSec());
@@ -66,7 +66,7 @@ bool WaistCoquettePlayer::start() {
         worker_.join();
     }
     if (running_.load()) {
-        ROS_WARN("[coquette] 上一段撒娇未完成，跳过");
+        ROS_WARN("[coquette] previous sway still running, skip");
         return false;
     }
     const long long now = getCurrentTimeMs();
@@ -85,6 +85,10 @@ bool WaistCoquettePlayer::start() {
 }
 
 void WaistCoquettePlayer::abort(bool fast) {
+    const bool was_active = running_.load() || isBusy();
+    if (!was_active) {
+        return;
+    }
     abort_flag_.store(true);
     std::thread t;
     {
@@ -102,7 +106,7 @@ void WaistCoquettePlayer::abort(bool fast) {
         center.position = {0.0};
         center.header.stamp = ros::Time::now();
         waist_pub_.publish(center);
-        ROS_WARN("[coquette] 动作中止: 撒娇扭腰");
+        ROS_WARN("[coquette] sway aborted");
     }
 }
 
@@ -210,7 +214,7 @@ float WaistCoquettePlayer::runUniformSway(const std::vector<float>& waypoints_ra
 }
 
 void WaistCoquettePlayer::workerLoop() {
-    ROS_INFO(">>> 触发动作: 撒娇扭腰 [EXEC]");
+    ROS_INFO(">>> coquette sway [EXEC]");
     const auto waypoints = swayWaypointsRad(deg2rad(COQUETTE_SWAY_AMPLITUDE_DEG));
 
     pulseJoyCombo("rt+a", COQUETTE_TRIGGER_PULSE_SEC);
@@ -236,7 +240,7 @@ void WaistCoquettePlayer::workerLoop() {
         center.position = {0.0};
         center.header.stamp = ros::Time::now();
         waist_pub_.publish(center);
-        ROS_INFO(">>> 动作完成: 撒娇扭腰");
+        ROS_INFO(">>> coquette sway done");
     }
 
     running_.store(false);

@@ -36,19 +36,19 @@ cv::Mat largestSkinHand(const cv::Mat& bgr, cv::Rect& out_bbox) {
 GestureDetector::GestureDetector() {
     const std::string onnx_path = projectRoot() + "/model/gesture.onnx";
     if (!std::ifstream(onnx_path).good()) {
-        ROS_WARN("未找到 ONNX: %s，使用轮廓指节识别", onnx_path.c_str());
+        ROS_WARN("ONNX not found: %s, using contour fingers", onnx_path.c_str());
         return;
     }
     try {
         onnx_net_ = cv::dnn::readNetFromONNX(onnx_path);
         if (onnx_net_.empty()) {
-            ROS_WARN("readNetFromONNX 返回空网络: %s", onnx_path.c_str());
+            ROS_WARN("readNetFromONNX empty: %s", onnx_path.c_str());
             return;
         }
         use_onnx_ = true;
-        ROS_INFO("手势模型加载成功: %s (输入 1x3x224x224, 输出 6 类)", onnx_path.c_str());
+        ROS_INFO("gesture ONNX loaded: %s (1x3x224x224 -> 6 classes)", onnx_path.c_str());
     } catch (const cv::Exception& e) {
-        ROS_WARN("ONNX 加载失败(%s)，使用轮廓指节识别", e.what());
+        ROS_WARN("ONNX load failed (%s), using contour fingers", e.what());
     }
 }
 

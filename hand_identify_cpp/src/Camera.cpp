@@ -11,12 +11,12 @@ Camera::Camera() {
     cap_.set(cv::CAP_PROP_BUFFERSIZE, 1);
     is_opened_ = cap_.isOpened();
     if (!is_opened_) {
-        ROS_ERROR("摄像头打开失败 index=%d", CAMERA_INDEX);
+        ROS_ERROR("camera open failed index=%d", CAMERA_INDEX);
         return;
     }
     frame_w_ = static_cast<int>(cap_.get(cv::CAP_PROP_FRAME_WIDTH));
     frame_h_ = static_cast<int>(cap_.get(cv::CAP_PROP_FRAME_HEIGHT));
-    ROS_INFO("相机已打开 %dx%d (ZED_STEREO=%d)", frame_w_, frame_h_, ZED_STEREO ? 1 : 0);
+    ROS_INFO("camera opened %dx%d (ZED_STEREO=%d)", frame_w_, frame_h_, ZED_STEREO ? 1 : 0);
 }
 
 Camera::~Camera() { release(); }

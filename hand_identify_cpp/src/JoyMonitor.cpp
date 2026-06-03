@@ -3,7 +3,7 @@
 JoyMonitor::JoyMonitor(ros::NodeHandle& nh) {
     joy_sub_ = nh.subscribe<sensor_msgs::Joy>(JOY_TOPIC, 10, &JoyMonitor::joyCallback, this);
     last_joy_ms_ = 0;
-    ROS_INFO("手柄仲裁: %s 空闲 %d ms 后恢复视觉控制", JOY_TOPIC, JOY_IDLE_MS);
+    ROS_INFO("joy gate: %s idle %d ms to resume vision", JOY_TOPIC, JOY_IDLE_MS);
 }
 
 bool JoyMonitor::axisActive(int idx, float val) const {

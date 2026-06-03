@@ -12,6 +12,7 @@ public:
     void onConfirmedGesture(int gesture_id);
     bool isActionBusy() const;
     void abortActions();
+    void releaseJoyMsg();
     void stopAll();
 
 private:

@@ -10,9 +10,9 @@ Controller::Controller(ros::NodeHandle& nh, FaceTracker& face, HandTracker& hand
       coquette_player_(nh) {
 #ifdef HAVE_SIM2REAL_MSG
     joy_msg_pub_ = nh.advertise<sim2real_msg::Joy>(JOY_MSG_TOPIC, 1);
-    ROS_INFO("动作库发布: %s", JOY_MSG_TOPIC);
+    ROS_INFO("action pub: %s", JOY_MSG_TOPIC);
 #else
-    ROS_WARN("未链接 sim2real_msg，手势2~4 仅日志");
+    ROS_WARN("sim2real_msg not linked; gestures 2-4 log only");
 #endif
 }
 
@@ -23,6 +23,9 @@ bool Controller::isActionBusy() const {
 
 void Controller::abortActions() {
     coquette_player_.abort(false);
+}
+
+void Controller::releaseJoyMsg() {
 #ifdef HAVE_SIM2REAL_MSG
     sim2real_msg::Joy release;
     joy_msg_pub_.publish(release);
@@ -33,6 +36,7 @@ void Controller::stopAll() {
     face_tracker_.stopNeck();
     hand_tracker_.stopChassis();
     abortActions();
+    releaseJoyMsg();
 }
 
 #ifdef HAVE_SIM2REAL_MSG
@@ -83,7 +87,7 @@ void Controller::fireJoyMsgAction(int gesture_id) {
         publishJoyCombo(s.combo, true);
         ros::Duration(COQUETTE_TRIGGER_PULSE_SEC).sleep();
         publishJoyCombo(s.combo, false);
-        ROS_INFO("触发动作 %s (%s)", s.label, s.combo);
+        ROS_INFO("trigger action %s (%s)", s.label, s.combo);
         return;
     }
 }

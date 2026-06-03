@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <string>
 #include <vector>
 
@@ -30,14 +31,20 @@ constexpr int PROC_MAX_W = 560;
 constexpr int DISPLAY_W = 640;
 constexpr int DISPLAY_H = 480;
 
-// ----- 人脸跟踪 (与 locate_face / face_tracker.py 对齐) -----
-constexpr float DEAD_BAND_X = 0.02f;
+// ----- 人脸跟踪 (对齐 locate_face.py) -----
+constexpr int FACE_PROC_MAX_W = 640;
+constexpr float FACE_DETECT_SCORE_THRESH = 0.4f;
+constexpr float FACE_NMS_THRESH = 0.3f;
+constexpr int FACE_DETECT_TOP_K = 5000;
+constexpr float FACE_ROI_PAD_RATIO = 0.30f;
+constexpr float FACE_TRACK_GRACE_SEC = 1.2f;
+constexpr float DEAD_BAND_X = 0.04f;
 constexpr float DEAD_BAND_Y = 0.05f;
-constexpr float K_YAW_DEG = 30.0f;
+constexpr float K_YAW_DEG = 20.0f;
 constexpr float K_PITCH_DEG = 15.0f;
-constexpr float MAX_STEP_YAW_DEG = 10.0f;
-constexpr float MAX_STEP_PITCH_DEG = 6.5f;
-constexpr float TARGET_EMA_ALPHA = 0.38f;
+constexpr float MAX_STEP_YAW_DEG = 6.0f;
+constexpr float MAX_STEP_PITCH_DEG = 5.0f;
+constexpr float TARGET_EMA_ALPHA = 0.6f;
 constexpr float YAW_DX_SIGN = 1.0f;
 constexpr float YAW_LIMIT_DEG = 80.0f;
 constexpr float PITCH_UP_DEG = -40.0f;
@@ -61,7 +68,7 @@ constexpr const char* HEAD_YAW_JOINT = "head_yaw_joint";
 constexpr const char* HEAD_PITCH_JOINT = "head_pitch_joint";
 constexpr const char* WAIST_YAW_JOINT = "waist_yaw_joint";
 
-// ----- 手势1 撒娇扭腰 (waist_coquette_sway.py) -----
+// ----- 手势1 撒娇扭腰 -----
 constexpr float COQUETTE_SWAY_AMPLITUDE_DEG = 45.0f;
 constexpr int COQUETTE_SWAY_CYCLES = 2;
 constexpr float COQUETTE_SWAY_VEL_DEG_PER_SEC = 60.0f;
@@ -108,4 +115,14 @@ inline std::string projectRoot() {
     const char* env = std::getenv("HAND_IDENTIFY_CPP_ROOT");
     if (env && env[0]) return std::string(env);
     return std::string(std::getenv("HOME") ? std::getenv("HOME") : ".") + "/Bird_ws/hand_identify_cpp";
+}
+
+inline void computeProcSize(int src_w, int src_h, int max_w, int& proc_w, int& proc_h) {
+    if (src_w <= max_w) {
+        proc_w = src_w;
+        proc_h = src_h;
+        return;
+    }
+    proc_w = max_w;
+    proc_h = std::max(1, static_cast<int>(src_h * max_w / src_w));
 }
