@@ -15,6 +15,8 @@ public:
     void abortActions();
     void releaseJoyMsg();
     void stopAll();
+    /** 手柄占用：停动作/底盘，脖子留给脸跟踪 */
+    void stopForJoyTakeover();
 
 private:
     FaceTracker& face_tracker_;

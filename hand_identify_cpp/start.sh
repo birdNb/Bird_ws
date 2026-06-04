@@ -7,7 +7,8 @@ show_help() {
 用法: ./start.sh [选项...]
 
 功能断点调试（传给 vision_controller）:
-  --all              完整视觉控制（默认，无模式参数时）
+  （无模式参数时默认 --gesture_action）
+  --all              完整视觉控制
   --locate_face      仅测试脸部/脖子跟踪（同 locate_face）
   --loacate_face     同上（拼写兼容）
   --gesture          手势识别预览（不发机器人指令）
@@ -21,6 +22,7 @@ show_help() {
   --help, -h         显示帮助
 
 示例:
+  ./start.sh
   ./start.sh --locate_face --no-joy
   ./start.sh --gesture_action --no-joy
   ./start.sh --gesture --actions --no-joy
@@ -75,13 +77,20 @@ if [ -z "${XAUTHORITY:-}" ] && [ -f "${HOME}/.Xauthority" ]; then
   export XAUTHORITY="${HOME}/.Xauthority"
 fi
 VC_ARGS=("$@")
+HAS_MODE=0
 HAS_GUI=0
 for a in "${VC_ARGS[@]}"; do
   case "$a" in
+    --all|--locate_face|--loacate_face|--gesture|--gesture_action|--gesture_actions|--hand_follow|--hand_tracking|--coquette)
+      HAS_MODE=1
+      ;;
     --gui) HAS_GUI=1 ;;
     --no-gui) HAS_GUI=1 ;;
   esac
 done
+if [ "$HAS_MODE" -eq 0 ]; then
+  VC_ARGS=(--gesture_action "${VC_ARGS[@]}")
+fi
 if [ "$HAS_GUI" -eq 0 ]; then
   VC_ARGS+=(--no-gui)
 fi

@@ -515,18 +515,10 @@ int main(int argc, char** argv) {
 
         const std::string mode_tag = std::string("[") + runModeName(cfg.mode) + "]";
 
-        if (joyBlocks(cfg, joy_monitor)) {
-            controller.stopAll();
-            face_tracker.setEnabled(false);
-            long long rem = joy_monitor.idleRemainingMs();
-            drawHud(frame, mode_tag + (joy_monitor.isActiveNow() ? " JOY active"
-                                                                 : " joy wait " + std::to_string((rem + 999) / 1000) + "s"),
-                    cv::Scalar(0, 0, 255));
-            if (use_gui) {
-                cv::imshow("vision", frame);
-                if ((cv::waitKey(1) & 0xFF) == 27) break;
-            }
-            continue;
+        // 手柄：仅暂停手势动作库与五指底盘；脖子继续脸跟踪（仅 G5 跟手时关脸）
+        const bool joy_blocking = joyBlocks(cfg, joy_monitor);
+        if (joy_blocking) {
+            controller.stopForJoyTakeover();
         }
 
         HandDetectResult hand;
@@ -540,7 +532,13 @@ int main(int argc, char** argv) {
         const GestureDecision decision = evaluateGestureDecision(hand);
         const int gesture = decision.gesture;
 
-        drawHud(frame, mode_tag + " running", cv::Scalar(0, 255, 0));
+        std::string status_line = mode_tag + " running";
+        if (joy_blocking) {
+            status_line = mode_tag + " joy wait "
+                + std::to_string((joy_monitor.idleRemainingMs() + 999) / 1000) + "s"
+                + " (face neck on)";
+        }
+        drawHud(frame, status_line, joy_blocking ? cv::Scalar(0, 0, 255) : cv::Scalar(0, 255, 0));
         if (need_gesture && hand.has_hand && hand.gesture_id >= 0) {
             drawHud(
                 frame,
@@ -594,7 +592,7 @@ int main(int argc, char** argv) {
                         last_gesture_term_ms,
                         last_gesture_ros_log_ms);
                 }
-                if (gestureActionsEnabled(cfg)) {
+                if (gestureActionsEnabled(cfg) && !joy_blocking) {
                     drawGestureHoldHud(frame, gesture, hold_candidate, hold_since_ms);
                     processGestureActions(
                         controller, decision, hand, hold_candidate, hold_since_ms);
@@ -630,7 +628,7 @@ int main(int argc, char** argv) {
                 hand_follow.update(
                     frame, hand_tracker, face_tracker, joy_monitor, cfg, decision, hand,
                     companion_face);
-                if (!hand_follow.g5Confirmed()) {
+                if (!hand_follow.g5Confirmed() && !joy_blocking) {
                     drawGestureHoldHud(frame, gesture, hold_candidate, hold_since_ms);
                     processGestureActions(
                         controller, decision, hand, hold_candidate, hold_since_ms);
@@ -646,7 +644,7 @@ int main(int argc, char** argv) {
                 face_tracker.setEnabled(false);
                 face_tracker.stopNeck();
                 hand_tracker.stopChassis();
-                if (decision.action_ready && gesture == GESTURE_1) {
+                if (!joy_blocking && decision.action_ready && gesture == GESTURE_1) {
                     const int confirmed = updateGestureHold(
                         gesture, hand.has_hand, hand.in_range, hold_candidate, hold_since_ms);
                     if (confirmed == GESTURE_1 && !controller.isActionBusy()) {
@@ -679,7 +677,7 @@ int main(int argc, char** argv) {
                         controller.abortActions();
                         hand_follow.reset(hand_tracker, &face_tracker);
                         drawHud(frame, "G0 estop", cv::Scalar(0, 0, 255), 110);
-                    } else if (!hand_follow.holdPending()) {
+                    } else if (!joy_blocking && !hand_follow.holdPending()) {
                         const int confirmed = updateGestureHold(
                             gesture, hand.has_hand, hand.in_range, hold_candidate, hold_since_ms);
                         if (confirmed >= GESTURE_1 && !controller.isActionBusy()) {

@@ -38,9 +38,14 @@ void Controller::releaseJoyMsg() {
 }
 
 void Controller::stopAll() {
-    face_tracker_.stopNeck();
-    hand_tracker_.stopChassis();
     abortActions();
+    hand_tracker_.stopChassis();
+    face_tracker_.stopNeck();
+}
+
+void Controller::stopForJoyTakeover() {
+    abortActions();
+    hand_tracker_.stopChassis();
 }
 
 bool Controller::onConfirmedGesture(int gesture_id) {
