@@ -24,7 +24,7 @@ public:
     bool startPolicyAction(int gesture_id);
     /** 未使用 timed_stop=false 的动作 */
     bool pulseOnce(int gesture_id);
-    void abort(bool fast = false);
+    void abort(bool fast = false, bool publish_neutral = true);
     bool isBusy() const;
 
 private:

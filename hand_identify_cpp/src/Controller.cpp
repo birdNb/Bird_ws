@@ -25,7 +25,9 @@ bool Controller::isActionBusy() const {
 }
 
 void Controller::abortActions() {
-    joy_actions_.abort(false);
+    const bool publish_neutral =
+        output_gate_ == nullptr || output_gate_->allowJoyMsgPublish();
+    joy_actions_.abort(false, publish_neutral);
     coquette_player_.abort(false);
 }
 
@@ -50,6 +52,10 @@ void Controller::stopForJoyTakeover() {
 
 bool Controller::onConfirmedGesture(int gesture_id) {
     if (gesture_id <= GESTURE_0 || isActionBusy()) {
+        return false;
+    }
+    if (output_gate_ != nullptr && !output_gate_->allowGestureSideEffects()) {
+        ROS_WARN_THROTTLE(2.0, "[action] blocked (joy/g5/cooldown) G%d", gesture_id);
         return false;
     }
 

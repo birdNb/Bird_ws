@@ -2,6 +2,8 @@
 
 #include "GestureDecision.h"
 
+#include <exception>
+
 GestureDetector::GestureDetector() {
     const std::string script = projectRoot() + "/scripts/gesture_mediapipe_worker.py";
     if (bridge_.start(script)) {
@@ -15,14 +17,22 @@ GestureDetector::GestureDetector() {
 
 bool GestureDetector::detectMaxHand(const cv::Mat& frame, HandDetectResult& out) {
     out = HandDetectResult{};
-    if (!bridge_.isRunning() || frame.empty()) {
+    if (frame.empty()) {
         return false;
+    }
+    if (!bridge_.isRunning()) {
+        const std::string script = projectRoot() + "/scripts/gesture_mediapipe_worker.py";
+        if (!bridge_.start(script)) {
+            return false;
+        }
+        ROS_WARN("[gesture] worker restarted");
     }
 
-    MediaPipeGestureResult mp;
-    if (!bridge_.detect(frame, mp) || !mp.has_hand) {
-        return false;
-    }
+    try {
+        MediaPipeGestureResult mp;
+        if (!bridge_.detect(frame, mp) || !mp.has_hand) {
+            return false;
+        }
 
     out.has_hand = true;
     out.hand_rect = mp.hand_rect & cv::Rect(0, 0, frame.cols, frame.rows);
@@ -47,7 +57,15 @@ bool GestureDetector::detectMaxHand(const cv::Mat& frame, HandDetectResult& out)
         out.gesture_id = GESTURE_NONE;
     }
 
-    applyGestureRangePolicy(out);
-    out.confidence = computeGestureConfidence(out);
-    return true;
+        applyGestureRangePolicy(out);
+        out.confidence = computeGestureConfidence(out);
+        return true;
+    } catch (const cv::Exception& e) {
+        ROS_WARN_THROTTLE(2.0, "[gesture] OpenCV error: %s", e.what());
+        bridge_.stop();
+    } catch (const std::exception& e) {
+        ROS_WARN_THROTTLE(2.0, "[gesture] error: %s", e.what());
+        bridge_.stop();
+    }
+    return false;
 }

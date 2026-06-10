@@ -1,6 +1,7 @@
 #include "FaceTracker.h"
 
 #include <climits>
+#include <exception>
 
 namespace {
 
@@ -438,6 +439,16 @@ void FaceTracker::trackAndControlNeck(const cv::Mat& frame, bool run_detect) {
         return;
     }
 
+    try {
+        trackAndControlNeckImpl(frame, run_detect);
+    } catch (const cv::Exception& e) {
+        ROS_WARN_THROTTLE(2.0, "[face] OpenCV error: %s", e.what());
+    } catch (const std::exception& e) {
+        ROS_WARN_THROTTLE(2.0, "[face] error: %s", e.what());
+    }
+}
+
+void FaceTracker::trackAndControlNeckImpl(const cv::Mat& frame, bool run_detect) {
     const long long now_ms = getCurrentTimeMs();
     float dt = 0.083f;
     if (last_track_ms_ > 0) {

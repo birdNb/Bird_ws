@@ -5,9 +5,11 @@
 #include "FaceTracker.h"
 #include "GestureDecision.h"
 #include "GestureDetector.h"
+#include "GestureActionGate.h"
 #include "HandFollowController.h"
 #include "HandTracker.h"
 #include "JoyMonitor.h"
+#include "RobotOutputGate.h"
 #include "TermDisplay.h"
 
 #include <cstdio>
@@ -224,46 +226,6 @@ static void pollGestureTerminalStatus(
     }
 }
 
-static bool handLostTooLong(bool has_hand, long long now, long long& lost_since_ms) {
-    if (has_hand) {
-        lost_since_ms = 0;
-        return false;
-    }
-    if (lost_since_ms <= 0) {
-        lost_since_ms = now;
-    }
-    return (now - lost_since_ms) >= HAND_LOST_GRACE_MS;
-}
-
-static int updateGestureHold(int gesture, bool has_hand, bool /*in_range*/,
-                             int& candidate, long long& since_ms) {
-    const long long now = getCurrentTimeMs();
-    static long long lost_since_ms = 0;
-
-    if (handLostTooLong(has_hand, now, lost_since_ms)) {
-        candidate = GESTURE_NONE;
-        since_ms = 0;
-        return GESTURE_NONE;
-    }
-    if (gesture < GESTURE_1 || gesture > GESTURE_4) {
-        candidate = GESTURE_NONE;
-        since_ms = 0;
-        return GESTURE_NONE;
-    }
-    if (gesture != candidate) {
-        candidate = gesture;
-        since_ms = now;
-        return GESTURE_NONE;
-    }
-    if (since_ms <= 0) {
-        since_ms = now;
-    }
-    if (now - since_ms >= GESTURE_HOLD_MS) {
-        return gesture;
-    }
-    return GESTURE_NONE;
-}
-
 static bool joyBlocks(const AppConfig& cfg, JoyMonitor& joy) {
     return !cfg.no_joy && !joy.allowProgramControl();
 }
@@ -301,43 +263,6 @@ static void runCompanionFaceTrack(
             110);
     } else {
         drawHud(frame, "FACE search", cv::Scalar(0, 200, 255), 110);
-    }
-}
-
-static void processGestureActions(
-    Controller& controller,
-    const GestureDecision& decision,
-    const HandDetectResult& hand,
-    int& hold_candidate,
-    long long& hold_since_ms) {
-    static int last_fired_confirmed = GESTURE_NONE;
-    const int gesture = decision.gesture;
-
-    if (!decision.action_ready || gesture < GESTURE_0 || gesture > GESTURE_4) {
-        last_fired_confirmed = GESTURE_NONE;
-        return;
-    }
-
-    if (gesture == GESTURE_0) {
-        controller.abortActions();
-        last_fired_confirmed = GESTURE_NONE;
-        ROS_INFO_THROTTLE(1.0, "[action] G0 estop -> abort");
-        return;
-    }
-
-    const int confirmed = updateGestureHold(
-        gesture, hand.has_hand, hand.in_range, hold_candidate, hold_since_ms);
-
-    if (gesture != confirmed) {
-        last_fired_confirmed = GESTURE_NONE;
-    }
-
-    if (confirmed >= GESTURE_1) {
-        if (confirmed != last_fired_confirmed && !controller.isActionBusy()) {
-            if (controller.onConfirmedGesture(confirmed)) {
-                last_fired_confirmed = confirmed;
-            }
-        }
     }
 }
 
@@ -435,10 +360,15 @@ int main(int argc, char** argv) {
     JoyMonitor joy_monitor(nh);
     Controller controller(nh, face_tracker, hand_tracker);
     HandFollowController hand_follow;
+    RobotOutputGate output_gate;
+    GestureActionGate gesture_gate;
+    controller.bindOutputGate(&output_gate);
+    controller.abortActions();
 
     cv::Mat frame;
     int hold_candidate = GESTURE_NONE;
     long long hold_since_ms = 0;
+    bool was_g5_follow = false;
 
     ROS_INFO("hand_identify_cpp started | mode=%s", runModeName(cfg.mode));
     if (cfg.no_joy) ROS_INFO("debug: joy arbitration disabled (--no-joy)");
@@ -509,17 +439,35 @@ int main(int argc, char** argv) {
     ros::Rate loop_rate(MAIN_LOOP_FPS);
     GestureSenseCache gesture_cache;
     int sched_tick = 0;
-    while (ros::ok() && cam.read(frame)) {
+    while (ros::ok()) {
+        if (!cam.read(frame) || frame.empty()) {
+            ros::spinOnce();
+            loop_rate.sleep();
+            continue;
+        }
         ++sched_tick;
         ros::spinOnce();
 
         const std::string mode_tag = std::string("[") + runModeName(cfg.mode) + "]";
 
-        // 手柄：仅暂停手势动作库与五指底盘；脖子继续脸跟踪（仅 G5 跟手时关脸）
-        const bool joy_blocking = joyBlocks(cfg, joy_monitor);
-        if (joy_blocking) {
+        RobotOutputContext out_ctx;
+        out_ctx.no_joy = cfg.no_joy;
+        out_ctx.joy_blocking = joyBlocks(cfg, joy_monitor);
+        out_ctx.g5_follow_active = hand_follow.g5Confirmed();
+        out_ctx.ms_since_last_joy = joy_monitor.msSinceLastActive();
+        output_gate.update(out_ctx);
+
+        if (out_ctx.joy_blocking) {
             controller.stopForJoyTakeover();
         }
+
+        const bool g5_now = hand_follow.g5Confirmed();
+        if (g5_now && !was_g5_follow) {
+            controller.abortActions();
+        }
+        was_g5_follow = g5_now;
+
+        const bool joy_blocking = out_ctx.joy_blocking;
 
         HandDetectResult hand;
         const bool need_gesture =
@@ -550,10 +498,11 @@ int main(int argc, char** argv) {
 
         switch (cfg.mode) {
             case RunMode::LocateFace:
-                face_tracker.setEnabled(true);
-                face_tracker.trackAndControlNeck(frame);
+                face_tracker.setEnabled(output_gate.allowFaceNeck());
+                if (output_gate.allowFaceNeck()) {
+                    face_tracker.trackAndControlNeck(frame);
+                }
                 hand_tracker.stopChassis();
-                controller.abortActions();
                 if (face_term_status) {
                     pollFaceTerminalStatus(
                         face_tracker, fps_counter, detect_rate, term_line, last_face_ros_log_ms);
@@ -571,17 +520,13 @@ int main(int argc, char** argv) {
                 break;
 
             case RunMode::GestureOnly:
-                if (companion_face) {
+                if (companion_face && output_gate.allowFaceNeck()) {
                     runCompanionFaceTrack(
                         face_tracker, frame, use_gui, sched_tick, companion_face);
                 } else {
                     face_tracker.setEnabled(false);
-                    face_tracker.stopNeck();
                 }
                 hand_tracker.stopChassis();
-                if (!gestureActionsEnabled(cfg)) {
-                    controller.abortActions();
-                }
                 drawGestureOverlay(frame, hand);
                 if (gesture_term_status) {
                     pollGestureTerminalStatus(
@@ -592,15 +537,14 @@ int main(int argc, char** argv) {
                         last_gesture_term_ms,
                         last_gesture_ros_log_ms);
                 }
-                if (gestureActionsEnabled(cfg) && !joy_blocking) {
+                if (gestureActionsEnabled(cfg)) {
                     drawGestureHoldHud(frame, gesture, hold_candidate, hold_since_ms);
-                    processGestureActions(
-                        controller, decision, hand, hold_candidate, hold_since_ms);
+                    gesture_gate.process(
+                        controller, output_gate, decision, hand, hold_candidate, hold_since_ms);
                 }
                 break;
 
             case RunMode::HandFollow:
-                controller.abortActions();
                 drawGestureOverlay(frame, hand);
                 hand_follow.update(
                     frame, hand_tracker, face_tracker, joy_monitor, cfg, decision, hand, false);
@@ -628,12 +572,10 @@ int main(int argc, char** argv) {
                 hand_follow.update(
                     frame, hand_tracker, face_tracker, joy_monitor, cfg, decision, hand,
                     companion_face);
-                if (!hand_follow.g5Confirmed() && !joy_blocking) {
+                if (!hand_follow.g5Confirmed()) {
                     drawGestureHoldHud(frame, gesture, hold_candidate, hold_since_ms);
-                    processGestureActions(
-                        controller, decision, hand, hold_candidate, hold_since_ms);
-                } else {
-                    controller.abortActions();
+                    gesture_gate.process(
+                        controller, output_gate, decision, hand, hold_candidate, hold_since_ms);
                 }
                 drawG5HoldHud(frame, hand_follow);
                 drawHandFollowHud(frame, hand_follow, hand_tracker, joy_monitor, cfg, 240);
@@ -642,18 +584,11 @@ int main(int argc, char** argv) {
 
             case RunMode::Coquette:
                 face_tracker.setEnabled(false);
-                face_tracker.stopNeck();
                 hand_tracker.stopChassis();
-                if (!joy_blocking && decision.action_ready && gesture == GESTURE_1) {
-                    const int confirmed = updateGestureHold(
-                        gesture, hand.has_hand, hand.in_range, hold_candidate, hold_since_ms);
-                    if (confirmed == GESTURE_1 && !controller.isActionBusy()) {
-                        controller.onConfirmedGesture(GESTURE_1);
-                    }
-                    drawHud(frame, "G1 coquette...", cv::Scalar(0, 165, 255), 110);
-                } else {
-                    controller.abortActions();
-                }
+                drawGestureOverlay(frame, hand);
+                drawGestureHoldHud(frame, gesture, hold_candidate, hold_since_ms);
+                gesture_gate.process(
+                    controller, output_gate, decision, hand, hold_candidate, hold_since_ms);
                 break;
 
             case RunMode::All:
@@ -668,25 +603,22 @@ int main(int argc, char** argv) {
                 hand_follow.update(
                     frame, hand_tracker, face_tracker, joy_monitor, cfg, decision, hand, true);
                 if (hand_follow.g5Confirmed()) {
-                    controller.abortActions();
                     drawHandFollowHud(frame, hand_follow, hand_tracker, joy_monitor, cfg, 110);
                 } else if (decision.companion_face_phase) {
                     hand_tracker.stopChassis();
                     drawG5HoldHud(frame, hand_follow);
                     if (gesture == GESTURE_0) {
-                        controller.abortActions();
+                        gesture_gate.process(
+                            controller, output_gate, decision, hand, hold_candidate, hold_since_ms);
                         hand_follow.reset(hand_tracker, &face_tracker);
                         drawHud(frame, "G0 estop", cv::Scalar(0, 0, 255), 110);
-                    } else if (!joy_blocking && !hand_follow.holdPending()) {
-                        const int confirmed = updateGestureHold(
-                            gesture, hand.has_hand, hand.in_range, hold_candidate, hold_since_ms);
-                        if (confirmed >= GESTURE_1 && !controller.isActionBusy()) {
-                            controller.onConfirmedGesture(confirmed);
-                        }
+                    } else if (!hand_follow.holdPending()) {
+                        drawGestureHoldHud(frame, gesture, hold_candidate, hold_since_ms);
+                        gesture_gate.process(
+                            controller, output_gate, decision, hand, hold_candidate, hold_since_ms);
                     }
                 } else {
                     hand_tracker.stopChassis();
-                    controller.abortActions();
                 }
                 break;
             }

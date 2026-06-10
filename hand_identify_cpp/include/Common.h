@@ -30,6 +30,10 @@ constexpr int FACE_EVERY_N = FACE_DETECT_EVERY_N;
 constexpr int GESTURE_IPC_MAX_W = 480;
 constexpr int FACE_IPC_MAX_W = 480;
 constexpr int GESTURE_HOLD_MS = 2000;
+/** G4 踢球策略切换需更长确认，避免误触步态 */
+constexpr int GESTURE_POLICY_HOLD_MS = 3000;
+/** 手柄松开后延迟允许 /joy_msg、policy，避免松杆瞬间误发 */
+constexpr int JOY_SIDE_EFFECT_COOLDOWN_MS = 800;
 constexpr float JOY_ACTIVE_THRESH = 0.15f;
 constexpr int JOY_TRIGGER_AXIS_LT = 2;
 constexpr int JOY_TRIGGER_AXIS_RT = 5;

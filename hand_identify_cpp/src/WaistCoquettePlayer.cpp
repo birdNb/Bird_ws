@@ -1,5 +1,7 @@
 #include "WaistCoquettePlayer.h"
 
+#include "JoyMsgUtil.h"
+
 #include <cmath>
 
 namespace {
@@ -130,43 +132,14 @@ float WaistCoquettePlayer::interpWaypoints(
 void WaistCoquettePlayer::pulseJoyCombo(const std::string& combo, float duration_sec) {
     if (abort_flag_.load() || !ros::ok()) return;
 
-    auto make_msg = [&](bool pressed) {
-        sim2real_msg::Joy msg;
-        size_t start = 0;
-        while (start < combo.size()) {
-            size_t plus = combo.find('+', start);
-            std::string token = combo.substr(
-                start, plus == std::string::npos ? std::string::npos : plus - start);
-            const float press = 1.0f;
-            const float release = 0.0f;
-            const float trig_press = -1.0f;
-            const float trig_release = 1.0f;
-            float v = release;
-            if (token == "rt" || token == "lt") {
-                v = pressed ? trig_press : trig_release;
-            } else if (!token.empty()) {
-                v = pressed ? press : release;
-            }
-            if (token == "a") msg.a = v;
-            else if (token == "b") msg.b = v;
-            else if (token == "x") msg.x = v;
-            else if (token == "y") msg.y = v;
-            else if (token == "rt") msg.rt = v;
-            else if (token == "lt") msg.lt = v;
-            if (plus == std::string::npos) break;
-            start = plus + 1;
-        }
-        return msg;
-    };
-
     ros::Rate rate(COQUETTE_JOY_PUBLISH_HZ);
     const ros::Time end = ros::Time::now() + ros::Duration(std::max(0.05, static_cast<double>(duration_sec)));
-    sim2real_msg::Joy press = make_msg(true);
+    const sim2real_msg::Joy press = makeJoyCombo(combo, true);
     while (ros::ok() && !abort_flag_.load() && ros::Time::now() < end) {
         joy_pub_.publish(press);
         rate.sleep();
     }
-    sim2real_msg::Joy release = make_msg(false);
+    const sim2real_msg::Joy release = makeJoyCombo(combo, false);
     for (int i = 0; i < 3 && ros::ok() && !abort_flag_.load(); ++i) {
         joy_pub_.publish(release);
         rate.sleep();

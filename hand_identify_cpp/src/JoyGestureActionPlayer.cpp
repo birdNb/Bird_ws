@@ -1,5 +1,7 @@
 #include "JoyGestureActionPlayer.h"
 
+#include "JoyMsgUtil.h"
+
 #include <std_msgs/String.h>
 
 namespace {
@@ -54,7 +56,7 @@ JoyGestureActionPlayer::JoyGestureActionPlayer(ros::NodeHandle& nh) {
         ACTION_CONFIG_TOPIC);
 }
 
-JoyGestureActionPlayer::~JoyGestureActionPlayer() { abort(true); }
+JoyGestureActionPlayer::~JoyGestureActionPlayer() { abort(true, false); }
 
 bool JoyGestureActionPlayer::isBusy() const {
     if (running_.load()) {
@@ -66,9 +68,11 @@ bool JoyGestureActionPlayer::isBusy() const {
 void JoyGestureActionPlayer::publishRelease() {
 #ifdef HAVE_SIM2REAL_MSG
     sim2real_msg::Joy release;
+    fillJoyNeutral(release);
+    ros::Rate rate(JOY_ACTION_PUBLISH_HZ);
     for (int i = 0; i < 3 && ros::ok(); ++i) {
         joy_pub_.publish(release);
-        ros::Duration(1.0 / JOY_ACTION_PUBLISH_HZ).sleep();
+        rate.sleep();
     }
 #endif
 }
@@ -92,40 +96,15 @@ void JoyGestureActionPlayer::pulseCombo(const std::string& combo, float duration
         return;
     }
 
-    auto make_msg = [&](bool pressed) {
-        sim2real_msg::Joy msg;
-        size_t start = 0;
-        while (start < combo.size()) {
-            size_t plus = combo.find('+', start);
-            std::string token = combo.substr(
-                start, plus == std::string::npos ? std::string::npos : plus - start);
-            float v = 0.0f;
-            if (token == "rt" || token == "lt") {
-                v = pressed ? -1.0f : 1.0f;
-            } else if (!token.empty()) {
-                v = pressed ? 1.0f : 0.0f;
-            }
-            if (token == "a") msg.a = v;
-            else if (token == "b") msg.b = v;
-            else if (token == "x") msg.x = v;
-            else if (token == "y") msg.y = v;
-            else if (token == "rt") msg.rt = v;
-            else if (token == "lt") msg.lt = v;
-            if (plus == std::string::npos) break;
-            start = plus + 1;
-        }
-        return msg;
-    };
-
     ros::Rate rate(JOY_ACTION_PUBLISH_HZ);
     const ros::Time end =
         ros::Time::now() + ros::Duration(std::max(0.05, static_cast<double>(duration_sec)));
-    const sim2real_msg::Joy press = make_msg(true);
+    const sim2real_msg::Joy press = makeJoyCombo(combo, true);
     while (ros::ok() && !abort_flag_.load() && ros::Time::now() < end) {
         joy_pub_.publish(press);
         rate.sleep();
     }
-    const sim2real_msg::Joy release = make_msg(false);
+    const sim2real_msg::Joy release = makeJoyCombo(combo, false);
     for (int i = 0; i < 3 && ros::ok() && !abort_flag_.load(); ++i) {
         joy_pub_.publish(release);
         rate.sleep();
@@ -191,7 +170,7 @@ void JoyGestureActionPlayer::workerPolicy(
     running_.store(false);
 }
 
-void JoyGestureActionPlayer::abort(bool fast) {
+void JoyGestureActionPlayer::abort(bool fast, bool publish_neutral) {
     const bool was_active = running_.load() || isBusy();
     if (!was_active) {
         return;
@@ -213,7 +192,9 @@ void JoyGestureActionPlayer::abort(bool fast) {
     }
 #endif
     active_combo_.clear();
-    publishRelease();
+    if (publish_neutral) {
+        publishRelease();
+    }
 
     running_.store(false);
     busy_until_ms_ = 0;
@@ -234,7 +215,7 @@ bool JoyGestureActionPlayer::startTimedAction(int gesture_id) {
         return false;
     }
 
-    abort(false);
+    abort(false, false);
 
     last_fire_ms_ = now;
     busy_until_ms_ = now + static_cast<long long>(
@@ -264,7 +245,7 @@ bool JoyGestureActionPlayer::startPolicyAction(int gesture_id) {
         return false;
     }
 
-    abort(false);
+    abort(false, false);
 
     last_fire_ms_ = now;
     busy_until_ms_ =

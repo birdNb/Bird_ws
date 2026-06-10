@@ -31,6 +31,8 @@ public:
     void setEnabled(bool on);
     bool isEnabled() const { return enabled_.load(); }
     void trackAndControlNeck(const cv::Mat& frame, bool run_detect = true);
+
+    void trackAndControlNeckImpl(const cv::Mat& frame, bool run_detect);
     FaceTelemetry getTelemetry() const;
     void stopNeck();
     void shutdown();

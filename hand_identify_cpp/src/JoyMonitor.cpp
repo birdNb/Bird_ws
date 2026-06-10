@@ -35,6 +35,14 @@ bool JoyMonitor::allowProgramControl() const {
     return (getCurrentTimeMs() - last_joy_ms_) >= JOY_IDLE_MS;
 }
 
+long long JoyMonitor::msSinceLastActive() const {
+    std::lock_guard<std::mutex> lk(mu_);
+    if (last_joy_ms_ <= 0) {
+        return 999999;
+    }
+    return std::max(0LL, getCurrentTimeMs() - last_joy_ms_);
+}
+
 bool JoyMonitor::isActiveNow() const {
     std::lock_guard<std::mutex> lk(mu_);
     if (last_joy_ms_ <= 0) return false;

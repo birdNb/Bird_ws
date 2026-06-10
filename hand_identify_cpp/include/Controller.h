@@ -4,11 +4,14 @@
 #include "FaceTracker.h"
 #include "HandTracker.h"
 #include "JoyGestureActionPlayer.h"
+#include "RobotOutputGate.h"
 #include "WaistCoquettePlayer.h"
 
 class Controller {
 public:
     Controller(ros::NodeHandle& nh, FaceTracker& face, HandTracker& hand);
+    void bindOutputGate(const RobotOutputGate* gate) { output_gate_ = gate; }
+
     /** @return 是否已下发动作（对齐 gesture_motion ConfirmedActionGate） */
     bool onConfirmedGesture(int gesture_id);
     bool isActionBusy() const;
@@ -23,4 +26,5 @@ private:
     HandTracker& hand_tracker_;
     WaistCoquettePlayer coquette_player_;
     JoyGestureActionPlayer joy_actions_;
+    const RobotOutputGate* output_gate_ = nullptr;
 };

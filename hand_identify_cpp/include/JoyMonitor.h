@@ -9,6 +9,7 @@ public:
     explicit JoyMonitor(ros::NodeHandle& nh);
     bool allowProgramControl() const;
     bool blocksHandTracking() const { return !allowProgramControl(); }
+    long long msSinceLastActive() const;
     bool pollTakeoverEdge();
     bool isActiveNow() const;
     long long idleRemainingMs() const;
