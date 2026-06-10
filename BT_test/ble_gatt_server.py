@@ -15,6 +15,7 @@ BLE GATT 从机测试：手机/微信小程序连接后向可写特征发数据�
 from __future__ import annotations
 
 import argparse
+import subprocess
 import sys
 import time
 from typing import List, Optional
@@ -373,24 +374,55 @@ class BleTestServer:
         except dbus.exceptions.DBusException:
             return BOARD_BDADDR
 
+    def _run_btmgmt(self, *args: str) -> None:
+        try:
+            subprocess.run(
+                ["btmgmt", "--index", "0", *args],
+                check=False,
+                capture_output=True,
+                timeout=3,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as e:
+            log(f"[warn] btmgmt {' '.join(args)}: {e}")
+
+    def _enter_ble_only_mode(self) -> None:
+        """仅 BLE 广播，关闭经典蓝牙可发现/可配对，避免手机系统反复弹连接框。"""
+        try:
+            subprocess.run(
+                ["hciconfig", "hci0", "noscan"],
+                check=False,
+                capture_output=True,
+                timeout=3,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+            pass
+        self._run_btmgmt("le", "on")
+        self._run_btmgmt("connectable", "on")
+        self._run_btmgmt("discov", "off")
+        self._run_btmgmt("pairable", "off")
+        self._run_btmgmt("bondable", "off")
+        log("已切换 BLE-only：经典蓝牙不可配对（避免手机系统弹窗）")
+
     def _set_adapter_props(self, adapter_path: str) -> None:
         props = dbus.Interface(
             self.bus.get_object(BLUEZ_SERVICE, adapter_path), DBUS_PROP_IFACE
         )
         try:
             props.Set(ADAPTER_IFACE, "Alias", self.name)
-            log(f"适配器 Alias(系统蓝牙显示): {self.name}")
+            log(f"BLE 广播名: {self.name}")
         except dbus.exceptions.DBusException as e:
             log(f"[warn] 设置 Alias 失败: {e}")
         try:
             props.Set(ADAPTER_IFACE, "Powered", dbus.Boolean(True))
-            props.Set(ADAPTER_IFACE, "Discoverable", dbus.Boolean(True))
-            props.Set(ADAPTER_IFACE, "Pairable", dbus.Boolean(True))
+            # 勿开经典蓝牙可发现/可配对，否则手机系统会一直弹「连接/配对」
+            props.Set(ADAPTER_IFACE, "Discoverable", dbus.Boolean(False))
+            props.Set(ADAPTER_IFACE, "Pairable", dbus.Boolean(False))
             props.Set(ADAPTER_IFACE, "DiscoverableTimeout", dbus.UInt32(0))
-            # 关闭经典蓝牙扫描，避免占用适配器影响 BLE 广播
+            props.Set(ADAPTER_IFACE, "PairableTimeout", dbus.UInt32(0))
             props.Set(ADAPTER_IFACE, "Discovering", dbus.Boolean(False))
         except dbus.exceptions.DBusException as e:
             log(f"[warn] 适配器属性: {e}")
+        self._enter_ble_only_mode()
 
     def _verify_le_advertising(self, adapter_path: str) -> None:
         try:
@@ -479,7 +511,8 @@ class BleTestServer:
         print()
         addr = self._read_adapter_address(adapter_path)
         log(">>> BLE 测试服务运行中 <<<")
-        log("    注意: 手机【系统蓝牙】能连 ≠ 小程序能扫到")
+        log("    请在【微信小程序】里连接，勿在手机系统设置里点配对")
+        log("    若曾系统配对，请在手机里「忽略/取消配对」此设备")
         log("    必须保持本脚本运行，小程序才看得到 BLE 广播")
         log(f"    广播名: {self.name}")
         log(f"    MAC:    {addr}")

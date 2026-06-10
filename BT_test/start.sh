@@ -16,9 +16,9 @@ show_help() {
   通知特征 UUID:  0000FFF2-0000-1000-8000-00805F9B34FB  (可选)
   板子 MAC 参考:  00:19:86:00:2E:AF
 
-重要: 手机【系统蓝牙】能配对 ≠ 小程序能扫到
+重要: 只在【微信小程序】里连接，不要在手机系统蓝牙里点配对
+      若手机反复弹连接框：设置里「忽略」Bird_BLE_Test 后重试
       必须保持本脚本运行，小程序才能发现 BLE 广播
-      EDIFIER BLE 是附近耳机，不是你的板子
 
 选项:
   --name NAME     广播名称 (默认 Bird_BLE_Test)
@@ -86,8 +86,8 @@ if [ "$DO_SETUP" -eq 1 ]; then
   sudo hciconfig hci0 up 2>/dev/null || true
   sudo hciconfig hci0 name "Bird_BLE_Test" 2>/dev/null || true
   bluetoothctl power on 2>/dev/null || true
-  bluetoothctl discoverable on 2>/dev/null || true
-  bluetoothctl pairable on 2>/dev/null || true
+  bluetoothctl discoverable off 2>/dev/null || true
+  bluetoothctl pairable off 2>/dev/null || true
   bluetoothctl system-alias "Bird_BLE_Test" 2>/dev/null || true
 fi
 
@@ -105,9 +105,20 @@ fi
 
 chmod +x ble_gatt_server.py
 
-# 确保广播名为 Bird_BLE_Test（与小程序扫描名一致）
+# BLE 广播名 + 关闭经典蓝牙配对（避免手机系统反复弹窗）
+sudo hciconfig hci0 up 2>/dev/null || true
 sudo hciconfig hci0 name "Bird_BLE_Test" 2>/dev/null || true
+sudo hciconfig hci0 noscan 2>/dev/null || true
 bluetoothctl system-alias "Bird_BLE_Test" 2>/dev/null || true
+bluetoothctl discoverable off 2>/dev/null || true
+bluetoothctl pairable off 2>/dev/null || true
+if command -v btmgmt >/dev/null; then
+  sudo btmgmt -i 0 le on 2>/dev/null || true
+  sudo btmgmt -i 0 connectable on 2>/dev/null || true
+  sudo btmgmt -i 0 discov off 2>/dev/null || true
+  sudo btmgmt -i 0 pairable off 2>/dev/null || true
+  sudo btmgmt -i 0 bondable off 2>/dev/null || true
+fi
 
 MAC=$(bluetoothctl show 2>/dev/null | awk '/Controller/ {print $2}' | head -1)
 echo "========================================"
