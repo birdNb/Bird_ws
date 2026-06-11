@@ -3,6 +3,11 @@
 set -euo pipefail
 
 echo "========== 蓝牙适配器 =========="
+if ! hciconfig hci0 2>/dev/null | grep -q "hci0"; then
+  echo "[!!] hci0 不存在 — 系统无蓝牙控制器"
+  echo "     运行: sudo ./ble_recover.sh  或  sudo reboot"
+  echo ""
+fi
 bluetoothctl show 2>/dev/null | grep -E 'Controller|Name:|Alias:|Powered|Discoverable|Discovering' || true
 echo ""
 echo "========== LE 广播状态 (btmgmt) =========="

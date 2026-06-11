@@ -23,6 +23,7 @@ show_help() {
 选项:
   --name NAME     广播名称 (默认 Bird_BLE_Test)
   --no-echo       不回显 ACK 到 notify 特征
+  --no-ros        不转发 ROS（仅 BLE 打印测试）
   --setup         尝试开启 BlueZ Experimental 并重启 bluetooth
   -h, --help      显示帮助
 
@@ -58,6 +59,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --no-echo)
       EXTRA_ARGS+=(--no-echo)
+      shift
+      ;;
+    --no-ros)
+      EXTRA_ARGS+=(--no-ros)
       shift
       ;;
     *)
@@ -97,13 +102,41 @@ if ! systemctl is-active --quiet bluetooth 2>/dev/null; then
   sleep 1
 fi
 
+# 启动前检查 hci0 是否存在（避免 btmgmt Invalid Index 误导）
+if ! hciconfig hci0 2>/dev/null | grep -q "hci0"; then
+  echo "[error] 未检测到蓝牙适配器 hci0（No default controller available）"
+  echo "  19:04 能连、现在不能 → 多半是驱动/适配器掉线，不是 BLE 脚本问题"
+  echo ""
+  echo "  请执行恢复:"
+  echo "    sudo ./ble_recover.sh"
+  echo "  若仍失败:"
+  echo "    sudo reboot"
+  echo "  重启后确认: hciconfig -a  应出现 hci0"
+  exit 1
+fi
+
 if ! python3 -c "import dbus; from gi.repository import GLib" 2>/dev/null; then
   echo "缺少依赖，请执行:"
   echo "  sudo apt install -y bluez python3-dbus python3-gi"
   exit 1
 fi
 
-chmod +x ble_gatt_server.py
+chmod +x ble_gatt_server.py ble_ros_bridge.py run_ble_with_ros.sh ros_env.sh
+
+# ROS 环境（sim2real_msg 在 install 目录，见 ros_env.sh）
+# shellcheck disable=SC1091
+source "$(pwd)/ros_env.sh"
+
+if ! python3 -c "import rospy" 2>/dev/null; then
+  echo "[error] 本机无法 import rospy，BLE 模式指令将无法控制机器人"
+  echo "  请执行: source /opt/ros/noetic/setup.bash"
+  echo "  或加 --no-ros 仅做 BLE 打印测试"
+  exit 1
+fi
+if ! python3 -c "import sim2real_msg" 2>/dev/null; then
+  echo "[warn] 无法 import sim2real_msg — M_* 模式切换需要此包"
+  echo "  请执行: source ~/sim2real/install/setup.bash"
+fi
 
 # BLE 广播名 + 关闭经典蓝牙配对（避免手机系统反复弹窗）
 sudo hciconfig hci0 up 2>/dev/null || true
@@ -112,7 +145,7 @@ sudo hciconfig hci0 noscan 2>/dev/null || true
 bluetoothctl system-alias "Bird_BLE_Test" 2>/dev/null || true
 bluetoothctl discoverable off 2>/dev/null || true
 bluetoothctl pairable off 2>/dev/null || true
-if command -v btmgmt >/dev/null; then
+if command -v btmgmt >/dev/null && hciconfig hci0 2>/dev/null | grep -q "hci0"; then
   sudo btmgmt -i 0 le on 2>/dev/null || true
   sudo btmgmt -i 0 connectable on 2>/dev/null || true
   sudo btmgmt -i 0 discov off 2>/dev/null || true
@@ -125,12 +158,13 @@ echo "========================================"
 echo " BLE 测试 | 广播名: $NAME"
 echo " MAC: ${MAC:-见 bluetoothctl show}"
 echo " 小程序请用 services=[FFF0] 扫描，见 miniprogram_ble_snippet.js"
+echo " BLE→ROS: X,Y,Z→/cmd_vel | M_*模式 | LT+RT+start/RB/B→/joy"
 echo " 诊断: ./ble_check.sh"
 echo "========================================"
 
 if [ "$(id -u)" -ne 0 ]; then
-  echo "[tip] 使用 sudo 注册 GATT 服务..."
-  exec sudo -E python3 "$(pwd)/ble_gatt_server.py" --name "$NAME" "${EXTRA_ARGS[@]}"
+  echo "[tip] 使用 sudo 注册 GATT 服务（经 run_ble_with_ros.sh 加载 ROS）..."
+  exec sudo -E "$(pwd)/run_ble_with_ros.sh" --name "$NAME" "${EXTRA_ARGS[@]}"
 fi
 
-exec python3 ble_gatt_server.py --name "$NAME" "${EXTRA_ARGS[@]}"
+exec "$(pwd)/run_ble_with_ros.sh" --name "$NAME" "${EXTRA_ARGS[@]}"

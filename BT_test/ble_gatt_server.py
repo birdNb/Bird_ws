@@ -238,15 +238,19 @@ def decode_payload(data: bytes) -> str:
 
 
 class BleTestServer:
-    def __init__(self, adapter: str, name: str, echo: bool):
+    def __init__(self, adapter: str, name: str, echo: bool, ros_control: bool):
         self.adapter = adapter
         self.name = name
         self.echo = echo
+        self.ros_control = ros_control
         self._notify_chrc: Optional[Characteristic] = None
         self._write_chrc: Optional[Characteristic] = None
         self._msg_count = 0
         self._connected_devices: set = set()
         self._adapter_path = ""
+        self._ros_bridge = None
+        self._connect_hint_ids: List[int] = []
+        self._msg_count_at_connect = 0
 
         dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
         self.bus = dbus.SystemBus()
@@ -264,6 +268,35 @@ class BleTestServer:
         except dbus.exceptions.DBusException:
             return path
 
+    def _schedule_connect_hint(self) -> None:
+        self._msg_count_at_connect = self._msg_count
+        hint_id = GLib.timeout_add(5000, self._connect_no_data_hint)
+        self._connect_hint_ids.append(hint_id)
+
+    def _connect_no_data_hint(self) -> bool:
+        if self._msg_count == self._msg_count_at_connect:
+            log("[tip] 已连接 5s 仍无 FFF1 写入 — 小程序须调用 writeBLECharacteristicValue")
+            log("      仅 createBLEConnection 不会收到指令；需先 getBLEDeviceServices/Characteristics")
+            log(f"      写入 UUID: {WRITE_CHAR_UUID}")
+        return False
+
+    def _on_phone_connected(self, path: str) -> None:
+        if path in self._connected_devices:
+            return
+        self._connected_devices.add(path)
+        label = self._device_label(path)
+        log(f"*** 手机已连接: {label} ***")
+        log("    等待 FFF1 特征写入（仅「已连接」不会打印指令）")
+        log(f"    写入 UUID: {WRITE_CHAR_UUID}")
+        self._schedule_connect_hint()
+
+    def _on_phone_disconnected(self, path: str) -> None:
+        if path not in self._connected_devices:
+            return
+        label = self._device_label(path)
+        self._connected_devices.discard(path)
+        log(f"--- 手机已断开: {label} ---")
+
     def _on_device_props_changed(
         self, interface: str, changed, invalidated, path: str = ""
     ) -> None:
@@ -271,17 +304,10 @@ class BleTestServer:
             return
         if not str(path).startswith(self._adapter_path):
             return
-        connected = bool(changed["Connected"])
-        label = self._device_label(path)
-        if connected:
-            if path not in self._connected_devices:
-                self._connected_devices.add(path)
-                log(f"*** 手机已连接: {label} ***")
-                log("    等待小程序向 FFF1 特征写入数据...")
+        if bool(changed["Connected"]):
+            self._on_phone_connected(path)
         else:
-            if path in self._connected_devices:
-                self._connected_devices.discard(path)
-                log(f"--- 手机已断开: {label} ---")
+            self._on_phone_disconnected(path)
 
     def _on_interfaces_added(self, path, interfaces) -> None:
         if DEVICE_IFACE not in interfaces:
@@ -290,18 +316,12 @@ class BleTestServer:
             return
         dev = interfaces[DEVICE_IFACE]
         if dev.get("Connected", False):
-            if path not in self._connected_devices:
-                self._connected_devices.add(path)
-                label = self._device_label(path)
-                log(f"*** 手机已连接: {label} ***")
+            self._on_phone_connected(path)
 
     def _on_interfaces_removed(self, path, interfaces) -> None:
         if DEVICE_IFACE not in interfaces:
             return
-        if path in self._connected_devices:
-            label = self._device_label(path)
-            self._connected_devices.discard(path)
-            log(f"--- 手机已断开: {label} ---")
+        self._on_phone_disconnected(path)
 
     def _watch_devices(self) -> None:
         self.bus.add_signal_receiver(
@@ -324,7 +344,7 @@ class BleTestServer:
     def _on_write(self, data: bytes, options) -> None:
         opt = dict(options) if options else {}
         if opt.get("event") == "read":
-            log(f"手机读取特征值 ({len(data)} bytes)")
+            log(f"手机读取 FFF1 特征 ({len(data)} bytes) — 读不会触发控制，需 write")
             return
 
         self._msg_count += 1
@@ -337,6 +357,15 @@ class BleTestServer:
         if opt:
             log(f"    选项: {opt}")
         log("=" * 56)
+
+        if self.ros_control:
+            if self._ros_bridge is not None:
+                try:
+                    self._ros_bridge.handle_text(text)
+                except Exception as e:
+                    log(f"    [ros] 处理失败: {e}")
+            else:
+                log("    [ros] 桥接未启动，指令未转发机器人（见启动时 ROS 报错）")
 
         if self.echo and self._notify_chrc is not None:
             reply = f"ACK:{text}".encode("utf-8", errors="replace")[:180]
@@ -436,12 +465,28 @@ class BleTestServer:
         except dbus.exceptions.DBusException as e:
             log(f"[warn] 读取适配器信息失败: {e}")
 
+    def _start_ros_bridge(self) -> None:
+        if not self.ros_control:
+            return
+        try:
+            from ble_ros_bridge import BleRosBridge
+        except ImportError as e:
+            log(f"[warn] 无法加载 ble_ros_bridge: {e}")
+            return
+        self._ros_bridge = BleRosBridge(log=log)
+        if self._ros_bridge.start():
+            log("ROS 控制桥接已启动（/cmd_vel + /joy_msg）")
+        else:
+            log("[warn] ROS 桥接启动失败，仅打印 BLE 数据")
+            self._ros_bridge = None
+
     def run(self) -> int:
         adapter_path = self._find_adapter()
         self._adapter_path = adapter_path
         log(f"使用适配器: {adapter_path}")
         self._set_adapter_props(adapter_path)
         self._watch_devices()
+        self._start_ros_bridge()
 
         app = Application(self.bus)
         service = Service(self.bus, 0, SERVICE_UUID, True)
@@ -520,6 +565,10 @@ class BleTestServer:
         log(f"    写入 UUID: {WRITE_CHAR_UUID}")
         log(f"    通知 UUID: {NOTIFY_CHAR_UUID}")
         log("    连接成功 / 收到消息 均会在本终端打印")
+        if self.ros_control:
+            log("    摇杆 X,Y,Z → /cmd_vel")
+            log("    模式 M_default/init/protect/resetzero/tech → /joy")
+            log("    动作 LT+RT+start/RB/B → /joy (joy_teleop→/joy_msg)")
         log("    Ctrl+C 退出")
         print()
 
@@ -527,6 +576,9 @@ class BleTestServer:
             self.mainloop.run()
         except KeyboardInterrupt:
             log("退出")
+        finally:
+            if self._ros_bridge is not None:
+                self._ros_bridge.stop()
         return 0
 
 
@@ -543,8 +595,18 @@ def main() -> int:
         action="store_true",
         help="不向 notify 特征回显 ACK",
     )
+    parser.add_argument(
+        "--no-ros",
+        action="store_true",
+        help="不将 BLE 指令转为 ROS 话题（仅打印）",
+    )
     args = parser.parse_args()
-    server = BleTestServer(args.adapter, args.name, echo=not args.no_echo)
+    server = BleTestServer(
+        args.adapter,
+        args.name,
+        echo=not args.no_echo,
+        ros_control=not args.no_ros,
+    )
     return server.run()
 
 
