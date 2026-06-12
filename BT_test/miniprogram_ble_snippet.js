@@ -1,14 +1,14 @@
 /**
- * 微信小程序 BLE 控制参考（板子 ./start.sh 须常开）
- *
- * 关键：createBLEConnection 只建立链路，必须 write 到 FFF1 板子才会打印/控机器人。
- * app.json 需声明蓝牙权限；手机蓝牙 + 定位(GPS) 都要开。
+ * Bird BLE 指令参考 — 与 BLE_PROTOCOL.md 完全一致
+ * FFE0/FFE1/FFE2 | 摇杆 50ms | 死区 10
  */
-const SERVICE_UUID = '0000FFF0-0000-1000-8000-00805F9B34FB'
-const WRITE_UUID = '0000FFF1-0000-1000-8000-00805F9B34FB'
-const NOTIFY_UUID = '0000FFF2-0000-1000-8000-00805F9B34FB'
+const SERVICE_UUID = '0000FFE0-0000-1000-8000-00805F9B34FB'
+const WRITE_UUID = '0000FFE1-0000-1000-8000-00805F9B34FB'
+const NOTIFY_UUID = '0000FFE2-0000-1000-8000-00805F9B34FB'
 const TARGET_NAME = 'Bird_BLE_Test'
-const TARGET_MAC_PREFIX = '00:19:86'
+const STICK_INTERVAL_MS = 50
+const STICK_DEADZONE = 10 // UI -100~100 刻度
+const CMD_COOLDOWN_MS = 800
 
 function normUuid(u) {
   return (u || '').replace(/-/g, '').toLowerCase()
@@ -19,21 +19,6 @@ function uuidHit(u, needle) {
   return n === needle || n.includes(needle)
 }
 
-function hasTargetService(device) {
-  const list = device.advertisServiceUUIDs || []
-  return list.some((u) => uuidHit(u, 'fff0'))
-}
-
-function nameMatch(device) {
-  const n = (device.name || device.localName || '').toLowerCase()
-  return n.includes('bird_ble') || n === TARGET_NAME.toLowerCase()
-}
-
-function macMatch(device) {
-  const id = (device.deviceId || '').toUpperCase()
-  return id.includes(TARGET_MAC_PREFIX.toUpperCase())
-}
-
 function ab2str(buffer) {
   const arr = new Uint8Array(buffer)
   let s = ''
@@ -42,46 +27,54 @@ function ab2str(buffer) {
 }
 
 function str2ab(text) {
-  const buffer = new ArrayBuffer(text.length)
-  const view = new Uint8Array(buffer)
-  for (let i = 0; i < text.length; i++) view[i] = text.charCodeAt(i)
-  return buffer
+  const buf = new ArrayBuffer(text.length)
+  const v = new Uint8Array(buf)
+  for (let i = 0; i < text.length; i++) v[i] = text.charCodeAt(i)
+  return buf
+}
+
+/** 死区：内部 -100~100，|n|<10 → 0 */
+function applyDeadzone(axis100) {
+  const n = Math.round(axis100)
+  if (Math.abs(n) < STICK_DEADZONE) return 0
+  return Math.max(-100, Math.min(100, n)) / 100
+}
+
+function formatStick(lx, ly, rz) {
+  const x = applyDeadzone(lx * 100)
+  const y = applyDeadzone(ly * 100)
+  const z = applyDeadzone(rz * 100)
+  return `X:${x.toFixed(2)},Y:${y.toFixed(2)},Z:${z.toFixed(2)}`
+}
+
+function delay(ms) {
+  return new Promise((r) => setTimeout(r, ms))
+}
+
+function isIOS() {
+  try { return wx.getSystemInfoSync().platform === 'ios' } catch (e) { return false }
 }
 
 Page({
-  data: {
-    deviceId: '',
-    log: '',
-    lx: 0,
-    ly: 0,
-    rz: 0,
-    gattReady: false,
-  },
+  data: { deviceId: '', lx: 0, ly: 0, rz: 0, gattReady: false },
 
-  // 连接后由 getBLEDeviceCharacteristics 填充（勿硬编码，用发现到的 UUID）
   _serviceId: '',
   _writeCharId: '',
   _notifyCharId: '',
+  _writeNoResponse: false,
   _sendTimer: null,
-
-  log(msg) {
-    const line = `[${new Date().toLocaleTimeString()}] ${msg}`
-    console.log(line)
-    this.setData({ log: this.data.log + line + '\n' })
-  },
+  _lastStick: '',
+  _lastCmdAt: 0,
 
   onUnload() {
     this.stopSendLoop()
-    if (this.data.deviceId) {
-      wx.closeBLEConnection({ deviceId: this.data.deviceId })
-    }
+    if (this.data.deviceId) wx.closeBLEConnection({ deviceId: this.data.deviceId })
   },
 
   openAdapter() {
     wx.openBluetoothAdapter({
       mode: 'central',
-      success: () => { this.log('蓝牙适配器已打开'); this.startScan() },
-      fail: (e) => this.log('openBluetoothAdapter 失败: ' + JSON.stringify(e)),
+      success: () => this.startScan(),
     })
   },
 
@@ -89,152 +82,146 @@ Page({
     wx.startBluetoothDevicesDiscovery({
       services: [SERVICE_UUID],
       allowDuplicatesKey: true,
-      powerLevel: 'high',
       success: () => {
-        this.log('按服务 UUID 扫描: ' + SERVICE_UUID)
         wx.onBluetoothDeviceFound((res) => {
           res.devices.forEach((d) => {
-            const hit = nameMatch(d) || macMatch(d) || hasTargetService(d)
-            if (hit && !this.data.deviceId) {
-              this.log('>>> 匹配板子，开始连接')
-              this.setData({ deviceId: d.deviceId })
-              wx.stopBluetoothDevicesDiscovery({})
-              this.connect(d.deviceId)
-            }
+            if (this.data.deviceId) return
+            const name = (d.name || d.localName || '').toLowerCase()
+            if (!name.includes('bird_ble') && !uuidHit((d.advertisServiceUUIDs || [])[0], 'ffe0')) return
+            this.setData({ deviceId: d.deviceId })
+            wx.stopBluetoothDevicesDiscovery({})
+            this.establishBleLink(d.deviceId)
           })
         })
       },
-      fail: (e) => this.log('扫描失败: ' + JSON.stringify(e)),
     })
   },
 
-  connect(deviceId) {
-    this.setData({ gattReady: false })
-    wx.createBLEConnection({
-      deviceId,
-      timeout: 10000,
-      success: () => {
-        this.log('BLE 链路已连接，正在发现 GATT 服务...')
-        if (wx.setBLEMTU) {
-          wx.setBLEMTU({ deviceId, mtu: 512, fail: () => {} })
-        }
-        // 微信建议连接后稍等再 discover
-        setTimeout(() => this.discoverGatt(deviceId), 400)
-      },
-      fail: (e) => this.log('连接失败: ' + JSON.stringify(e)),
+  async establishBleLink(deviceId) {
+    await this._createConnection(deviceId)
+    await delay(isIOS() ? 2000 : 800)
+    if (wx.setBLEMTU) wx.setBLEMTU({ deviceId, mtu: 247 })
+    await this._discoverGatt(deviceId)
+    await this._subscribeNotify(deviceId)
+    await this._write('M_default', true)
+    await delay(300)
+    this.setData({ gattReady: true })
+    this.startSendLoop()
+  },
+
+  _createConnection(deviceId) {
+    return new Promise((ok, fail) => {
+      wx.createBLEConnection({ deviceId, timeout: 10000, success: () => ok(), fail: fail })
     })
   },
 
-  discoverGatt(deviceId) {
-    wx.getBLEDeviceServices({
-      deviceId,
-      success: (r) => {
-        this.log('服务: ' + r.services.map((s) => s.uuid).join(', '))
-        const sid = r.services.find((s) => uuidHit(s.uuid, 'fff0'))
-        if (!sid) {
-          this.log('未找到 FFF0 服务')
-          return
-        }
-        this._serviceId = sid.uuid
-        wx.getBLEDeviceCharacteristics({
-          deviceId,
-          serviceId: this._serviceId,
-          success: (c) => {
-            this.log('特征: ' + c.characteristics.map((x) => x.uuid).join(', '))
-            const writeCh = c.characteristics.find((x) => uuidHit(x.uuid, 'fff1'))
-            const notifyCh = c.characteristics.find((x) => uuidHit(x.uuid, 'fff2'))
-            if (!writeCh) {
-              this.log('未找到 FFF1 可写特征')
-              return
-            }
-            this._writeCharId = writeCh.uuid
-            this._writeNoResponse = !!(writeCh.properties && writeCh.properties.writeNoResponse)
-            this.setData({ gattReady: true })
-            this.log('GATT 就绪，可写入 FFF1')
-
-            if (notifyCh) {
-              this._notifyCharId = notifyCh.uuid
-              wx.notifyBLECharacteristicValueChange({
-                deviceId,
-                serviceId: this._serviceId,
-                characteristicId: this._notifyCharId,
-                state: true,
-                success: () => this.log('已订阅 notify (FFF2)'),
-              })
-              wx.onBLECharacteristicValueChange((ev) => {
-                this.log('收到 notify: ' + ab2str(ev.value))
-              })
-            }
-
-            // 连接后立刻发一条，板子终端应出现 >>> 收到手机消息
-            this.sendText('X:0.00,Y:0.00,Z:0.00')
-            this.startSendLoop()
-          },
-          fail: (e) => this.log('getBLEDeviceCharacteristics 失败: ' + JSON.stringify(e)),
-        })
-      },
-      fail: (e) => this.log('getBLEDeviceServices 失败: ' + JSON.stringify(e)),
+  _discoverGatt(deviceId) {
+    return new Promise((ok, fail) => {
+      wx.getBLEDeviceServices({
+        deviceId,
+        success: (r) => {
+          const s = r.services.find((x) => uuidHit(x.uuid, 'ffe0'))
+          if (!s) return fail(new Error('no FFE0'))
+          this._serviceId = s.uuid
+          wx.getBLEDeviceCharacteristics({
+            deviceId,
+            serviceId: this._serviceId,
+            success: (c) => {
+              const w = c.characteristics.find((x) => uuidHit(x.uuid, 'ffe1'))
+              const n = c.characteristics.find((x) => uuidHit(x.uuid, 'ffe2'))
+              if (!w) return fail(new Error('no FFE1'))
+              this._writeCharId = w.uuid
+              this._notifyCharId = n ? n.uuid : ''
+              const p = w.properties || {}
+              this._writeNoResponse = !!(p.writeNoResponse || p.writeWithoutResponse)
+              ok()
+            },
+            fail,
+          })
+        },
+        fail,
+      })
     })
   },
 
-  sendText(text) {
+  _subscribeNotify(deviceId) {
+    if (!this._notifyCharId) return Promise.resolve()
+    wx.onBLECharacteristicValueChange((ev) => console.log('ACK:', ab2str(ev.value)))
+    return new Promise((ok, fail) => {
+      wx.notifyBLECharacteristicValueChange({
+        deviceId,
+        serviceId: this._serviceId,
+        characteristicId: this._notifyCharId,
+        state: true,
+        success: ok,
+        fail,
+      })
+    })
+  },
+
+  _write(text, requireResponse) {
     const deviceId = this.data.deviceId
-    if (!deviceId || !this._serviceId || !this._writeCharId) {
-      this.log('GATT 未就绪，无法发送')
-      return
-    }
-    const req = {
-      deviceId,
-      serviceId: this._serviceId,
-      characteristicId: this._writeCharId,
-      value: str2ab(text),
-      success: () => {},
-      fail: (e) => this.log('写入失败: ' + JSON.stringify(e)),
-    }
-    if (this._writeNoResponse) {
-      req.writeType = 'writeNoResponse'
-    }
-    wx.writeBLECharacteristicValue(req)
+    return new Promise((ok, fail) => {
+      const req = {
+        deviceId,
+        serviceId: this._serviceId,
+        characteristicId: this._writeCharId,
+        value: str2ab(text),
+        success: ok,
+        fail,
+      }
+      if (!requireResponse && this._writeNoResponse) req.writeType = 'writeNoResponse'
+      wx.writeBLECharacteristicValue(req)
+    })
+  },
+
+  sendStick() {
+    const { lx, ly, rz } = this.data
+    const text = formatStick(lx, ly, rz)
+    if (text === this._lastStick) return
+    this._lastStick = text
+    this._write(text, false).catch(() => {})
   },
 
   startSendLoop() {
     this.stopSendLoop()
-    // 摇杆数据需周期性 write，板子才会持续收到
-    this._sendTimer = setInterval(() => {
-      const { lx, ly, rz } = this.data
-      const text = `X:${lx.toFixed(2)},Y:${ly.toFixed(2)},Z:${rz.toFixed(2)}`
-      this.sendText(text)
-    }, 100)
+    this._sendTimer = setInterval(() => this.sendStick(), STICK_INTERVAL_MS)
   },
 
   stopSendLoop() {
-    if (this._sendTimer) {
-      clearInterval(this._sendTimer)
-      this._sendTimer = null
-    }
+    if (this._sendTimer) clearInterval(this._sendTimer)
+    this._sendTimer = null
   },
 
-  sendTest() {
-    this.sendText('hello from miniprogram ' + Date.now())
+  async sendCommand(text) {
+    if (Date.now() - this._lastCmdAt < CMD_COOLDOWN_MS) return
+    this._lastCmdAt = Date.now()
+    await this._write(text, true)
   },
 
-  sendStand() {
-    this.sendText('LT+RT+START')
+  // --- 模式（进入遥控页先发 M_default）---
+  sendModeDefault() { return this.sendCommand('M_default') },
+  sendModeInit() { return this.sendCommand('M_init') },
+  sendModeProtect() { return this.sendCommand('M_protect') },
+  sendModeResetzero() { return this.sendCommand('M_resetzero') },
+  sendModeTech() { return this.sendCommand('M_tech') },
+
+  // --- 组合键（大小写与固件一致）---
+  sendStand() { return this.sendCommand('LT+RT+start') },
+  sendCrouch() { return this.sendCommand('LT+RT+RB') },
+  sendCheer() { return this.sendCommand('RT+A') },
+  sendGaitToggle() { return this.sendCommand('LT+RT+LB') },
+  sendUnload() { return this.sendCommand('LT+RT+B') },
+
+  /** 左摇杆 X/Y、右摇杆 axisX→Z */
+  onLeftStick(e) {
+    const x = Number(e.detail.x || 0) / 100
+    const y = Number(e.detail.y || 0) / 100
+    this.setData({ lx: x, ly: y })
   },
 
-  sendCrouch() {
-    this.sendText('LT+RT+RB')
-  },
-
-  sendUnload() {
-    this.sendText('LT+RT+B')
-  },
-
-  onStickChange(e) {
-    const v = Number(e.detail.value) / 100
-    const axis = e.currentTarget.dataset.axis
-    if (axis === 'x') this.setData({ lx: v })
-    if (axis === 'y') this.setData({ ly: v })
-    if (axis === 'z') this.setData({ rz: v })
+  onRightStick(e) {
+    const z = Number(e.detail.x || 0) / 100
+    this.setData({ rz: z })
   },
 })

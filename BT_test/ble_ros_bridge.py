@@ -31,7 +31,8 @@ STEP_GAP_SEC = 0.12
 MENU_STEP_GAP_SEC = 0.35  # master joyMsgCallback 每步后 sleep 200ms
 CMD_VEL_HZ = 20
 CMD_VEL_TIMEOUT_SEC = 0.35
-STICK_DEADBAND = 0.05
+# 与小程序死区 10（-100~100 刻度）对齐 → |v| < 0.10 归零
+STICK_DEADBAND = 0.10
 ACTION_COOLDOWN_SEC = 1.0
 MODE_COOLDOWN_SEC = 0.8
 
@@ -90,6 +91,8 @@ ACTION_COMMANDS: Dict[str, Tuple[str, str]] = {
     "lt+rt+start": ("起立", "lt+rt+start"),
     "lt+rt+rb": ("蹲下", "lt+rt+rb"),
     "lt+rt+b": ("卸力", "lt+rt+b"),
+    "lt+rt+lb": ("步态启停", "lt+rt+lb"),
+    "rt+a": ("挥双手", "rt+a"),
 }
 
 BUTTON_PRESS = 1.0
@@ -346,6 +349,21 @@ class BleRosBridge:
         self._publish_zero_twist()
         if self._ros_thread is not None:
             self._ros_thread.join(timeout=2.0)
+
+    def on_disconnect(self) -> None:
+        with self._lock:
+            self._last_stick = None
+            self._last_stick_ts = 0.0
+        self._publish_zero_twist()
+        self._log("[ros] 断连急停：零速")
+
+    def handle_command(self, kind: str, text: str) -> None:
+        if kind == "stick":
+            self.handle_text(text)
+        elif kind == "mode":
+            self.handle_text(text)
+        elif kind == "action":
+            self._trigger_action(text)
 
     def handle_text(self, text: str) -> None:
         if not self.ready:

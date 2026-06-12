@@ -3,10 +3,8 @@
 """
 BLE GATT 从机测试：手机/微信小程序连接后向可写特征发数据，本脚本打印收到的内容。
 
-小程序侧建议 UUID（与 start.sh 输出一致）：
-  服务 serviceId:  0000FFF0-0000-1000-8000-00805F9B34FB
-  写入 write UUID:  0000FFF1-0000-1000-8000-00805F9B34FB  (write / writeNoResponse)
-  通知 notify UUID: 0000FFF2-0000-1000-8000-00805F9B34FB  (可选，收板子回显)
+小程序侧 UUID（见 BLE_PROTOCOL.md）：
+  服务 FFE0 / 写入 FFE1 / 通知 FFE2
 
 依赖：sudo apt install bluez python3-dbus python3-gi
 需蓝牙服务运行；若注册 GATT 失败，在 /etc/bluetooth/main.conf [General] 加 Experimental=true 后重启 bluetooth。
@@ -26,10 +24,10 @@ import dbus.mainloop.glib
 import dbus.service
 from gi.repository import GLib
 
-# ----- 与微信小程序常见的 FFF0 自定义服务对齐 -----
-SERVICE_UUID = "0000fff0-0000-1000-8000-00805f9b34fb"
-WRITE_CHAR_UUID = "0000fff1-0000-1000-8000-00805f9b34fb"
-NOTIFY_CHAR_UUID = "0000fff2-0000-1000-8000-00805f9b34fb"
+# ----- 量产 BLE 服务 FFE0 -----
+SERVICE_UUID = "0000ffe0-0000-1000-8000-00805f9b34fb"
+WRITE_CHAR_UUID = "0000ffe1-0000-1000-8000-00805f9b34fb"
+NOTIFY_CHAR_UUID = "0000ffe2-0000-1000-8000-00805f9b34fb"
 
 DEVICE_NAME = "Bird_BLE_Test"
 # 小程序也可按 MAC 连接（系统设置里看到的蓝牙地址）
@@ -212,7 +210,7 @@ class Advertisement(dbus.service.Object):
             LE_ADV_IFACE: {
                 "Type": "peripheral",
                 "LocalName": self.local_name,
-                "ServiceUUIDs": dbus.Array(["fff0"], signature="s"),
+                "ServiceUUIDs": dbus.Array(["ffe0"], signature="s"),
                 "Discoverable": dbus.Boolean(True),
                 "IncludeTxPower": False,
                 "MinInterval": dbus.UInt16(0x0020),
@@ -249,6 +247,7 @@ class BleTestServer:
         self._connected_devices: set = set()
         self._adapter_path = ""
         self._ros_bridge = None
+        self._dispatcher = None
         self._connect_hint_ids: List[int] = []
         self._msg_count_at_connect = 0
 
@@ -275,8 +274,8 @@ class BleTestServer:
 
     def _connect_no_data_hint(self) -> bool:
         if self._msg_count == self._msg_count_at_connect:
-            log("[tip] 已连接 5s 仍无 FFF1 写入 — 小程序须调用 writeBLECharacteristicValue")
-            log("      仅 createBLEConnection 不会收到指令；需先 getBLEDeviceServices/Characteristics")
+            log("[tip] 已连接 5s 仍无 FFE1 写入 — 见 BLE_PROTOCOL.md")
+            log("      进入遥控页须 write: M_default")
             log(f"      写入 UUID: {WRITE_CHAR_UUID}")
         return False
 
@@ -286,7 +285,7 @@ class BleTestServer:
         self._connected_devices.add(path)
         label = self._device_label(path)
         log(f"*** 手机已连接: {label} ***")
-        log("    等待 FFF1 特征写入（仅「已连接」不会打印指令）")
+        log("    等待 FFE1 写入（握手 M_default）")
         log(f"    写入 UUID: {WRITE_CHAR_UUID}")
         self._schedule_connect_hint()
 
@@ -296,6 +295,10 @@ class BleTestServer:
         label = self._device_label(path)
         self._connected_devices.discard(path)
         log(f"--- 手机已断开: {label} ---")
+        if self._dispatcher is not None:
+            self._dispatcher.on_disconnect()
+        if self._ros_bridge is not None:
+            self._ros_bridge.on_disconnect()
 
     def _on_device_props_changed(
         self, interface: str, changed, invalidated, path: str = ""
@@ -344,36 +347,36 @@ class BleTestServer:
     def _on_write(self, data: bytes, options) -> None:
         opt = dict(options) if options else {}
         if opt.get("event") == "read":
-            log(f"手机读取 FFF1 特征 ({len(data)} bytes) — 读不会触发控制，需 write")
+            log(f"手机读取 FFE1 ({len(data)} bytes) — 须 write")
             return
 
         self._msg_count += 1
+        if self._dispatcher is not None:
+            self._dispatcher.dispatch(data)
+            return
+
         text = decode_payload(data)
-        log("=" * 56)
-        log(f">>> 收到手机消息 #{self._msg_count}")
-        log(f"    文本: {text}")
-        log(f"    HEX:  {data.hex(' ')}")
-        log(f"    长度: {len(data)} bytes")
-        if opt:
-            log(f"    选项: {opt}")
-        log("=" * 56)
+        log(f">>> 收到: {text}")
+        if self.ros_control and self._ros_bridge is not None:
+            try:
+                self._ros_bridge.handle_text(text)
+            except Exception as e:
+                log(f"    [ros] 处理失败: {e}")
 
-        if self.ros_control:
-            if self._ros_bridge is not None:
-                try:
-                    self._ros_bridge.handle_text(text)
-                except Exception as e:
-                    log(f"    [ros] 处理失败: {e}")
-            else:
-                log("    [ros] 桥接未启动，指令未转发机器人（见启动时 ROS 报错）")
+    def _send_ack(self, wire: str) -> None:
+        if not self.echo or self._notify_chrc is None:
+            return
+        from ble_command_dispatcher import make_notify_reply
 
-        if self.echo and self._notify_chrc is not None:
-            reply = f"ACK:{text}".encode("utf-8", errors="replace")[:180]
-            self._notify_chrc.notify(reply)
-            log(f"    已回显 ACK 到 notify 特征 ({len(reply)} bytes)")
+        self._notify_chrc.notify(make_notify_reply(wire))
+        log(f"    ACK → FFE2: ACK:{wire}")
+
+    def _handle_dispatched(self, kind, payload: str) -> None:
+        if self._ros_bridge is not None and self.ros_control:
+            self._ros_bridge.handle_command(kind.value, payload)
 
     def _on_notify_start(self) -> None:
-        log("手机已订阅 notify 特征 (FFF2)，可接收板子回显")
+        log("手机已订阅 FFE2 notify")
 
     def _on_notify_stop(self) -> None:
         log("手机已取消 notify 订阅")
@@ -461,7 +464,7 @@ class BleTestServer:
             alias = str(props.Get(ADAPTER_IFACE, "Alias"))
             addr = str(props.Get(ADAPTER_IFACE, "Address"))
             log(f"当前适配器 MAC: {addr}  Alias: {alias}")
-            log("小程序请用 services=[FFF0] 扫描，或按此 MAC 连接")
+            log("小程序请用 services=[FFE0] 扫描，或按此 MAC 连接")
         except dbus.exceptions.DBusException as e:
             log(f"[warn] 读取适配器信息失败: {e}")
 
@@ -480,6 +483,20 @@ class BleTestServer:
             log("[warn] ROS 桥接启动失败，仅打印 BLE 数据")
             self._ros_bridge = None
 
+    def _start_dispatcher(self) -> None:
+        try:
+            from ble_command_dispatcher import CommandDispatcher
+        except ImportError as e:
+            log(f"[warn] 无法加载 ble_command_dispatcher: {e}")
+            return
+        self._dispatcher = CommandDispatcher(
+            handle=self._handle_dispatched,
+            ack=self._send_ack if self.echo else None,
+            log=log,
+        )
+        self._dispatcher.start()
+        log("指令分发器：50ms | 摇杆去重静默 | 模式/动作 ACK")
+
     def run(self) -> int:
         adapter_path = self._find_adapter()
         self._adapter_path = adapter_path
@@ -487,6 +504,7 @@ class BleTestServer:
         self._set_adapter_props(adapter_path)
         self._watch_devices()
         self._start_ros_bridge()
+        self._start_dispatcher()
 
         app = Application(self.bus)
         service = Service(self.bus, 0, SERVICE_UUID, True)
@@ -577,6 +595,8 @@ class BleTestServer:
         except KeyboardInterrupt:
             log("退出")
         finally:
+            if self._dispatcher is not None:
+                self._dispatcher.stop()
             if self._ros_bridge is not None:
                 self._ros_bridge.stop()
         return 0

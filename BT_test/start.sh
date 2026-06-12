@@ -11,9 +11,9 @@ show_help() {
 
 小程序连接参数（复制到微信开发者工具）:
   设备名: Bird_BLE_Test  （可能扫不到名称，请用下面 UUID 扫描）
-  服务 serviceId:  0000FFF0-0000-1000-8000-00805F9B34FB  ← 扫描必用
-  写入特征 UUID:  0000FFF1-0000-1000-8000-00805F9B34FB
-  通知特征 UUID:  0000FFF2-0000-1000-8000-00805F9B34FB  (可选)
+  服务 FFE0:  0000FFE0-0000-1000-8000-00805F9B34FB  ← 扫描必用
+  写入 FFE1:  0000FFE1-0000-1000-8000-00805F9B34FB
+  通知 FFE2:  0000FFE2-0000-1000-8000-00805F9B34FB
   板子 MAC 参考:  00:19:86:00:2E:AF
 
 重要: 只在【微信小程序】里连接，不要在手机系统蓝牙里点配对
@@ -121,7 +121,7 @@ if ! python3 -c "import dbus; from gi.repository import GLib" 2>/dev/null; then
   exit 1
 fi
 
-chmod +x ble_gatt_server.py ble_ros_bridge.py run_ble_with_ros.sh ros_env.sh
+chmod +x ble_gatt_server.py ble_ros_bridge.py ble_command_dispatcher.py run_ble_with_ros.sh ros_env.sh
 
 # ROS 环境（sim2real_msg 在 install 目录，见 ros_env.sh）
 # shellcheck disable=SC1091
@@ -157,7 +157,7 @@ MAC=$(bluetoothctl show 2>/dev/null | awk '/Controller/ {print $2}' | head -1)
 echo "========================================"
 echo " BLE 测试 | 广播名: $NAME"
 echo " MAC: ${MAC:-见 bluetoothctl show}"
-echo " 小程序请用 services=[FFF0] 扫描，见 miniprogram_ble_snippet.js"
+echo " 小程序请用 services=[FFE0] 扫描，见 BLE_PROTOCOL.md"
 echo " BLE→ROS: X,Y,Z→/cmd_vel | M_*模式 | LT+RT+start/RB/B→/joy"
 echo " 诊断: ./ble_check.sh"
 echo "========================================"
