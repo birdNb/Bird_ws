@@ -19,6 +19,8 @@ MAX_PACKET_BYTES = 64
 QUEUE_MAX = 32
 TICK_INTERVAL_SEC = 0.05
 STICK_EPS = 0.01
+STICK_XY_LIMIT = 1.0
+STICK_Z_LIMIT = 1.5
 STICK_LOG_DEBUG = False
 
 STICK_RE = re.compile(
@@ -69,9 +71,9 @@ def classify_payload(text: str) -> Tuple[CommandKind, str, str]:
     m = STICK_RE.match(raw)
     if m:
         x, y, z = (float(m.group(i)) for i in (1, 2, 3))
-        x = max(-1.0, min(1.0, x))
-        y = max(-1.0, min(1.0, y))
-        z = max(-1.0, min(1.0, z))
+        x = max(-STICK_XY_LIMIT, min(STICK_XY_LIMIT, x))
+        y = max(-STICK_XY_LIMIT, min(STICK_XY_LIMIT, y))
+        z = max(-STICK_Z_LIMIT, min(STICK_Z_LIMIT, z))
         wire = f"X:{x:.2f},Y:{y:.2f},Z:{z:.2f}"
         return CommandKind.STICK, wire, wire
 
@@ -112,6 +114,7 @@ class CommandDispatcher:
         self._thread: Optional[threading.Thread] = None
         self._last_stick: Optional[str] = None
         self._msg_count = 0
+        self._recent_action_ts: dict = {}
 
     def start(self) -> None:
         if self._thread is not None:
@@ -147,6 +150,14 @@ class CommandDispatcher:
             self._log(f"[dispatcher] 无法识别: {text!r}")
             return
 
+        if kind == CommandKind.ACTION:
+            now = time.monotonic()
+            window = 8.0 if payload == "rt+a" else 1.5
+            last = self._recent_action_ts.get(payload, 0.0)
+            if now - last < window:
+                return
+            self._recent_action_ts[payload] = now
+
         cmd = QueuedCommand(kind=kind, wire=wire, payload=payload)
         with self._lock:
             if kind == CommandKind.STICK:
@@ -158,6 +169,10 @@ class CommandDispatcher:
                 self._queue.append(cmd)
             else:
                 self._queue = deque(c for c in self._queue if c.kind != CommandKind.STICK)
+                if kind == CommandKind.ACTION and any(
+                    c.payload == payload for c in self._queue
+                ):
+                    return
                 self._queue.append(cmd)
 
     def _drop_oldest_stick(self) -> bool:

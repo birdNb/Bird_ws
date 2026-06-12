@@ -8,7 +8,9 @@ const NOTIFY_UUID = '0000FFE2-0000-1000-8000-00805F9B34FB'
 const TARGET_NAME = 'Bird_BLE_Test'
 const STICK_INTERVAL_MS = 50
 const STICK_DEADZONE = 10 // UI -100~100 刻度
+const STICK_Z_SCALE = 1.5 // 右转 Z 满量程 ±1.5
 const CMD_COOLDOWN_MS = 800
+const CHEER_COOLDOWN_MS = 8000
 
 function normUuid(u) {
   return (u || '').replace(/-/g, '').toLowerCase()
@@ -40,10 +42,12 @@ function applyDeadzone(axis100) {
   return Math.max(-100, Math.min(100, n)) / 100
 }
 
+/** lx=UI横(右+), ly=UI纵(上为负) → 协议 X前后/Y左右/Z右转 */
 function formatStick(lx, ly, rz) {
-  const x = applyDeadzone(lx * 100)
-  const y = applyDeadzone(ly * 100)
-  const z = applyDeadzone(rz * 100)
+  const x = applyDeadzone(-ly * 100)
+  const y = applyDeadzone(lx * 100)
+  let z = applyDeadzone(rz * 100) * STICK_Z_SCALE
+  z = Math.max(-STICK_Z_SCALE, Math.min(STICK_Z_SCALE, z))
   return `X:${x.toFixed(2)},Y:${y.toFixed(2)},Z:${z.toFixed(2)}`
 }
 
@@ -65,6 +69,7 @@ Page({
   _sendTimer: null,
   _lastStick: '',
   _lastCmdAt: 0,
+  _lastCheerAt: 0,
 
   onUnload() {
     this.stopSendLoop()
@@ -209,11 +214,17 @@ Page({
   // --- 组合键（大小写与固件一致）---
   sendStand() { return this.sendCommand('LT+RT+start') },
   sendCrouch() { return this.sendCommand('LT+RT+RB') },
-  sendCheer() { return this.sendCommand('RT+A') },
+  /** 挥双手：仅单击触发一次，勿在 touchstart/touchend 各发一遍 */
+  sendCheer() {
+    const now = Date.now()
+    if (now - this._lastCheerAt < CHEER_COOLDOWN_MS) return
+    this._lastCheerAt = now
+    return this.sendCommand('RT+A')
+  },
   sendGaitToggle() { return this.sendCommand('LT+RT+LB') },
   sendUnload() { return this.sendCommand('LT+RT+B') },
 
-  /** 左摇杆 X/Y、右摇杆 axisX→Z */
+  /** 左摇杆 detail.x/y；右摇杆 detail.x→rz（formatStick 内转协议 X/Y/Z） */
   onLeftStick(e) {
     const x = Number(e.detail.x || 0) / 100
     const y = Number(e.detail.y || 0) / 100

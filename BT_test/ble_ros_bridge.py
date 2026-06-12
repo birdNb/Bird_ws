@@ -33,8 +33,14 @@ CMD_VEL_HZ = 20
 CMD_VEL_TIMEOUT_SEC = 0.35
 # 与小程序死区 10（-100~100 刻度）对齐 → |v| < 0.10 归零
 STICK_DEADBAND = 0.10
+STICK_XY_LIMIT = 1.0
+STICK_Z_LIMIT = 1.5
 ACTION_COOLDOWN_SEC = 1.0
 MODE_COOLDOWN_SEC = 0.8
+# 挥双手：短脉冲触发（勿 1s 长按，松开会被固件当成第二次触发）
+CHEER_PULSE_SEC = 0.35
+CHEER_COOLDOWN_SEC = 8.0
+CHEER_RELEASE_FRAMES = 20
 
 JOY_AXES_COUNT = 8
 JOY_BUTTONS_COUNT = 11
@@ -177,9 +183,9 @@ class BleCommandParser:
         if m:
             z_raw = m.group(3)
             result.stick = StickCommand(
-                x=_clamp_axis(float(m.group(1))),
-                y=_clamp_axis(float(m.group(2))),
-                z=_clamp_axis(float(z_raw)) if z_raw is not None else 0.0,
+                x=_clamp_axis(float(m.group(1)), STICK_XY_LIMIT),
+                y=_clamp_axis(float(m.group(2)), STICK_XY_LIMIT),
+                z=_clamp_axis(float(z_raw), STICK_Z_LIMIT) if z_raw is not None else 0.0,
             )
 
         token = _norm_token(text)
@@ -204,20 +210,28 @@ class BleCommandParser:
         return None
 
 
-def _clamp_axis(v: float) -> float:
-    v = max(-1.0, min(1.0, v))
+def _clamp_axis(v: float, limit: float = STICK_XY_LIMIT) -> float:
+    v = max(-limit, min(limit, v))
     if abs(v) < STICK_DEADBAND:
         return 0.0
     return v
 
 
 def _stick_to_twist(stick: StickCommand):
+    """BLE 摇杆 → /cmd_vel，与 joy.yaml 实体手柄一致。
+
+    协议约定（小程序写入）:
+      X 前后（前 +）  Y 左右（右 +）  Z 右转 +
+    joy.yaml:
+      axis1→linear.x  axis0→linear.y  axis3→angular.z
+    Linux js0 前推 axis1 为负，故 linear.x 取反；右转 axis3 为正，Z 取反与现场一致。
+    """
     from geometry_msgs.msg import Twist
 
     msg = Twist()
-    msg.linear.x = stick.y * SCALE_LINEAR_X
-    msg.linear.y = stick.x * SCALE_LINEAR_Y
-    msg.angular.z = stick.z * SCALE_ANGULAR_Z
+    msg.linear.x = -stick.x * SCALE_LINEAR_X
+    msg.linear.y = stick.y * SCALE_LINEAR_Y
+    msg.angular.z = -stick.z * SCALE_ANGULAR_Z
     return msg
 
 
@@ -332,6 +346,7 @@ class BleRosBridge:
         self._joy_msg_pub = None
         self._has_joy = False
         self._Twist = None
+        self._cheer_running = False
 
     @property
     def ready(self) -> bool:
@@ -354,7 +369,9 @@ class BleRosBridge:
         with self._lock:
             self._last_stick = None
             self._last_stick_ts = 0.0
+        self._cheer_running = False
         self._publish_zero_twist()
+        self._flush_joy_release("rt+a")
         self._log("[ros] 断连急停：零速")
 
     def handle_command(self, kind: str, text: str) -> None:
@@ -530,6 +547,10 @@ class BleRosBridge:
     def _trigger_action(self, action_key: str) -> None:
         if action_key not in ACTION_COMMANDS:
             return
+        if action_key == "rt+a":
+            self._trigger_cheer()
+            return
+
         now = time.monotonic()
         if now - self._last_action_ts.get(action_key, 0.0) < ACTION_COOLDOWN_SEC:
             return
@@ -547,6 +568,29 @@ class BleRosBridge:
             daemon=True,
         ).start()
 
+    def _trigger_cheer(self) -> None:
+        now = time.monotonic()
+        if self._cheer_running:
+            self._log("[ros] 挥双手执行中，忽略重复指令")
+            return
+        if now - self._last_action_ts.get("rt+a", 0.0) < CHEER_COOLDOWN_SEC:
+            self._log("[ros] 挥双手冷却中，忽略")
+            return
+        self._last_action_ts["rt+a"] = now
+        self._cheer_running = True
+        self._log(f"[ros] 挥双手: RT+A 短脉冲 {CHEER_PULSE_SEC}s（单次触发）")
+        self._publish_zero_twist()
+        with self._lock:
+            self._last_stick = None
+        threading.Thread(target=self._run_cheer_once, daemon=True).start()
+
+    def _run_cheer_once(self) -> None:
+        try:
+            self._run_steps(["rt+a"], "挥双手", CHEER_PULSE_SEC, step_gap=0.0)
+            self._flush_joy_release("rt+a", CHEER_RELEASE_FRAMES)
+        finally:
+            self._cheer_running = False
+
     def _wait_joy_path(self) -> None:
         import rospy
 
@@ -560,6 +604,15 @@ class BleRosBridge:
             rospy.sleep(0.05)
         topic = "/joy_msg" if self._has_joy else "/joy"
         self._log(f"[ros][warn] {topic} 无订阅者(sim2real_master)，指令可能无效")
+
+    def _flush_joy_release(self, combo: str, frames: int = 10) -> None:
+        """连发松开帧，避免释放沿被固件当成第二次触发。"""
+        interval = 1.0 / JOY_PUBLISH_HZ
+        for _ in range(frames):
+            if self._stop.is_set():
+                break
+            self._publish_token(combo, False)
+            time.sleep(interval)
 
     def _publish_token(self, token: str, pressed: bool) -> None:
         """模式/动作优先直发 /joy_msg，避免与 joy_node 抢占 /joy。"""
