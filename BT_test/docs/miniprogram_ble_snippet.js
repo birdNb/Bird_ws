@@ -1,12 +1,12 @@
 /**
  * Bird BLE 指令参考 — 与 BLE_PROTOCOL.md 完全一致
- * FFE0/FFE1/FFE2 | 摇杆 50ms | 死区 10
+ * FFE0/FFE1/FFE2 | 摇杆 20Hz | 可选 ,N:序号 保活
  */
 const SERVICE_UUID = '0000FFE0-0000-1000-8000-00805F9B34FB'
 const WRITE_UUID = '0000FFE1-0000-1000-8000-00805F9B34FB'
 const NOTIFY_UUID = '0000FFE2-0000-1000-8000-00805F9B34FB'
 const TARGET_NAME = 'Bird_BLE_Test'
-const STICK_INTERVAL_MS = 50
+const STICK_INTERVAL_MS = 50 // 20Hz
 const STICK_DEADZONE = 10 // UI -100~100 刻度
 const STICK_Z_SCALE = 1.5 // 右转 Z 满量程 ±1.5
 const CMD_COOLDOWN_MS = 800
@@ -60,14 +60,14 @@ function isIOS() {
 }
 
 Page({
-  data: { deviceId: '', lx: 0, ly: 0, rz: 0, gattReady: false },
+  data: { deviceId: '', lx: 0, ly: 0, rz: 0, gattReady: false, robotIp: '', battery: -1, fsmState: -1 },
 
   _serviceId: '',
   _writeCharId: '',
   _notifyCharId: '',
   _writeNoResponse: false,
   _sendTimer: null,
-  _lastStick: '',
+  _stickSeq: 0,
   _lastCmdAt: 0,
   _lastCheerAt: 0,
 
@@ -151,7 +151,7 @@ Page({
 
   _subscribeNotify(deviceId) {
     if (!this._notifyCharId) return Promise.resolve()
-    wx.onBLECharacteristicValueChange((ev) => console.log('ACK:', ab2str(ev.value)))
+    wx.onBLECharacteristicValueChange((ev) => this.onNotify(ab2str(ev.value)))
     return new Promise((ok, fail) => {
       wx.notifyBLECharacteristicValueChange({
         deviceId,
@@ -182,9 +182,9 @@ Page({
 
   sendStick() {
     const { lx, ly, rz } = this.data
-    const text = formatStick(lx, ly, rz)
-    if (text === this._lastStick) return
-    this._lastStick = text
+    this._stickSeq += 1
+    const base = formatStick(lx, ly, rz)
+    const text = `${base},N:${this._stickSeq}`
     this._write(text, false).catch(() => {})
   },
 
@@ -196,6 +196,26 @@ Page({
   stopSendLoop() {
     if (this._sendTimer) clearInterval(this._sendTimer)
     this._sendTimer = null
+  },
+
+  onNotify(text) {
+    if (text.startsWith('ACK:')) {
+      console.log('ACK', text.slice(4))
+      return
+    }
+    if (text.startsWith('IP:')) {
+      this.setData({ robotIp: text.slice(3) })
+      return
+    }
+    if (text.startsWith('pwr:')) {
+      this.setData({ battery: parseInt(text.slice(4), 10) })
+      return
+    }
+    if (text.startsWith('fsm:')) {
+      this.setData({ fsmState: parseInt(text.slice(4), 10) })
+      return
+    }
+    console.log('notify', text)
   },
 
   async sendCommand(text) {

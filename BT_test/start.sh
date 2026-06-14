@@ -1,13 +1,24 @@
 #!/bin/bash
-# BLE 蓝牙接收测试：供手机/微信小程序连接并发送数据
+# Bird BLE 遥控服务启动
 set -euo pipefail
 cd "$(dirname "$0")"
+
+# 板子默认 sudo 密码；可用环境变量 BIRD_BLE_SUDO_PW 覆盖
+SUDO_PW="${BIRD_BLE_SUDO_PW:-nvidia}"
+
+sudo_n() {
+  if [ "$(id -u)" -eq 0 ]; then
+    "$@"
+  else
+    echo "$SUDO_PW" | sudo -S -p '' "$@"
+  fi
+}
 
 show_help() {
   cat <<'EOF'
 用法: ./start.sh [选项]
 
-启动 BLE GATT 从机，打印手机/小程序写入的数据。
+启动 BLE GATT 从机，将小程序指令转发至 ROS。
 
 小程序连接参数（复制到微信开发者工具）:
   设备名: Bird_BLE_Test  （可能扫不到名称，请用下面 UUID 扫描）
@@ -23,7 +34,7 @@ show_help() {
 选项:
   --name NAME     广播名称 (默认 Bird_BLE_Test)
   --no-echo       不回显 ACK 到 notify 特征
-  --no-ros        不转发 ROS（仅 BLE 打印测试）
+  --no-ros        不转发 ROS（仅验证 BLE 连接）
   --setup         尝试开启 BlueZ Experimental 并重启 bluetooth
   -h, --help      显示帮助
 
@@ -77,19 +88,19 @@ if [ "$DO_SETUP" -eq 1 ]; then
   CONF="/etc/bluetooth/main.conf"
   if [ -f "$CONF" ] && ! grep -q '^Experimental=true' "$CONF" 2>/dev/null; then
     if grep -q '^\[General\]' "$CONF"; then
-      sudo sed -i '/^\[General\]/a Experimental=true' "$CONF"
+      sudo_n sed -i '/^\[General\]/a Experimental=true' "$CONF"
       echo "[setup] 已添加 Experimental=true"
     else
-      echo -e "[General]\nExperimental=true" | sudo tee -a "$CONF" >/dev/null
+      echo -e "[General]\nExperimental=true" | sudo_n tee -a "$CONF" >/dev/null
       echo "[setup] 已追加 [General] Experimental=true"
     fi
-    sudo systemctl restart bluetooth
+    sudo_n systemctl restart bluetooth
     sleep 2
   else
     echo "[setup] 已配置或无法修改 $CONF"
   fi
-  sudo hciconfig hci0 up 2>/dev/null || true
-  sudo hciconfig hci0 name "Bird_BLE_Test" 2>/dev/null || true
+  sudo_n hciconfig hci0 up 2>/dev/null || true
+  sudo_n hciconfig hci0 name "Bird_BLE_Test" 2>/dev/null || true
   bluetoothctl power on 2>/dev/null || true
   bluetoothctl discoverable off 2>/dev/null || true
   bluetoothctl pairable off 2>/dev/null || true
@@ -98,7 +109,7 @@ fi
 
 if ! systemctl is-active --quiet bluetooth 2>/dev/null; then
   echo "[warn] bluetooth 服务未运行，尝试启动..."
-  sudo systemctl start bluetooth || true
+  sudo_n systemctl start bluetooth || true
   sleep 1
 fi
 
@@ -108,7 +119,7 @@ if ! hciconfig hci0 2>/dev/null | grep -q "hci0"; then
   echo "  19:04 能连、现在不能 → 多半是驱动/适配器掉线，不是 BLE 脚本问题"
   echo ""
   echo "  请执行恢复:"
-  echo "    sudo ./ble_recover.sh"
+  echo "    sudo ./scripts/recover.sh"
   echo "  若仍失败:"
   echo "    sudo reboot"
   echo "  重启后确认: hciconfig -a  应出现 hci0"
@@ -121,7 +132,7 @@ if ! python3 -c "import dbus; from gi.repository import GLib" 2>/dev/null; then
   exit 1
 fi
 
-chmod +x ble_gatt_server.py ble_ros_bridge.py ble_command_dispatcher.py run_ble_with_ros.sh ros_env.sh
+chmod +x ble_gatt_server.py ble_ros_bridge.py ble_command_dispatcher.py ble_status_telemetry.py ble_log.py run_ble_with_ros.sh ros_env.sh
 
 # ROS 环境（sim2real_msg 在 install 目录，见 ros_env.sh）
 # shellcheck disable=SC1091
@@ -131,7 +142,7 @@ if ! python3 -c "import rospy" 2>/dev/null; then
   echo "[error] 本机无法 import rospy，BLE 模式指令将无法控制机器人"
   echo "  请执行: source /opt/ros/noetic/setup.bash"
   echo "  或加 --no-ros 仅做 BLE 打印测试"
-  exit 1
+  exit 1d'r'fdrf
 fi
 if ! python3 -c "import sim2real_msg" 2>/dev/null; then
   echo "[warn] 无法 import sim2real_msg — M_* 模式切换需要此包"
@@ -139,32 +150,32 @@ if ! python3 -c "import sim2real_msg" 2>/dev/null; then
 fi
 
 # BLE 广播名 + 关闭经典蓝牙配对（避免手机系统反复弹窗）
-sudo hciconfig hci0 up 2>/dev/null || true
-sudo hciconfig hci0 name "Bird_BLE_Test" 2>/dev/null || true
-sudo hciconfig hci0 noscan 2>/dev/null || true
+sudo_n hciconfig hci0 up 2>/dev/null || true
+sudo_n hciconfig hci0 name "Bird_BLE_Test" 2>/dev/null || true
+sudo_n hciconfig hci0 noscan 2>/dev/null || true
 bluetoothctl system-alias "Bird_BLE_Test" 2>/dev/null || true
 bluetoothctl discoverable off 2>/dev/null || true
 bluetoothctl pairable off 2>/dev/null || true
 if command -v btmgmt >/dev/null && hciconfig hci0 2>/dev/null | grep -q "hci0"; then
-  sudo btmgmt -i 0 le on 2>/dev/null || true
-  sudo btmgmt -i 0 connectable on 2>/dev/null || true
-  sudo btmgmt -i 0 discov off 2>/dev/null || true
-  sudo btmgmt -i 0 pairable off 2>/dev/null || true
-  sudo btmgmt -i 0 bondable off 2>/dev/null || true
+  sudo_n btmgmt -i 0 le on 2>/dev/null || true
+  sudo_n btmgmt -i 0 connectable on 2>/dev/null || true
+  sudo_n btmgmt -i 0 discov off 2>/dev/null || true
+  sudo_n btmgmt -i 0 pairable off 2>/dev/null || true
+  sudo_n btmgmt -i 0 bondable off 2>/dev/null || true
 fi
 
 MAC=$(bluetoothctl show 2>/dev/null | awk '/Controller/ {print $2}' | head -1)
 echo "========================================"
-echo " BLE 测试 | 广播名: $NAME"
+echo " BLE 遥控 | 广播名: $NAME"
 echo " MAC: ${MAC:-见 bluetoothctl show}"
-echo " 小程序请用 services=[FFE0] 扫描，见 BLE_PROTOCOL.md"
-echo " BLE→ROS: X,Y,Z→/cmd_vel | M_*模式 | LT+RT+start/RB/B→/joy"
-echo " 诊断: ./ble_check.sh"
+echo " 协议: BLE_PROTOCOL.md | 参考: docs/miniprogram_ble_snippet.js"
+echo " 诊断: ./scripts/check.sh"
 echo "========================================"
 
 if [ "$(id -u)" -ne 0 ]; then
   echo "[tip] 使用 sudo 注册 GATT 服务（经 run_ble_with_ros.sh 加载 ROS）..."
-  exec sudo -E "$(pwd)/run_ble_with_ros.sh" --name "$NAME" "${EXTRA_ARGS[@]}"
+  echo "$SUDO_PW" | sudo -S -p '' -E "$(pwd)/run_ble_with_ros.sh" --name "$NAME" "${EXTRA_ARGS[@]}"
+  exit $?
 fi
 
 exec "$(pwd)/run_ble_with_ros.sh" --name "$NAME" "${EXTRA_ARGS[@]}"

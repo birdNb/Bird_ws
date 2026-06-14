@@ -30,7 +30,8 @@ MODE_PULSE_SEC = 0.45
 STEP_GAP_SEC = 0.12
 MENU_STEP_GAP_SEC = 0.35  # master joyMsgCallback 每步后 sleep 200ms
 CMD_VEL_HZ = 20
-CMD_VEL_TIMEOUT_SEC = 0.35
+CMD_VEL_TIMEOUT_SEC = 0.20
+STICK_FILTER_ALPHA = 0.45
 # 与小程序死区 10（-100~100 刻度）对齐 → |v| < 0.10 归零
 STICK_DEADBAND = 0.10
 STICK_XY_LIMIT = 1.0
@@ -57,8 +58,8 @@ BTN_START = 7
 BTN_CENTER = 8
 
 STICK_RE = re.compile(
-    r"X:\s*([+-]?\d+(?:\.\d+)?)\s*,\s*Y:\s*([+-]?\d+(?:\.\d+)?)"
-    r"(?:\s*,\s*Z:\s*([+-]?\d+(?:\.\d+)?))?",
+    r"X:\s*([+-]?\d+(?:\.\d+)?)\s*,\s*Y:\s*([+-]?\d+(?:\.\d+)?)\s*,\s*Z:\s*([+-]?\d+(?:\.\d+)?)"
+    r"(?:\s*,\s*N:\s*\d+)?",
     re.IGNORECASE,
 )
 
@@ -334,7 +335,8 @@ class BleRosBridge:
         self._log = log
         self._parser = BleCommandParser()
         self._lock = threading.Lock()
-        self._last_stick: Optional[StickCommand] = None
+        self._stick_target: Optional[StickCommand] = None
+        self._stick_filtered: Optional[StickCommand] = None
         self._last_stick_ts = 0.0
         self._last_action_ts: Dict[str, float] = {}
         self._last_mode_ts: Dict[str, float] = {}
@@ -367,7 +369,8 @@ class BleRosBridge:
 
     def on_disconnect(self) -> None:
         with self._lock:
-            self._last_stick = None
+            self._stick_target = None
+            self._stick_filtered = None
             self._last_stick_ts = 0.0
         self._cheer_running = False
         self._publish_zero_twist()
@@ -390,7 +393,7 @@ class BleRosBridge:
         cmd = self._parser.parse(text)
         if cmd.stick is not None:
             with self._lock:
-                self._last_stick = cmd.stick
+                self._stick_target = cmd.stick
                 self._last_stick_ts = time.monotonic()
         if cmd.mode is not None:
             self._trigger_mode(cmd.mode)
@@ -437,22 +440,41 @@ class BleRosBridge:
 
         rospy.Subscriber("/fsm_state", Int32, _on_fsm, queue_size=1)
         self._ready.set()
+        self._log(f"[ros] /cmd_vel {CMD_VEL_HZ}Hz | 超时 {CMD_VEL_TIMEOUT_SEC}s | EMA={STICK_FILTER_ALPHA}")
         interval = 1.0 / CMD_VEL_HZ
         while not self._stop.is_set() and not rospy.is_shutdown():
             self._tick_cmd_vel()
             time.sleep(interval)
+
+    def _ema_stick(
+        self, target: StickCommand, prev: Optional[StickCommand]
+    ) -> StickCommand:
+        if prev is None:
+            return target
+        a = STICK_FILTER_ALPHA
+        b = 1.0 - a
+        return StickCommand(
+            x=a * target.x + b * prev.x,
+            y=a * target.y + b * prev.y,
+            z=a * target.z + b * prev.z,
+        )
 
     def _tick_cmd_vel(self) -> None:
         if self._cmd_pub is None:
             return
         now = time.monotonic()
         with self._lock:
-            stick = self._last_stick
+            target = self._stick_target
             age = now - self._last_stick_ts
-        if stick is None or age > CMD_VEL_TIMEOUT_SEC:
+        if target is None or age > CMD_VEL_TIMEOUT_SEC:
+            with self._lock:
+                self._stick_filtered = None
             self._publish_zero_twist()
             return
-        self._cmd_pub.publish(_stick_to_twist(stick))
+        with self._lock:
+            filtered = self._ema_stick(target, self._stick_filtered)
+            self._stick_filtered = filtered
+        self._cmd_pub.publish(_stick_to_twist(filtered))
 
     def _publish_zero_twist(self) -> None:
         if self._cmd_pub is None or self._Twist is None:
@@ -535,7 +557,8 @@ class BleRosBridge:
 
         self._publish_zero_twist()
         with self._lock:
-            self._last_stick = None
+            self._stick_target = None
+            self._stick_filtered = None
 
         gap = MENU_STEP_GAP_SEC if len(steps) > 1 else STEP_GAP_SEC
         threading.Thread(
@@ -560,7 +583,8 @@ class BleRosBridge:
         self._log(f"[ros] 动作 {label}: {combo} → /joy ({COMBO_HOLD_SEC}s)")
         self._publish_zero_twist()
         with self._lock:
-            self._last_stick = None
+            self._stick_target = None
+            self._stick_filtered = None
 
         threading.Thread(
             target=self._run_steps,
@@ -581,7 +605,8 @@ class BleRosBridge:
         self._log(f"[ros] 挥双手: RT+A 短脉冲 {CHEER_PULSE_SEC}s（单次触发）")
         self._publish_zero_twist()
         with self._lock:
-            self._last_stick = None
+            self._stick_target = None
+            self._stick_filtered = None
         threading.Thread(target=self._run_cheer_once, daemon=True).start()
 
     def _run_cheer_once(self) -> None:
