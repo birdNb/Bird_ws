@@ -37,12 +37,15 @@ ACTION_RE = re.compile(
     r"^(LT\+RT\+start|LT\+RT\+RB|LT\+RT\+B|LT\+RT\+LB|RT\+A)$",
     re.IGNORECASE,
 )
+NECK_OFFSET_RE = re.compile(r"^[Pp]([+-]?\d+)Y([+-]?\d+)$")
+NECK_CENTER_RE = re.compile(r"^neck0$", re.IGNORECASE)
 
 
 class CommandKind(str, Enum):
     STICK = "stick"
     MODE = "mode"
     ACTION = "action"
+    NECK = "neck"
     UNKNOWN = "unknown"
 
 
@@ -83,6 +86,14 @@ def classify_payload(text: str) -> Tuple[CommandKind, str, str]:
     if ACTION_RE.match(raw):
         key = re.sub(r"\s+", "", raw).lower()
         return CommandKind.ACTION, key, ACTION_WIRE.get(key, raw)
+
+    if NECK_CENTER_RE.match(raw):
+        return CommandKind.NECK, "neck0", "neck0"
+
+    m_neck = NECK_OFFSET_RE.match(raw)
+    if m_neck:
+        wire = f"P{m_neck.group(1)}Y{m_neck.group(2)}"
+        return CommandKind.NECK, raw, wire
 
     return CommandKind.UNKNOWN, raw, raw
 
@@ -145,6 +156,16 @@ class CommandDispatcher:
                 self._handle(kind, payload)
             except Exception as e:
                 self._log_warn(f"摇杆处理失败: {e}")
+            return
+
+        if kind == CommandKind.NECK:
+            self._log_rx(f"neck: {wire}")
+            try:
+                self._handle(kind, payload)
+            except Exception as e:
+                self._log_warn(f"脖子处理失败: {e}")
+            if self._ack is not None:
+                self._ack(wire)
             return
 
         if kind == CommandKind.ACTION:

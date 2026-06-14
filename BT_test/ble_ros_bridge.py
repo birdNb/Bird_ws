@@ -107,6 +107,8 @@ BUTTON_RELEASE = 0.0
 TRIGGER_PRESS = -1.0
 TRIGGER_RELEASE = 1.0
 
+from ble_neck_bridge import NeckController
+
 LogFn = Callable[[str], None]
 
 FSM_STATE_NAMES = {
@@ -349,6 +351,7 @@ class BleRosBridge:
         self._has_joy = False
         self._Twist = None
         self._cheer_running = False
+        self._neck = NeckController(log=log)
 
     @property
     def ready(self) -> bool:
@@ -384,6 +387,8 @@ class BleRosBridge:
             self.handle_text(text)
         elif kind == "action":
             self._trigger_action(text)
+        elif kind == "neck":
+            self._neck.handle(text)
 
     def handle_text(self, text: str) -> None:
         if not self.ready:
@@ -405,7 +410,7 @@ class BleRosBridge:
         try:
             import rospy
             from geometry_msgs.msg import Twist
-            from sensor_msgs.msg import Joy as SensorJoy
+            from sensor_msgs.msg import JointState, Joy as SensorJoy
             from std_msgs.msg import Int32
         except ImportError as e:
             self._log(f"[ros] 未找到 rospy/sim2real_msg: {e}")
@@ -421,6 +426,9 @@ class BleRosBridge:
 
         self._cmd_pub = rospy.Publisher("/cmd_vel", Twist, queue_size=1)
         self._sensor_joy_pub = rospy.Publisher("/joy", SensorJoy, queue_size=1)
+        self._neck.attach_publisher(
+            rospy.Publisher("/pi_plus_absolute", JointState, queue_size=1)
+        )
         try:
             from sim2real_msg.msg import Joy  # noqa: F401
 

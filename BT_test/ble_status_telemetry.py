@@ -4,7 +4,7 @@
 机器人 → 小程序 状态遥测（FFE2 notify）。
 
   IP:19.11     局域网 IP 后两段
-  pwr:50       电量 5% 步进，下降时推送
+  pwr:50       电量 5% 步进；连接后 5s 连发 3 次，下降时再推
   fsm:5        FSM 状态变化时连发 3 次
 """
 
@@ -25,6 +25,9 @@ IP_POLL_SEC = 15.0
 PWR_POLL_SEC = 5.0
 FSM_REPEAT = 3
 FSM_REPEAT_GAP_SEC = 0.05
+PWR_BURST_DELAY_SEC = 5.0
+PWR_BURST_COUNT = 3
+PWR_BURST_GAP_SEC = 1.0
 
 NotifyFn = Callable[[bytes], None]
 
@@ -100,6 +103,7 @@ class BleStatusTelemetry:
         self._last_fsm: Optional[int] = None
         self._ros_thread: Optional[threading.Thread] = None
         self._poll_thread: Optional[threading.Thread] = None
+        self._pwr_burst_gen = 0
         self._ros_battery_pct: Optional[int] = None
 
     def start(self) -> None:
@@ -115,21 +119,40 @@ class BleStatusTelemetry:
         self._stop.set()
 
     def on_subscribed(self) -> None:
+        """FFE2 订阅成功 → 推 IP/fsm，5 秒后连发 3 次电量。"""
         self._subscribed.set()
         self._push_snapshot()
+        with self._lock:
+            self._pwr_burst_gen += 1
+            gen = self._pwr_burst_gen
+        threading.Thread(target=self._pwr_burst_loop, args=(gen,), daemon=True).start()
 
     def on_unsubscribed(self) -> None:
         self._subscribed.clear()
+        with self._lock:
+            self._pwr_burst_gen += 1
+
+    def _pwr_burst_loop(self, gen: int) -> None:
+        time.sleep(PWR_BURST_DELAY_SEC)
+        for i in range(PWR_BURST_COUNT):
+            if self._stop.is_set() or not self._subscribed.is_set():
+                return
+            with self._lock:
+                if gen != self._pwr_burst_gen:
+                    return
+            pct = self._read_pwr_source()
+            if pct is not None:
+                q = quantize_pwr(pct)
+                with self._lock:
+                    self._last_pwr_sent = q
+                self._tx(f"pwr:{q}")
+            if i + 1 < PWR_BURST_COUNT:
+                time.sleep(PWR_BURST_GAP_SEC)
 
     def _push_snapshot(self) -> None:
         ip = read_lan_ip_suffix()
         if ip:
             self._send_ip(ip, force=True)
-        pct = self._read_pwr_source()
-        if pct is not None:
-            with self._lock:
-                self._last_pwr_sent = None
-            self._maybe_send_pwr(pct, force=True)
         with self._lock:
             fsm = self._last_fsm
         if fsm is not None:
@@ -160,7 +183,8 @@ class BleStatusTelemetry:
         except ImportError:
             return
         try:
-            rospy.init_node("ble_status_telemetry", anonymous=True, disable_signals=True)
+            if not rospy.core.is_initialized():
+                rospy.init_node("ble_status_telemetry", anonymous=True, disable_signals=True)
         except Exception:
             return
 
