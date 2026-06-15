@@ -84,13 +84,29 @@ neck0     # 回中
 
 板端发布 `/pi_plus_absolute`（`head_yaw_joint` / `head_pitch_joint`）。
 
-### 1.5 指令 ACK（FFE2 notify）
+### 1.5 人脸跟踪（locate_face）
+
+| 指令 | 说明 |
+|------|------|
+| `locate_face ON` | 启动 `locate_face/locate_face.py`（后台 `--no-gui`） |
+| `locate_face OFF` | 停止 `locate_face.py` |
+
+视觉伺服脖子跟随；与手动脖子步进共用 `/pi_plus_absolute`，建议二选一使用。
+
+### 1.6 手势控制（HI）
+
+| 指令 | 说明 |
+|------|------|
+| `HI ON` | 启动 `hand_identify_cpp/start.sh --no-joy`（默认 `--gesture_action`） |
+| `HI OFF` | 停止手势控制（`vision_controller`） |
+
+### 1.7 指令 ACK（FFE2 notify）
 
 ```text
 ACK:{原文}
 ```
 
-模式、动作、脖子有 ACK；摇杆无。
+模式、动作、脖子、locate_face、HI 有 ACK；摇杆无。
 
 ---
 
@@ -178,5 +194,7 @@ fsm:5
 | 摇杆 | `/cmd_vel` 20Hz |
 | 模式/动作 | `/joy_msg` |
 | 脖子 `P{n}Y{m}` / `neck0` | `/pi_plus_absolute` |
+| `locate_face ON/OFF` | 启停 `locate_face/locate_face.py` |
+| `HI ON/OFF` | 启停 `hand_identify_cpp/start.sh`（手势控制） |
 
 参考代码：`docs/miniprogram_ble_snippet.js`

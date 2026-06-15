@@ -39,6 +39,8 @@ ACTION_RE = re.compile(
 )
 NECK_OFFSET_RE = re.compile(r"^[Pp]([+-]?\d+)Y([+-]?\d+)$")
 NECK_CENTER_RE = re.compile(r"^neck0$", re.IGNORECASE)
+LOCATE_FACE_RE = re.compile(r"^locate_face\s+(ON|OFF)$", re.IGNORECASE)
+HI_RE = re.compile(r"^HI\s+(ON|OFF)$", re.IGNORECASE)
 
 
 class CommandKind(str, Enum):
@@ -46,6 +48,8 @@ class CommandKind(str, Enum):
     MODE = "mode"
     ACTION = "action"
     NECK = "neck"
+    LOCATE_FACE = "locate_face"
+    HI = "hi"
     UNKNOWN = "unknown"
 
 
@@ -94,6 +98,18 @@ def classify_payload(text: str) -> Tuple[CommandKind, str, str]:
     if m_neck:
         wire = f"P{m_neck.group(1)}Y{m_neck.group(2)}"
         return CommandKind.NECK, raw, wire
+
+    m_lf = LOCATE_FACE_RE.match(raw)
+    if m_lf:
+        action = m_lf.group(1).upper()
+        wire = f"locate_face {action}"
+        return CommandKind.LOCATE_FACE, action, wire
+
+    m_hi = HI_RE.match(raw)
+    if m_hi:
+        action = m_hi.group(1).upper()
+        wire = f"HI {action}"
+        return CommandKind.HI, action, wire
 
     return CommandKind.UNKNOWN, raw, raw
 
@@ -164,6 +180,26 @@ class CommandDispatcher:
                 self._handle(kind, payload)
             except Exception as e:
                 self._log_warn(f"脖子处理失败: {e}")
+            if self._ack is not None:
+                self._ack(wire)
+            return
+
+        if kind == CommandKind.LOCATE_FACE:
+            self._log_rx(f"locate_face: {wire}")
+            try:
+                self._handle(kind, payload)
+            except Exception as e:
+                self._log_warn(f"locate_face 处理失败: {e}")
+            if self._ack is not None:
+                self._ack(wire)
+            return
+
+        if kind == CommandKind.HI:
+            self._log_rx(f"HI: {wire}")
+            try:
+                self._handle(kind, payload)
+            except Exception as e:
+                self._log_warn(f"HI 处理失败: {e}")
             if self._ack is not None:
                 self._ack(wire)
             return
