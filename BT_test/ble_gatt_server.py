@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import subprocess
 import sys
+import threading
 import time
 from typing import List, Optional
 
@@ -197,15 +198,17 @@ class Advertisement(dbus.service.Object):
 
     def get_properties(self):
         # 广播包仅 31 字节：用 16 位 UUID + 名称，避免名称被挤掉
+        # ServiceUUIDs 必须是完整 128-bit，否则 BlueZ 可能不广播
         return {
             LE_ADV_IFACE: {
                 "Type": "peripheral",
                 "LocalName": self.local_name,
-                "ServiceUUIDs": dbus.Array(["ffe0"], signature="s"),
-                "Discoverable": dbus.Boolean(True),
-                "IncludeTxPower": False,
-                "MinInterval": dbus.UInt16(0x0020),
-                "MaxInterval": dbus.UInt16(0x0040),
+                "ServiceUUIDs": dbus.Array(
+                    ["0000ffe0-0000-1000-8000-00805f9b34fb"], signature="s"
+                ),
+                "IncludeTxPower": dbus.Boolean(False),
+                "MinInterval": dbus.UInt16(0x00A0),
+                "MaxInterval": dbus.UInt16(0x00C0),
             }
         }
 
@@ -457,6 +460,78 @@ class BleGattServer:
         except dbus.exceptions.DBusException as e:
             log_warn(f"读取适配器信息失败: {e}")
 
+    def _patch_le_adv_data(self, hci_dev: str = "hci0") -> None:
+        """
+        BlueZ 5.53 + BT 5.1 adapter workaround：
+
+        D-Bus RegisterAdvertisement → MGMT Add Advertising (Flags=0, data=empty)
+        → 内核使用 Extended Advertising (0x0037) 广播**空数据包**（无 Name/UUID）
+        → Legacy hcitool cmd (0x0008/0x0009) 被 Extended Advertising 忽略
+
+        正确做法：用 btmgmt add-adv 覆盖 instance 1，写入 UUID+Name。
+        fallback：直接写 LE Set Extended Advertising Data (0x0037) HCI 命令。
+        """
+        time.sleep(0.4)  # 等 BlueZ MGMT 流程完成
+
+        hci_idx = hci_dev.replace("hci", "")  # "hci0" → "0"
+
+        # ── 主路径：btmgmt add-adv 覆盖 instance 1 ──────────────────
+        # -u ffe0  : 将 0xFFE0 写入 Complete 16-bit UUID AD
+        # -n name  : 将设备名写入 Complete Local Name AD
+        # -g       : General Discoverable (Flags 0x02)
+        # -b       : BR/EDR Not Supported (Flags 0x04)
+        # 1        : Instance 1（覆盖 D-Bus 注册的空 instance 1）
+        try:
+            # -u ffe0 : Service UUID 0xFFE0
+            # -n      : 将适配器名 (Alias) 作为 scan-rsp-local-name (无需带值)
+            # -g      : General Discoverable flag
+            # -b      : BR/EDR Not Supported flag
+            # -m      : managed-flags (让内核自动管理 Flags AD)
+            # 1       : instance 1（覆盖 D-Bus 注册的空 instance）
+            r = subprocess.run(
+                ["btmgmt", "--index", hci_idx, "add-adv",
+                 "-u", "ffe0", "-n", "-g", "-b", "-m", "1"],
+                capture_output=True, timeout=6,
+            )
+            out = r.stdout.decode("utf-8", errors="replace").strip()
+            err = r.stderr.decode("utf-8", errors="replace").strip()
+            if r.returncode == 0:
+                log_info(f"[adv] LE 广播包已写入: UUID=FFE0 + Name={self.name}")
+                return
+            log_warn(f"[adv] btmgmt add-adv 失败(rc={r.returncode}): {out} {err}")
+        except Exception as exc:
+            log_warn(f"[adv] btmgmt add-adv 异常: {exc}")
+
+        # ── fallback：直接写 LE Set Extended Advertising Data (0x0037) ──
+        # 针对 BT 5.0+ 控制器，Extended Advertising handle=1
+        # HCI LE Set Extended Advertising Data:
+        #   Advertising_Handle (1B) | Operation (1B=0x03完整) |
+        #   Fragment_Preference (1B=0x01) | Data_Length (1B) | Data
+        name_b = self.name.encode("utf-8")[:25]  # 留余量
+        # ADV data: Flags(3B) + 16-bit UUID(4B) + LocalName(2+N B)
+        adv_payload = (
+            bytes([0x02, 0x01, 0x06])                        # Flags
+            + bytes([0x03, 0x03, 0xE0, 0xFF])                # 16-bit UUID
+            + bytes([len(name_b) + 1, 0x09]) + name_b        # Complete Local Name
+        )
+        if len(adv_payload) > 31:
+            adv_payload = adv_payload[:31]
+        ext_args = (
+            ["0x01", "0x03", "0x01", f"0x{len(adv_payload):02x}"]
+            + [f"0x{b:02x}" for b in adv_payload]
+        )
+        try:
+            r2 = subprocess.run(
+                ["hcitool", "-i", hci_dev, "cmd", "0x08", "0x0037"] + ext_args,
+                capture_output=True, timeout=4,
+            )
+            if r2.returncode == 0:
+                log_info(f"[adv] LE Ext 广播包已写入 (fallback): Name={self.name}")
+            else:
+                log_warn(f"[adv] LE Ext 广播写入失败: rc={r2.returncode}")
+        except Exception as exc2:
+            log_warn(f"[adv] LE Ext fallback 异常: {exc2}")
+
     def _start_hand_identify_manager(self) -> None:
         try:
             from ble_hand_identify_manager import HandIdentifyManager
@@ -575,6 +650,13 @@ class BleGattServer:
             log_info(f"BLE 广播已开启，小程序应能扫到名称: {self.name}")
             log_info(f"    或按服务 UUID 扫描: {SERVICE_UUID}")
             self._verify_le_advertising(adapter_path)
+            # BlueZ 5.53 bug: MGMT Add Advertising 数据为空，手动写入 HCI 广播包
+            hci_dev = adapter_path.split("/")[-1]  # /org/bluez/hci0 → hci0
+            threading.Thread(
+                target=self._patch_le_adv_data,
+                kwargs={"hci_dev": hci_dev},
+                daemon=True,
+            ).start()
 
         def adv_failed(error: dbus.DBusException) -> None:
             log_warn(f"广播注册失败: {error}")
