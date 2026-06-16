@@ -41,6 +41,7 @@ NECK_OFFSET_RE = re.compile(r"^[Pp]([+-]?\d+)Y([+-]?\d+)$")
 NECK_CENTER_RE = re.compile(r"^neck0$", re.IGNORECASE)
 LOCATE_FACE_RE = re.compile(r"^locate_face\s+(ON|OFF)$", re.IGNORECASE)
 HI_RE = re.compile(r"^HI\s+(ON|OFF)$", re.IGNORECASE)
+MP_RE = re.compile(r"^MP\s+(ON|OFF)$", re.IGNORECASE)
 
 
 class CommandKind(str, Enum):
@@ -50,6 +51,7 @@ class CommandKind(str, Enum):
     NECK = "neck"
     LOCATE_FACE = "locate_face"
     HI = "hi"
+    MOTOR_POWER = "motor_power"
     UNKNOWN = "unknown"
 
 
@@ -110,6 +112,12 @@ def classify_payload(text: str) -> Tuple[CommandKind, str, str]:
         action = m_hi.group(1).upper()
         wire = f"HI {action}"
         return CommandKind.HI, action, wire
+
+    m_mp = MP_RE.match(raw)
+    if m_mp:
+        action = m_mp.group(1).upper()
+        wire = f"MP {action}"
+        return CommandKind.MOTOR_POWER, action, wire
 
     return CommandKind.UNKNOWN, raw, raw
 
@@ -175,6 +183,7 @@ class CommandDispatcher:
             return
 
         if kind == CommandKind.NECK:
+            # 仅入队到 ROS 线程，不在此线程 publish
             self._log_rx(f"neck: {wire}")
             try:
                 self._handle(kind, payload)
@@ -200,6 +209,16 @@ class CommandDispatcher:
                 self._handle(kind, payload)
             except Exception as e:
                 self._log_warn(f"HI 处理失败: {e}")
+            if self._ack is not None:
+                self._ack(wire)
+            return
+
+        if kind == CommandKind.MOTOR_POWER:
+            self._log_rx(f"MP: {wire}")
+            try:
+                self._handle(kind, payload)
+            except Exception as e:
+                self._log_warn(f"MP 处理失败: {e}")
             if self._ack is not None:
                 self._ack(wire)
             return

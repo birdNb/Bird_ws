@@ -54,10 +54,26 @@ class NeckController:
         self._yaw_deg = 0.0
         self._pitch_deg = 0.0
         self._pub = None
+        self._pending: Optional[str] = None
 
     def attach_publisher(self, pub) -> None:
         self._pub = pub
         self._log(f"[neck] 已发布 {NECK_TOPIC}（步进 {NECK_STEP_DEG}°）")
+
+    def enqueue(self, text: str) -> bool:
+        """仅缓存指令；实际 publish 在 ROS 线程 tick() 中执行。"""
+        if parse_neck_command(text) is None:
+            return False
+        with self._lock:
+            self._pending = text.strip()
+        return True
+
+    def tick(self) -> None:
+        with self._lock:
+            text = self._pending
+            self._pending = None
+        if text is not None:
+            self.handle(text)
 
     def handle(self, text: str) -> bool:
         if self._pub is None:
@@ -72,8 +88,10 @@ class NeckController:
             self._log("[neck] 回中 neck0 → yaw=0 pitch=0")
             return True
         with self._lock:
+            # P+ = 抬头（pitch 减小，因 PITCH_UP_DEG 为负值）
+            # Y+ = 右转（yaw 减小，因坐标系符号约定）
             self._pitch_deg = _clamp_pitch_deg(
-                self._pitch_deg + p_steps * NECK_STEP_DEG
+                self._pitch_deg - p_steps * NECK_STEP_DEG
             )
             self._yaw_deg = _clamp_yaw_deg(self._yaw_deg - y_steps * NECK_STEP_DEG)
             yaw, pitch = self._yaw_deg, self._pitch_deg
@@ -94,8 +112,10 @@ class NeckController:
         if self._pub is None:
             return
         from sensor_msgs.msg import JointState
+        import rospy
 
         msg = JointState()
+        msg.header.stamp = rospy.Time.now()
         msg.name = [HEAD_YAW_JOINT, HEAD_PITCH_JOINT]
         msg.position = [_deg2rad(yaw_deg), _deg2rad(pitch_deg)]
         self._pub.publish(msg)

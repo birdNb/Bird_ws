@@ -239,6 +239,9 @@ class BleGattServer:
         self._telemetry = None
         self._connect_hint_ids: List[int] = []
         self._msg_count_at_connect = 0
+        self._adv: Optional[Advertisement] = None
+        self._adv_manager = None
+        self._adv_reregister_pending = False
 
         dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
         self.bus = dbus.SystemBus()
@@ -288,6 +291,49 @@ class BleGattServer:
             self._dispatcher.on_disconnect()
         if self._ros_bridge is not None:
             self._ros_bridge.on_disconnect()
+        if not self._connected_devices:
+            self._schedule_restart_advertising()
+
+    def _schedule_restart_advertising(self) -> None:
+        """断连后延迟恢复 BLE 广播，便于小程序重新扫描连接。"""
+        if self._connected_devices or self._adv is None or self._adv_manager is None:
+            return
+        if self._adv_reregister_pending:
+            return
+        self._adv_reregister_pending = True
+        GLib.timeout_add(400, self._restart_advertising_cb)
+
+    def _restart_advertising_cb(self) -> bool:
+        self._adv_reregister_pending = False
+        if self._connected_devices or self._adv is None or self._adv_manager is None:
+            return False
+
+        adapter_path = self._adapter_path
+        hci_dev = adapter_path.split("/")[-1] if adapter_path else "hci0"
+
+        def adv_done() -> None:
+            log_info(f"断连后 BLE 广播已恢复: {self.name}")
+            threading.Thread(
+                target=self._patch_le_adv_data,
+                kwargs={"hci_dev": hci_dev},
+                daemon=True,
+            ).start()
+
+        def adv_failed(error: dbus.DBusException) -> None:
+            log_warn(f"断连后广播恢复失败: {error}")
+            GLib.timeout_add(2000, self._restart_advertising_cb)
+
+        try:
+            self._adv_manager.RegisterAdvertisement(
+                self._adv.get_path(),
+                {},
+                reply_handler=adv_done,
+                error_handler=adv_failed,
+            )
+        except dbus.exceptions.DBusException as e:
+            log_warn(f"断连后 RegisterAdvertisement 异常: {e}")
+            GLib.timeout_add(2000, self._restart_advertising_cb)
+        return False
 
     def _on_device_props_changed(
         self, interface: str, changed, invalidated, path: str = ""
@@ -343,12 +389,22 @@ class BleGattServer:
         if self._dispatcher is not None:
             self._dispatcher.dispatch(data)
 
+    def _notify_on_main_thread(self, data: bytes) -> None:
+        """FFE2 notify 必须在 GLib 主线程发送，避免跨线程 D-Bus 导致断联。"""
+        GLib.idle_add(self._do_notify, data)
+
+    def _do_notify(self, data: bytes) -> bool:
+        if self._notify_chrc is not None:
+            self._notify_chrc.notify(data)
+        return False
+
     def _send_ack(self, wire: str) -> None:
         if not self.echo or self._notify_chrc is None:
             return
         from ble_command_dispatcher import make_notify_reply
 
-        self._notify_chrc.notify(make_notify_reply(wire))
+        payload = make_notify_reply(wire)
+        self._notify_on_main_thread(payload)
         log_tx(f"ACK:{wire}")
 
     def _handle_dispatched(self, kind, payload: str) -> None:
@@ -483,14 +539,14 @@ class BleGattServer:
         # 1        : Instance 1（覆盖 D-Bus 注册的空 instance 1）
         try:
             # -u ffe0 : Service UUID 0xFFE0
-            # -n      : 将适配器名 (Alias) 作为 scan-rsp-local-name (无需带值)
+            # -n      : 将适配器 Alias 写入 scan-rsp-local-name（无需带值）
             # -g      : General Discoverable flag
-            # -b      : BR/EDR Not Supported flag
-            # -m      : managed-flags (让内核自动管理 Flags AD)
+            # -m      : managed-flags（内核自动管理 Flags AD type）
+            # -c      : connectable
             # 1       : instance 1（覆盖 D-Bus 注册的空 instance）
             r = subprocess.run(
                 ["btmgmt", "--index", hci_idx, "add-adv",
-                 "-u", "ffe0", "-n", "-g", "-b", "-m", "1"],
+                 "-u", "ffe0", "-n", "-g", "-m", "-c", "1"],
                 capture_output=True, timeout=6,
             )
             out = r.stdout.decode("utf-8", errors="replace").strip()
@@ -588,7 +644,7 @@ class BleGattServer:
         except ImportError as e:
             log_warn(f"无法加载 ble_status_telemetry: {e}")
             return
-        self._telemetry = BleStatusTelemetry(notify=self._notify_chrc.notify)
+        self._telemetry = BleStatusTelemetry(notify=self._notify_on_main_thread)
         self._telemetry.start()
 
     def run(self) -> int:
@@ -628,9 +684,11 @@ class BleGattServer:
         self._start_telemetry()
 
         adv = Advertisement(self.bus, 0, self.name)
+        self._adv = adv
         adv_manager = dbus.Interface(
             self.bus.get_object(BLUEZ_SERVICE, adapter_path), LE_ADV_MANAGER_IFACE
         )
+        self._adv_manager = adv_manager
         gatt_manager = dbus.Interface(
             self.bus.get_object(BLUEZ_SERVICE, adapter_path), GATT_MANAGER_IFACE
         )

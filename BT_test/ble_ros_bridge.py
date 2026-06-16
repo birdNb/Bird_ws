@@ -108,6 +108,7 @@ TRIGGER_PRESS = -1.0
 TRIGGER_RELEASE = 1.0
 
 from ble_neck_bridge import NeckController
+from ble_motor_power_manager import MotorPowerController, POWER_TOPIC
 
 LogFn = Callable[[str], None]
 
@@ -352,6 +353,7 @@ class BleRosBridge:
         self._Twist = None
         self._cheer_running = False
         self._neck = NeckController(log=log)
+        self._motor_power = MotorPowerController(log=log)
 
     @property
     def ready(self) -> bool:
@@ -388,7 +390,9 @@ class BleRosBridge:
         elif kind == "action":
             self._trigger_action(text)
         elif kind == "neck":
-            self._neck.handle(text)
+            self._neck.enqueue(text)
+        elif kind == "motor_power":
+            self._motor_power.enqueue(text)
 
     def handle_text(self, text: str) -> None:
         if not self.ready:
@@ -430,6 +434,14 @@ class BleRosBridge:
             rospy.Publisher("/pi_plus_absolute", JointState, queue_size=1)
         )
         try:
+            from livelybot_power.msg import Power_switch
+
+            self._motor_power.attach_publisher(
+                rospy.Publisher(POWER_TOPIC, Power_switch, queue_size=1)
+            )
+        except ImportError:
+            self._log("[MP] livelybot_power 不可用，电机电源控制已禁用")
+        try:
             from sim2real_msg.msg import Joy  # noqa: F401
 
             self._joy_msg_pub = rospy.Publisher("/joy_msg", Joy, queue_size=1)
@@ -451,6 +463,8 @@ class BleRosBridge:
         self._log(f"[ros] /cmd_vel {CMD_VEL_HZ}Hz | 超时 {CMD_VEL_TIMEOUT_SEC}s | EMA={STICK_FILTER_ALPHA}")
         interval = 1.0 / CMD_VEL_HZ
         while not self._stop.is_set() and not rospy.is_shutdown():
+            self._neck.tick()
+            self._motor_power.tick()
             self._tick_cmd_vel()
             time.sleep(interval)
 

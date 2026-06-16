@@ -100,13 +100,22 @@ neck0     # 回中
 | `HI ON` | 启动 `hand_identify_cpp/start.sh --no-joy`（默认 `--gesture_action`） |
 | `HI OFF` | 停止手势控制（`vision_controller`） |
 
-### 1.7 指令 ACK（FFE2 notify）
+### 1.7 电机电源（MP）
+
+| 指令 | 小程序操作 | 说明 |
+|------|------------|------|
+| `MP ON` | **长按** | 接通电机供电（功率板 `power_switch=1`） |
+| `MP OFF` | **点击** | 断开电机供电（功率板 `power_switch=0`） |
+
+板端发布 ROS `/power_switch_control`（`livelybot_power/Power_switch`，`control_switch=1`）。
+
+### 1.8 指令 ACK（FFE2 notify）
 
 ```text
 ACK:{原文}
 ```
 
-模式、动作、脖子、locate_face、HI 有 ACK；摇杆无。
+模式、动作、脖子、locate_face、HI、MP 有 ACK；摇杆无。
 
 ---
 
@@ -170,7 +179,7 @@ fsm:5
 | IP | `IP:19.11` | 订阅时 + IP 变化 |
 | 电量 | `pwr:50` | 连接 5s 后连发 3 次；之后每降 5% |
 | FSM | `fsm:5` | 变化时连发 3 次；订阅时 1 次 |
-| ACK | `ACK:M_default` | 模式/动作/脖子指令回执 |
+| ACK | `ACK:M_default` | 模式/动作/脖子/MP 等指令回执 |
 
 ---
 
@@ -196,5 +205,6 @@ fsm:5
 | 脖子 `P{n}Y{m}` / `neck0` | `/pi_plus_absolute` |
 | `locate_face ON/OFF` | 启停 `locate_face/locate_face.py` |
 | `HI ON/OFF` | 启停 `hand_identify_cpp/start.sh`（手势控制） |
+| `MP ON/OFF` | `/power_switch_control`（电机供电开/关） |
 
 参考代码：`docs/miniprogram_ble_snippet.js`
