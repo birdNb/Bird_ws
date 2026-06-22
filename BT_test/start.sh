@@ -142,7 +142,7 @@ if ! python3 -c "import dbus; from gi.repository import GLib" 2>/dev/null; then
   exit 1
 fi
 
-chmod +x ble_gatt_server.py ble_ros_bridge.py ble_neck_bridge.py ble_motor_power_manager.py ble_locate_face_manager.py ble_hand_identify_manager.py ble_command_dispatcher.py ble_status_telemetry.py ble_log.py run_ble_with_ros.sh ros_env.sh
+chmod +x ble_gatt_server.py ble_ros_bridge.py ble_neck_bridge.py ble_motor_power_manager.py ble_locate_face_manager.py ble_hand_identify_manager.py ble_command_dispatcher.py ble_status_telemetry.py ble_log.py neck_smooth_home.py run_ble_with_ros.sh ros_env.sh
 
 # ROS 环境（sim2real_msg 在 install 目录，见 ros_env.sh）
 # shellcheck disable=SC1091

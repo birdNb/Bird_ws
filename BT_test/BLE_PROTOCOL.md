@@ -89,8 +89,8 @@ neck0     # 回中
 
 | 指令 | 说明 |
 |------|------|
-| `locate_face ON` | 启动 `locate_face/locate_face.py`（后台 `--no-gui`） |
-| `locate_face OFF` | 停止 `locate_face.py` |
+| `locate_face ON` | 启动 `locate_face_cpp`（默认后台；`--gui` 才显示预览） |
+| `locate_face OFF` | 停止头追进程 |
 
 视觉伺服脖子跟随；与手动脖子步进共用 `/pi_plus_absolute`，建议二选一使用。
 
