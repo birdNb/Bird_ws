@@ -24,7 +24,6 @@ if [ "$(id -u)" -ne 0 ]; then
 fi
 
 rfkill unblock bluetooth 2>/dev/null || true
-rfkill unblock all 2>/dev/null || true
 
 systemctl restart bluetooth
 sleep 2

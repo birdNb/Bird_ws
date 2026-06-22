@@ -46,6 +46,8 @@ show_help() {
 注意:
   - 注册 GATT 通常需要 root（脚本会自动 sudo）
   - 需已安装: bluez python3-dbus python3-gi
+  - 默认启动仅调整蓝牙运行时状态，不修改系统配置，不影响开机
+  - --setup 会修改 /etc/bluetooth/main.conf（自动备份），仅首次配置时需要
 EOF
 }
 
@@ -86,13 +88,21 @@ done
 if [ "$DO_SETUP" -eq 1 ]; then
   echo "[setup] 检查 BlueZ Experimental..."
   CONF="/etc/bluetooth/main.conf"
-  if [ -f "$CONF" ] && ! grep -q '^Experimental=true' "$CONF" 2>/dev/null; then
+  if [ -f "$CONF" ] && ! grep -qE '^[[:space:]]*Experimental[[:space:]]*=[[:space:]]*true' "$CONF" 2>/dev/null; then
+    BACKUP="${CONF}.bak.$(date +%Y%m%d%H%M%S)"
+    sudo_n cp "$CONF" "$BACKUP"
+    echo "[setup] 已备份: $BACKUP"
     if grep -q '^\[General\]' "$CONF"; then
       sudo_n sed -i '/^\[General\]/a Experimental=true' "$CONF"
       echo "[setup] 已添加 Experimental=true"
     else
-      echo -e "[General]\nExperimental=true" | sudo_n tee -a "$CONF" >/dev/null
+      printf '%s\n' '[General]' 'Experimental=true' | sudo_n tee -a "$CONF" >/dev/null
       echo "[setup] 已追加 [General] Experimental=true"
+    fi
+    if ! grep -qE '^[[:space:]]*Experimental[[:space:]]*=[[:space:]]*true' "$CONF" 2>/dev/null; then
+      echo "[error] 写入 $CONF 失败，正在从备份恢复..."
+      sudo_n cp "$BACKUP" "$CONF"
+      exit 1
     fi
     sudo_n systemctl restart bluetooth
     sleep 2
@@ -142,7 +152,7 @@ if ! python3 -c "import rospy" 2>/dev/null; then
   echo "[error] 本机无法 import rospy，BLE 模式指令将无法控制机器人"
   echo "  请执行: source /opt/ros/noetic/setup.bash"
   echo "  或加 --no-ros 仅做 BLE 打印测试"
-  exit 1d'r'fdrf
+  exit 1
 fi
 if ! python3 -c "import sim2real_msg" 2>/dev/null; then
   echo "[warn] 无法 import sim2real_msg — M_* 模式切换需要此包"
