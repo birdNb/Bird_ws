@@ -26,6 +26,17 @@ class MotorPowerController:
         self._pub = pub
         self._log(f"[MP] 已发布 {POWER_TOPIC}")
 
+    def update_state(self, motor_on: bool) -> None:
+        with self._lock:
+            self._motor_on = motor_on
+
+    def get_state_wire(self) -> Optional[str]:
+        """返回 ON/OFF；未知时 None。"""
+        with self._lock:
+            if self._motor_on is None:
+                return None
+            return "ON" if self._motor_on else "OFF"
+
     def enqueue(self, action: str) -> bool:
         cmd = action.strip().upper()
         if cmd not in ("ON", "OFF"):
@@ -56,5 +67,5 @@ class MotorPowerController:
         msg.control_switch = 1
         msg.power_switch = 1 if on else 0
         self._pub.publish(msg)
-        self._motor_on = on
+        self.update_state(on)
         self._log(f"[MP] 电机电源已{'开启' if on else '关闭'} ({action})")

@@ -32,9 +32,10 @@ ACTION_WIRE = {
     "lt+rt+b": "LT+RT+B",
     "lt+rt+lb": "LT+RT+LB",
     "rt+a": "RT+A",
+    "rt+x": "RT+X",
 }
 ACTION_RE = re.compile(
-    r"^(LT\+RT\+start|LT\+RT\+RB|LT\+RT\+B|LT\+RT\+LB|RT\+A)$",
+    r"^(LT\+RT\+start|LT\+RT\+RB|LT\+RT\+B|LT\+RT\+LB|RT\+A|RT\+X)$",
     re.IGNORECASE,
 )
 NECK_OFFSET_RE = re.compile(r"^[Pp]([+-]?\d+)Y([+-]?\d+)$")
@@ -42,6 +43,7 @@ NECK_CENTER_RE = re.compile(r"^neck0$", re.IGNORECASE)
 LOCATE_FACE_RE = re.compile(r"^locate_face\s+(ON|OFF)$", re.IGNORECASE)
 HI_RE = re.compile(r"^HI\s+(ON|OFF)$", re.IGNORECASE)
 MP_RE = re.compile(r"^MP\s+(ON|OFF)$", re.IGNORECASE)
+VOLUME_RE = re.compile(r"^V\s+(\d{1,3})$", re.IGNORECASE)
 
 
 class CommandKind(str, Enum):
@@ -52,6 +54,7 @@ class CommandKind(str, Enum):
     LOCATE_FACE = "locate_face"
     HI = "hi"
     MOTOR_POWER = "motor_power"
+    VOLUME = "volume"
     UNKNOWN = "unknown"
 
 
@@ -118,6 +121,12 @@ def classify_payload(text: str) -> Tuple[CommandKind, str, str]:
         action = m_mp.group(1).upper()
         wire = f"MP {action}"
         return CommandKind.MOTOR_POWER, action, wire
+
+    m_vol = VOLUME_RE.match(raw)
+    if m_vol:
+        pct = max(0, min(100, int(m_vol.group(1))))
+        wire = f"V {pct}"
+        return CommandKind.VOLUME, str(pct), wire
 
     return CommandKind.UNKNOWN, raw, raw
 
@@ -219,6 +228,16 @@ class CommandDispatcher:
                 self._handle(kind, payload)
             except Exception as e:
                 self._log_warn(f"MP 处理失败: {e}")
+            if self._ack is not None:
+                self._ack(wire)
+            return
+
+        if kind == CommandKind.VOLUME:
+            self._log_rx(f"V: {wire}")
+            try:
+                self._handle(kind, payload)
+            except Exception as e:
+                self._log_warn(f"音量处理失败: {e}")
             if self._ack is not None:
                 self._ack(wire)
             return

@@ -54,6 +54,7 @@ X:{x},Y:{y},Z:{z},N:{seq}    # 可选序号，20Hz 保活
 | 起立 | `LT+RT+start` |
 | 蹲下 | `LT+RT+RB` |
 | 挥双手 | `RT+A` |
+| 挥单手 | `RT+X` |
 | 步态 | `LT+RT+LB` |
 | 卸力 | `LT+RT+B` |
 
@@ -109,13 +110,29 @@ neck0     # 回中
 
 板端发布 ROS `/power_switch_control`（`livelybot_power/Power_switch`，`control_switch=1`）。
 
-### 1.8 指令 ACK（FFE2 notify）
+### 1.8 音量调节（V）
+
+| 指令 | 说明 |
+|------|------|
+| `V {0-100}` | 将系统播放音量设为指定百分比 |
+
+用户在小程控件里调节完音量后发送，例如调到 **10%** 时：
+
+```text
+V 10
+```
+
+- 范围自动钳位到 `0`–`100`
+- 板端通过 PulseAudio `amixer -D pulse sset Master {n}%` 生效
+- 有 ACK：`ACK:V 10`
+
+### 1.9 指令 ACK（FFE2 notify）
 
 ```text
 ACK:{原文}
 ```
 
-模式、动作、脖子、locate_face、HI、MP 有 ACK；摇杆无。
+模式、动作、脖子、locate_face、HI、MP、V 有 ACK；摇杆无。
 
 ---
 
@@ -138,19 +155,33 @@ IP:19.11
 ### 2.2 电量
 
 ```text
-pwr:50
+pwr:83
 ```
 
 | 规则 | 说明 |
 |------|------|
-| 格式 | `pwr:` + 0~100 整数 |
-| 含义 | `pwr:50` = 剩余 50% 电量 |
-| 步进 | 按 **5%** 量化：100、95、90、85… |
-| 连接后 | **FFE2 订阅成功 5 秒后**，连发 **3 次**当前电量（间隔 1s） |
-| 运行中 | 电量每**下降 5%** 再推一次（上升不推） |
-| 数据源 | sysfs `/sys/class/power_supply/*/capacity` 或 ROS `/pwr`、`/battery_percent`、`/battery_state` |
+| 格式 | `pwr:` + 0~100 整数（实际剩余电量，如 83% → `pwr:83`） |
+| 含义 | `pwr:83` = 剩余 83% 电量 |
+| 连接后 | **FFE2 订阅成功立即推送**当前电量 |
+| 运行中 | 电量**下降**时再推（任意降幅，上升不推） |
+| 数据源 | ROS `/battery_level`（`std_msgs/UInt8`，主）；备选 `/pwr`、`/battery_percent`、`/battery_state` |
 
-### 2.3 机器 FSM 模式
+### 2.3 电机电源状态
+
+```text
+mp:ON
+mp:OFF
+```
+
+| 规则 | 说明 |
+|------|------|
+| 格式 | `mp:` + `ON` / `OFF` |
+| 含义 | 电机供电接通 / 断开 |
+| 连接后 | **FFE2 订阅成功 5 秒后**，连发 **3 次**（间隔 1s） |
+| 运行中 | `/power_switch_state` 变化时再推 |
+| 数据源 | ROS `/power_switch_state`（`livelybot_power/Power_switch`） |
+
+### 2.4 机器 FSM 模式
 
 ```text
 fsm:5
@@ -162,7 +193,7 @@ fsm:5
 | 时机 | **状态变化时连发 3 次**（间隔 50ms，防丢包） |
 | 订阅时 | 推送当前 FSM 一次 |
 
-### 2.4 FSM 状态对照（参考）
+### 2.5 FSM 状态对照（参考）
 
 | 值 | 含义 |
 |----|------|
@@ -172,12 +203,13 @@ fsm:5
 | 14 | EXEC_TEACHING |
 | … | 见 `ble_ros_bridge.py` `FSM_STATE_NAMES` |
 
-### 2.5 下行数据汇总
+### 2.6 下行数据汇总
 
 | 类型 | 格式 | 发送时机 |
 |------|------|----------|
 | IP | `IP:19.11` | 订阅时 + IP 变化 |
-| 电量 | `pwr:50` | 连接 5s 后连发 3 次；之后每降 5% |
+| 电量 | `pwr:83` | 订阅时立即推；之后电量下降再推 |
+| 电机电源 | `mp:ON` / `mp:OFF` | 连接 5s 后连发 3 次；状态变化时再推 |
 | FSM | `fsm:5` | 变化时连发 3 次；订阅时 1 次 |
 | ACK | `ACK:M_default` | 模式/动作/脖子/MP 等指令回执 |
 
@@ -189,8 +221,8 @@ fsm:5
 扫描 FFE0 → createBLEConnection → setBLEMTU(247)
 → 发现特征 → 订阅 FFE2
 → write FFE1 "M_default"
-→ 收到 IP: / fsm: 状态包
-→ 5 秒后收到 3 次 pwr:
+→ 收到 IP: / pwr: / fsm: 状态包
+→ 5 秒后收到 3 次 mp:ON/OFF
 → 20Hz 摇杆 writeNoResponse
 ```
 

@@ -224,6 +224,12 @@ Page({
     await this._write(text, true)
   },
 
+  /** 音量滑块松手后调用，percent 为 0–100 整数，例如 sendVolume(10) → V 10 */
+  async sendVolume(percent) {
+    const pct = Math.max(0, Math.min(100, Math.round(Number(percent) || 0)))
+    await this.sendCommand(`V ${pct}`)
+  },
+
   // --- 模式（进入遥控页先发 M_default）---
   sendModeDefault() { return this.sendCommand('M_default') },
   sendModeInit() { return this.sendCommand('M_init') },

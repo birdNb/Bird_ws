@@ -218,6 +218,10 @@ class Advertisement(dbus.service.Object):
     @dbus.service.method(LE_ADV_IFACE, in_signature="", out_signature="")
     def Release(self):
         log_info("BLE 广播已释放")
+        # BlueZ 主动 Release 时标记为未注册，断连恢复逻辑会重新注册
+        server = getattr(self, "_server", None)
+        if server is not None:
+            server._adv_registered = False
 
 
 
@@ -235,6 +239,7 @@ class BleGattServer:
         self._ros_bridge = None
         self._locate_face = None
         self._hand_identify = None
+        self._volume = None
         self._dispatcher = None
         self._telemetry = None
         self._connect_hint_ids: List[int] = []
@@ -242,6 +247,7 @@ class BleGattServer:
         self._adv: Optional[Advertisement] = None
         self._adv_manager = None
         self._adv_reregister_pending = False
+        self._adv_registered = False
 
         dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
         self.bus = dbus.SystemBus()
@@ -294,9 +300,36 @@ class BleGattServer:
         if not self._connected_devices:
             self._schedule_restart_advertising()
 
+    @staticmethod
+    def _dbus_error_text(error: dbus.DBusException) -> str:
+        try:
+            return f"{error.get_dbus_name()}: {error}"
+        except Exception:
+            return str(error)
+
+    @staticmethod
+    def _is_adv_already_exists(error: dbus.DBusException) -> bool:
+        text = BleGattServer._dbus_error_text(error)
+        return "AlreadyExists" in text or "Already Exists" in text
+
+    def _refresh_advertising_after_disconnect(self, hci_dev: str = "hci0") -> None:
+        """断连后恢复可扫描：广播 D-Bus 对象通常仍注册，重开 advertising 并刷新广播包。"""
+        self._run_btmgmt("le", "on")
+        self._run_btmgmt("connectable", "on")
+        self._run_btmgmt("advertising", "on")
+
+        def _worker() -> None:
+            try:
+                self._patch_le_adv_data(hci_dev=hci_dev)
+                log_info(f"断连后 BLE 广播已恢复: {self.name}")
+            except Exception as e:
+                log_warn(f"断连后刷新广播包失败: {e}")
+
+        threading.Thread(target=_worker, daemon=True).start()
+
     def _schedule_restart_advertising(self) -> None:
         """断连后延迟恢复 BLE 广播，便于小程序重新扫描连接。"""
-        if self._connected_devices or self._adv is None or self._adv_manager is None:
+        if self._connected_devices or self._adv is None:
             return
         if self._adv_reregister_pending:
             return
@@ -305,23 +338,30 @@ class BleGattServer:
 
     def _restart_advertising_cb(self) -> bool:
         self._adv_reregister_pending = False
-        if self._connected_devices or self._adv is None or self._adv_manager is None:
+        if self._connected_devices or self._adv is None:
             return False
 
-        adapter_path = self._adapter_path
-        hci_dev = adapter_path.split("/")[-1] if adapter_path else "hci0"
+        hci_dev = self._adapter_path.split("/")[-1] if self._adapter_path else "hci0"
+
+        # 常见情况：断连后 BlueZ 仍保留 Advertisement 注册 → 直接 Register 会 AlreadyExists
+        if self._adv_registered or self._adv_manager is None:
+            log_info("断连后恢复 BLE 可扫描状态...")
+            self._refresh_advertising_after_disconnect(hci_dev)
+            return False
 
         def adv_done() -> None:
-            log_info(f"断连后 BLE 广播已恢复: {self.name}")
-            threading.Thread(
-                target=self._patch_le_adv_data,
-                kwargs={"hci_dev": hci_dev},
-                daemon=True,
-            ).start()
+            self._adv_registered = True
+            log_info(f"断连后 BLE 广播已重新注册: {self.name}")
+            self._refresh_advertising_after_disconnect(hci_dev)
 
         def adv_failed(error: dbus.DBusException) -> None:
-            log_warn(f"断连后广播恢复失败: {error}")
-            GLib.timeout_add(2000, self._restart_advertising_cb)
+            if self._is_adv_already_exists(error):
+                self._adv_registered = True
+                log_info("断连后 BLE 广播仍注册，刷新广播包")
+                self._refresh_advertising_after_disconnect(hci_dev)
+                return
+            log_warn(f"断连后广播恢复失败: {self._dbus_error_text(error)}，尝试注销后重注册")
+            self._reregister_advertisement(hci_dev)
 
         try:
             self._adv_manager.RegisterAdvertisement(
@@ -331,9 +371,66 @@ class BleGattServer:
                 error_handler=adv_failed,
             )
         except dbus.exceptions.DBusException as e:
-            log_warn(f"断连后 RegisterAdvertisement 异常: {e}")
-            GLib.timeout_add(2000, self._restart_advertising_cb)
+            if self._is_adv_already_exists(e):
+                self._adv_registered = True
+                log_info("断连后 BLE 广播仍注册，刷新广播包")
+                self._refresh_advertising_after_disconnect(hci_dev)
+            else:
+                log_warn(f"断连后 RegisterAdvertisement 异常: {self._dbus_error_text(e)}")
+                self._reregister_advertisement(hci_dev)
         return False
+
+    def _reregister_advertisement(self, hci_dev: str) -> None:
+        if self._adv is None or self._adv_manager is None:
+            return
+
+        def register_again() -> None:
+            def on_registered() -> None:
+                self._adv_registered = True
+                log_info(f"断连后 BLE 广播已重新注册: {self.name}")
+                self._refresh_advertising_after_disconnect(hci_dev)
+
+            def on_register_failed(err: dbus.DBusException) -> None:
+                log_warn(
+                    f"断连后重注册广播仍失败: {self._dbus_error_text(err)}"
+                )
+                GLib.timeout_add(3000, self._restart_advertising_cb)
+
+            try:
+                self._adv_manager.RegisterAdvertisement(
+                    self._adv.get_path(),
+                    {},
+                    reply_handler=on_registered,
+                    error_handler=on_register_failed,
+                )
+            except dbus.exceptions.DBusException as e:
+                log_warn(
+                    f"断连后 RegisterAdvertisement 异常: {self._dbus_error_text(e)}"
+                )
+                GLib.timeout_add(3000, self._restart_advertising_cb)
+
+        def unregister_failed(error: dbus.DBusException) -> None:
+            err = self._dbus_error_text(error)
+            if "DoesNotExist" in err or "NotFound" in err:
+                register_again()
+                return
+            log_warn(f"断连后注销广播失败: {err}")
+            GLib.timeout_add(3000, self._restart_advertising_cb)
+
+        try:
+            self._adv_manager.UnregisterAdvertisement(
+                self._adv.get_path(),
+                reply_handler=register_again,
+                error_handler=unregister_failed,
+            )
+            self._adv_registered = False
+        except dbus.exceptions.DBusException as e:
+            err = self._dbus_error_text(e)
+            if "DoesNotExist" in err or "NotFound" in err:
+                register_again()
+            else:
+                log_warn(f"断连后 UnregisterAdvertisement 异常: {err}")
+                GLib.timeout_add(3000, self._restart_advertising_cb)
 
     def _on_device_props_changed(
         self, interface: str, changed, invalidated, path: str = ""
@@ -415,6 +512,10 @@ class BleGattServer:
         if kind.value == "hi":
             if self._hand_identify is not None:
                 self._hand_identify.handle(payload)
+            return
+        if kind.value == "volume":
+            if self._volume is not None:
+                self._volume.handle(payload)
             return
         if self._ros_bridge is not None and self.ros_control:
             self._ros_bridge.handle_command(kind.value, payload)
@@ -588,6 +689,14 @@ class BleGattServer:
         except Exception as exc2:
             log_warn(f"[adv] LE Ext fallback 异常: {exc2}")
 
+    def _start_volume_manager(self) -> None:
+        try:
+            from ble_volume_manager import VolumeController
+        except ImportError as e:
+            log_warn(f"无法加载 ble_volume_manager: {e}")
+            return
+        self._volume = VolumeController(log=log_info)
+
     def _start_hand_identify_manager(self) -> None:
         try:
             from ble_hand_identify_manager import HandIdentifyManager
@@ -644,8 +753,22 @@ class BleGattServer:
         except ImportError as e:
             log_warn(f"无法加载 ble_status_telemetry: {e}")
             return
-        self._telemetry = BleStatusTelemetry(notify=self._notify_on_main_thread)
+        self._telemetry = BleStatusTelemetry(
+            notify=self._notify_on_main_thread,
+            motor_power_fn=self._read_motor_power_wire,
+            battery_fn=self._read_battery_pct,
+        )
         self._telemetry.start()
+
+    def _read_motor_power_wire(self) -> Optional[str]:
+        if self._ros_bridge is None:
+            return None
+        return self._ros_bridge.get_motor_power_wire()
+
+    def _read_battery_pct(self) -> Optional[int]:
+        if self._ros_bridge is None:
+            return None
+        return self._ros_bridge.get_battery_pct()
 
     def run(self) -> int:
         adapter_path = self._find_adapter()
@@ -655,6 +778,7 @@ class BleGattServer:
         self._watch_devices()
         self._start_locate_face_manager()
         self._start_hand_identify_manager()
+        self._start_volume_manager()
         self._start_ros_bridge()
         self._start_dispatcher()
 
@@ -684,6 +808,7 @@ class BleGattServer:
         self._start_telemetry()
 
         adv = Advertisement(self.bus, 0, self.name)
+        adv._server = self
         self._adv = adv
         adv_manager = dbus.Interface(
             self.bus.get_object(BLUEZ_SERVICE, adapter_path), LE_ADV_MANAGER_IFACE
@@ -705,6 +830,7 @@ class BleGattServer:
             self.mainloop.quit()
 
         def adv_done() -> None:
+            self._adv_registered = True
             log_info(f"BLE 广播已开启，小程序应能扫到名称: {self.name}")
             log_info(f"    或按服务 UUID 扫描: {SERVICE_UUID}")
             self._verify_le_advertising(adapter_path)

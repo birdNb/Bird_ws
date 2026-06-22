@@ -51,6 +51,7 @@ AXIS_DPAD_X = 6
 AXIS_DPAD_Y = 7
 BTN_A = 0
 BTN_B = 1
+BTN_X = 2
 BTN_LB = 4
 BTN_RB = 5
 BTN_BACK = 6
@@ -100,6 +101,13 @@ ACTION_COMMANDS: Dict[str, Tuple[str, str]] = {
     "lt+rt+b": ("卸力", "lt+rt+b"),
     "lt+rt+lb": ("步态启停", "lt+rt+lb"),
     "rt+a": ("挥双手", "rt+a"),
+    "rt+x": ("挥单手", "rt+x"),
+}
+
+# 自定义动作：短脉冲触发（对应 custom_action.yaml 的 cheer/hello）
+PULSE_CUSTOM_ACTIONS = {
+    "rt+a": "挥双手",
+    "rt+x": "挥单手",
 }
 
 BUTTON_PRESS = 1.0
@@ -316,6 +324,8 @@ def _sensor_joy_from_keys(keys: Set[str], pressed: bool):
             msg.buttons[BTN_B] = 1
         elif key == "a":
             msg.buttons[BTN_A] = 1
+        elif key == "x":
+            msg.buttons[BTN_X] = 1
         elif key == "lb":
             msg.buttons[BTN_LB] = 1
         elif key == "back":
@@ -351,13 +361,23 @@ class BleRosBridge:
         self._joy_msg_pub = None
         self._has_joy = False
         self._Twist = None
-        self._cheer_running = False
+        self._pulse_action_running: Set[str] = set()
         self._neck = NeckController(log=log)
         self._motor_power = MotorPowerController(log=log)
+        self._battery_pct: Optional[int] = None
 
     @property
     def ready(self) -> bool:
         return self._ready.is_set()
+
+    def get_motor_power_wire(self) -> Optional[str]:
+        return self._motor_power.get_state_wire()
+
+    def get_battery_pct(self) -> Optional[int]:
+        pct = self._battery_pct
+        if pct is None:
+            return None
+        return max(0, min(100, int(pct)))
 
     def start(self) -> bool:
         if self._ros_thread is not None:
@@ -377,9 +397,10 @@ class BleRosBridge:
             self._stick_target = None
             self._stick_filtered = None
             self._last_stick_ts = 0.0
-        self._cheer_running = False
+        self._pulse_action_running.clear()
         self._publish_zero_twist()
         self._flush_joy_release("rt+a")
+        self._flush_joy_release("rt+x")
         self._log("[ros] 断连急停：零速")
 
     def handle_command(self, kind: str, text: str) -> None:
@@ -415,7 +436,7 @@ class BleRosBridge:
             import rospy
             from geometry_msgs.msg import Twist
             from sensor_msgs.msg import JointState, Joy as SensorJoy
-            from std_msgs.msg import Int32
+            from std_msgs.msg import Int32, UInt8
         except ImportError as e:
             self._log(f"[ros] 未找到 rospy/sim2real_msg: {e}")
             self._log("[ros] 请用 ./start.sh 启动（内部 run_ble_with_ros.sh 会 source ROS）")
@@ -439,6 +460,13 @@ class BleRosBridge:
             self._motor_power.attach_publisher(
                 rospy.Publisher(POWER_TOPIC, Power_switch, queue_size=1)
             )
+
+            def _on_power_state(msg: Power_switch) -> None:
+                self._motor_power.update_state(bool(msg.power_switch))
+
+            rospy.Subscriber(
+                "/power_switch_state", Power_switch, _on_power_state, queue_size=1
+            )
         except ImportError:
             self._log("[MP] livelybot_power 不可用，电机电源控制已禁用")
         try:
@@ -458,7 +486,11 @@ class BleRosBridge:
         def _on_fsm(msg: Int32) -> None:
             self._last_fsm_state = int(msg.data)
 
+        def _on_battery(msg: UInt8) -> None:
+            self._battery_pct = max(0, min(100, int(msg.data)))
+
         rospy.Subscriber("/fsm_state", Int32, _on_fsm, queue_size=1)
+        rospy.Subscriber("/battery_level", UInt8, _on_battery, queue_size=1)
         self._ready.set()
         self._log(f"[ros] /cmd_vel {CMD_VEL_HZ}Hz | 超时 {CMD_VEL_TIMEOUT_SEC}s | EMA={STICK_FILTER_ALPHA}")
         interval = 1.0 / CMD_VEL_HZ
@@ -466,7 +498,7 @@ class BleRosBridge:
             self._neck.tick()
             self._motor_power.tick()
             self._tick_cmd_vel()
-            time.sleep(interval)
+            rospy.sleep(interval)
 
     def _ema_stick(
         self, target: StickCommand, prev: Optional[StickCommand]
@@ -592,8 +624,8 @@ class BleRosBridge:
     def _trigger_action(self, action_key: str) -> None:
         if action_key not in ACTION_COMMANDS:
             return
-        if action_key == "rt+a":
-            self._trigger_cheer()
+        if action_key in PULSE_CUSTOM_ACTIONS:
+            self._trigger_pulse_action(action_key)
             return
 
         now = time.monotonic()
@@ -614,29 +646,38 @@ class BleRosBridge:
             daemon=True,
         ).start()
 
-    def _trigger_cheer(self) -> None:
+    def _trigger_pulse_action(self, action_key: str) -> None:
+        label = PULSE_CUSTOM_ACTIONS[action_key]
         now = time.monotonic()
-        if self._cheer_running:
-            self._log("[ros] 挥双手执行中，忽略重复指令")
+        if action_key in self._pulse_action_running:
+            self._log(f"[ros] {label}执行中，忽略重复指令")
             return
-        if now - self._last_action_ts.get("rt+a", 0.0) < CHEER_COOLDOWN_SEC:
-            self._log("[ros] 挥双手冷却中，忽略")
+        if now - self._last_action_ts.get(action_key, 0.0) < CHEER_COOLDOWN_SEC:
+            self._log(f"[ros] {label}冷却中，忽略")
             return
-        self._last_action_ts["rt+a"] = now
-        self._cheer_running = True
-        self._log(f"[ros] 挥双手: RT+A 短脉冲 {CHEER_PULSE_SEC}s（单次触发）")
+        self._last_action_ts[action_key] = now
+        self._pulse_action_running.add(action_key)
+        self._log(f"[ros] {label}: {action_key.upper()} 短脉冲 {CHEER_PULSE_SEC}s（单次触发）")
         self._publish_zero_twist()
         with self._lock:
             self._stick_target = None
             self._stick_filtered = None
-        threading.Thread(target=self._run_cheer_once, daemon=True).start()
+        threading.Thread(
+            target=self._run_pulse_action_once,
+            args=(action_key, label),
+            daemon=True,
+        ).start()
 
-    def _run_cheer_once(self) -> None:
+    def _run_pulse_action_once(self, action_key: str, label: str) -> None:
         try:
-            self._run_steps(["rt+a"], "挥双手", CHEER_PULSE_SEC, step_gap=0.0)
-            self._flush_joy_release("rt+a", CHEER_RELEASE_FRAMES)
+            self._run_steps([action_key], label, CHEER_PULSE_SEC, step_gap=0.0)
+            self._flush_joy_release(action_key, CHEER_RELEASE_FRAMES)
         finally:
-            self._cheer_running = False
+            self._pulse_action_running.discard(action_key)
+
+    def _trigger_cheer(self) -> None:
+        """兼容旧调用。"""
+        self._trigger_pulse_action("rt+a")
 
     def _wait_joy_path(self) -> None:
         import rospy
