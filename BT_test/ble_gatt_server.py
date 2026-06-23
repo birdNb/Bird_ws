@@ -504,6 +504,14 @@ class BleGattServer:
         self._notify_on_main_thread(payload)
         log_tx(f"ACK:{wire}")
 
+    def _send_command_echo(self, wire: str) -> None:
+        """步态/电源：回传与上行相同的原文（无 ACK: 前缀）。"""
+        if not self.echo or self._notify_chrc is None:
+            return
+        payload = wire.encode("utf-8", errors="replace")[:180]
+        self._notify_on_main_thread(payload)
+        log_tx(wire)
+
     def _handle_dispatched(self, kind, payload: str) -> None:
         if kind.value == "locate_face":
             if self._locate_face is not None:
@@ -739,6 +747,7 @@ class BleGattServer:
         self._dispatcher = CommandDispatcher(
             handle=self._handle_dispatched,
             ack=self._send_ack if self.echo else None,
+            echo_confirm=self._send_command_echo if self.echo else None,
             log_rx=log_rx,
             log_warn=log_warn,
         )

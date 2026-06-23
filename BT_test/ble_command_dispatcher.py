@@ -15,7 +15,7 @@ from typing import Callable, Deque, Optional, Tuple
 MAX_PACKET_BYTES = 64
 QUEUE_MAX = 32
 TICK_INTERVAL_SEC = 0.05
-STICK_XY_LIMIT = 1.0
+STICK_XY_LIMIT = 1.8
 STICK_Z_LIMIT = 1.5
 
 # 摇杆：XYZ 必填；可选 ,N:序号 供小程序 20Hz 保活（板端忽略 N 仅解析 XYZ）
@@ -43,6 +43,7 @@ NECK_CENTER_RE = re.compile(r"^neck0$", re.IGNORECASE)
 LOCATE_FACE_RE = re.compile(r"^locate_face\s+(ON|OFF)$", re.IGNORECASE)
 HI_RE = re.compile(r"^HI\s+(ON|OFF)$", re.IGNORECASE)
 MP_RE = re.compile(r"^MP\s+(ON|OFF)$", re.IGNORECASE)
+SPRINT_RE = re.compile(r"^LT\s+(ON|OFF)$", re.IGNORECASE)
 VOLUME_RE = re.compile(r"^V\s+(\d{1,3})$", re.IGNORECASE)
 
 
@@ -54,6 +55,7 @@ class CommandKind(str, Enum):
     LOCATE_FACE = "locate_face"
     HI = "hi"
     MOTOR_POWER = "motor_power"
+    SPRINT = "sprint"
     VOLUME = "volume"
     UNKNOWN = "unknown"
 
@@ -68,6 +70,10 @@ class QueuedCommand:
 LogFn = Callable[[str], None]
 HandleFn = Callable[[CommandKind, str], None]
 AckFn = Callable[[str], None]
+EchoConfirmFn = Callable[[str], None]
+
+# 步态/电源：FFE2 回传与上行相同的原文（无 ACK: 前缀）
+ECHO_CONFIRM_ACTIONS = frozenset({"lt+rt+lb"})
 
 
 def _normalize_stick(x: float, y: float, z: float) -> str:
@@ -122,6 +128,12 @@ def classify_payload(text: str) -> Tuple[CommandKind, str, str]:
         wire = f"MP {action}"
         return CommandKind.MOTOR_POWER, action, wire
 
+    m_sprint = SPRINT_RE.match(raw)
+    if m_sprint:
+        action = m_sprint.group(1).upper()
+        wire = f"LT {action}"
+        return CommandKind.SPRINT, action, wire
+
     m_vol = VOLUME_RE.match(raw)
     if m_vol:
         pct = max(0, min(100, int(m_vol.group(1))))
@@ -140,11 +152,13 @@ class CommandDispatcher:
         self,
         handle: HandleFn,
         ack: Optional[AckFn] = None,
+        echo_confirm: Optional[EchoConfirmFn] = None,
         log_rx: LogFn = print,
         log_warn: Optional[LogFn] = None,
     ) -> None:
         self._handle = handle
         self._ack = ack
+        self._echo_confirm = echo_confirm
         self._log_rx = log_rx
         self._log_warn = log_warn or log_rx
         self._queue: Deque[QueuedCommand] = deque()
@@ -228,6 +242,17 @@ class CommandDispatcher:
                 self._handle(kind, payload)
             except Exception as e:
                 self._log_warn(f"MP 处理失败: {e}")
+                return
+            if self._echo_confirm is not None:
+                self._echo_confirm(wire)
+            return
+
+        if kind == CommandKind.SPRINT:
+            self._log_rx(f"LT: {wire}")
+            try:
+                self._handle(kind, payload)
+            except Exception as e:
+                self._log_warn(f"疾跑处理失败: {e}")
             if self._ack is not None:
                 self._ack(wire)
             return
@@ -276,7 +301,13 @@ class CommandDispatcher:
                 time.sleep(TICK_INTERVAL_SEC)
                 continue
 
-            if self._ack is not None:
+            if (
+                cmd.kind == CommandKind.ACTION
+                and cmd.payload in ECHO_CONFIRM_ACTIONS
+            ):
+                if self._echo_confirm is not None:
+                    self._echo_confirm(cmd.wire)
+            elif self._ack is not None:
                 self._ack(cmd.wire)
 
             time.sleep(TICK_INTERVAL_SEC)

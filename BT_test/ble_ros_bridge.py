@@ -23,6 +23,9 @@ from typing import Callable, Dict, List, Optional, Set, Tuple, Union
 SCALE_LINEAR_X = 1.5
 SCALE_LINEAR_Y = 0.7
 SCALE_ANGULAR_Z = 1.57
+# 疾跑开启时 /cmd_vel 额外倍率（/joy_msg lt 按下为策略主通道，此为辅助）
+SPRINT_SCALE_LINEAR = 1.5
+SPRINT_SCALE_ANGULAR = 1.2
 
 JOY_PUBLISH_HZ = 50
 COMBO_HOLD_SEC = 1.0
@@ -34,7 +37,7 @@ CMD_VEL_TIMEOUT_SEC = 0.20
 STICK_FILTER_ALPHA = 0.45
 # 与小程序死区 10（-100~100 刻度）对齐 → |v| < 0.10 归零
 STICK_DEADBAND = 0.10
-STICK_XY_LIMIT = 1.0
+STICK_XY_LIMIT = 1.8
 STICK_Z_LIMIT = 1.5
 ACTION_COOLDOWN_SEC = 1.0
 MODE_COOLDOWN_SEC = 0.8
@@ -229,7 +232,7 @@ def _clamp_axis(v: float, limit: float = STICK_XY_LIMIT) -> float:
     return v
 
 
-def _stick_to_twist(stick: StickCommand):
+def _stick_to_twist(stick: StickCommand, sprint: bool = False):
     """BLE 摇杆 → /cmd_vel，与 joy.yaml 实体手柄一致。
 
     协议约定（小程序写入）:
@@ -240,10 +243,18 @@ def _stick_to_twist(stick: StickCommand):
     """
     from geometry_msgs.msg import Twist
 
+    lin_x = SCALE_LINEAR_X
+    lin_y = SCALE_LINEAR_Y
+    ang_z = SCALE_ANGULAR_Z
+    if sprint:
+        lin_x *= SPRINT_SCALE_LINEAR
+        lin_y *= SPRINT_SCALE_LINEAR
+        ang_z *= SPRINT_SCALE_ANGULAR
+
     msg = Twist()
-    msg.linear.x = -stick.x * SCALE_LINEAR_X
-    msg.linear.y = stick.y * SCALE_LINEAR_Y
-    msg.angular.z = -stick.z * SCALE_ANGULAR_Z
+    msg.linear.x = -stick.x * lin_x
+    msg.linear.y = stick.y * lin_y
+    msg.angular.z = -stick.z * ang_z
     return msg
 
 
@@ -365,6 +376,7 @@ class BleRosBridge:
         self._neck = NeckController(log=log)
         self._motor_power = MotorPowerController(log=log)
         self._battery_pct: Optional[int] = None
+        self._sprint_enabled = False
 
     @property
     def ready(self) -> bool:
@@ -398,6 +410,7 @@ class BleRosBridge:
             self._stick_filtered = None
             self._last_stick_ts = 0.0
         self._pulse_action_running.clear()
+        self._set_sprint(False, log=False)
         self._publish_zero_twist()
         self._flush_joy_release("rt+a")
         self._flush_joy_release("rt+x")
@@ -414,6 +427,8 @@ class BleRosBridge:
             self._neck.enqueue(text)
         elif kind == "motor_power":
             self._motor_power.enqueue(text)
+        elif kind == "sprint":
+            self._set_sprint(text.strip().upper() == "ON")
 
     def handle_text(self, text: str) -> None:
         if not self.ready:
@@ -477,6 +492,7 @@ class BleRosBridge:
             self._log("[ros] 已启用 /cmd_vel + /joy + /joy_msg")
             self._log("[ros] 模式: M_default/M_init/M_protect/M_resetzero/M_tech")
             self._log("[ros] 动作: LT+RT+start/RB/B")
+            self._log("[ros] 疾跑: LT ON/OFF → /joy_msg lt 按住（AMP 加速）")
         except ImportError:
             self._has_joy = False
             self._log("[ros] 已启用 /cmd_vel + /joy（无 sim2real_msg）")
@@ -498,6 +514,7 @@ class BleRosBridge:
             self._neck.tick()
             self._motor_power.tick()
             self._tick_cmd_vel()
+            self._tick_sprint_lt()
             rospy.sleep(interval)
 
     def _ema_stick(
@@ -528,7 +545,36 @@ class BleRosBridge:
         with self._lock:
             filtered = self._ema_stick(target, self._stick_filtered)
             self._stick_filtered = filtered
-        self._cmd_pub.publish(_stick_to_twist(filtered))
+            sprint = self._sprint_enabled
+        self._cmd_pub.publish(_stick_to_twist(filtered, sprint=sprint))
+
+    def _set_sprint(self, enabled: bool, log: bool = True) -> None:
+        with self._lock:
+            prev = self._sprint_enabled
+            self._sprint_enabled = enabled
+        if log:
+            if enabled == prev:
+                self._log(f"[ros] 疾跑已{'开启' if enabled else '关闭'}（重复指令）")
+            else:
+                self._log(
+                    f"[ros] 疾跑{'开启' if enabled else '关闭'} → "
+                    f"/joy_msg lt={'按下' if enabled else '松开'}"
+                )
+        if not enabled:
+            self._publish_sprint_lt(False)
+
+    def _tick_sprint_lt(self) -> None:
+        with self._lock:
+            enabled = self._sprint_enabled
+        if not enabled or self._pulse_action_running:
+            return
+        self._publish_sprint_lt(True)
+
+    def _publish_sprint_lt(self, pressed: bool) -> None:
+        if not self._has_joy or self._joy_msg_pub is None:
+            return
+        joy = _joy_from_keys({"lt"}, pressed)
+        self._joy_msg_pub.publish(joy)
 
     def _publish_zero_twist(self) -> None:
         if self._cmd_pub is None or self._Twist is None:

@@ -25,8 +25,8 @@
 
 | 字段 | 范围 | 说明 |
 |------|------|------|
-| X | ±1.00 | 前后（前 +） |
-| Y | ±1.00 | 左右（右 +） |
+| X | ±1.80 | 前后（前 +） |
+| Y | ±1.80 | 左右（右 +） |
 | Z | ±1.50 | 转向（右转 +） |
 
 ```text
@@ -57,6 +57,8 @@ X:{x},Y:{y},Z:{z},N:{seq}    # 可选序号，20Hz 保活
 | 挥单手 | `RT+X` |
 | 步态 | `LT+RT+LB` |
 | 卸力 | `LT+RT+B` |
+
+步态（`LT+RT+LB`）、电机电源（`MP ON/OFF`）收到后，板端经 FFE2 **原样回传相同指令**（无 `ACK:` 前缀）作为确认。
 
 ### 1.4 脖子控制
 
@@ -108,9 +110,20 @@ neck0     # 回中
 | `MP ON` | **长按** | 接通电机供电（功率板 `power_switch=1`） |
 | `MP OFF` | **点击** | 断开电机供电（功率板 `power_switch=0`） |
 
-板端发布 ROS `/power_switch_control`（`livelybot_power/Power_switch`，`control_switch=1`）。
+板端发布 ROS `/power_switch_control`（`livelybot_power/Power_switch`，`control_switch=1`）。收到后 FFE2 **原样回传** `MP ON` / `MP OFF` 确认（无 `ACK:` 前缀）。
 
-### 1.8 音量调节（V）
+### 1.8 疾跑（LT）
+
+| 指令 | 说明 |
+|------|------|
+| `LT ON` | 开启疾跑：持续向 `/joy_msg` 发布 `lt=-1.0`（模拟按住 LT），AMP Soccer 策略最大前进速度由 0.80 提升至 1.50 |
+| `LT OFF` | 关闭疾跑：松开 LT |
+
+- 与摇杆 `/cmd_vel` 并行；疾跑开启时 `/cmd_vel` 线速度额外 ×1.5
+- 断连自动关闭疾跑并松开 LT
+- 有 ACK：`ACK:LT ON` / `ACK:LT OFF`
+
+### 1.9 音量调节（V）
 
 | 指令 | 说明 |
 |------|------|
@@ -126,13 +139,13 @@ V 10
 - 板端通过 PulseAudio `amixer -D pulse sset Master {n}%` 生效
 - 有 ACK：`ACK:V 10`
 
-### 1.9 指令 ACK（FFE2 notify）
+### 1.10 指令 ACK（FFE2 notify）
 
 ```text
 ACK:{原文}
 ```
 
-模式、动作、脖子、locate_face、HI、MP、V 有 ACK；摇杆无。
+模式、动作（除步态外）、脖子、locate_face、HI、LT 疾跑、V 有 `ACK:` 回执；步态、电机电源为**原文回显**；摇杆无回执。
 
 ---
 
@@ -211,7 +224,8 @@ fsm:5
 | 电量 | `pwr:83` | 订阅时立即推；之后电量下降再推 |
 | 电机电源 | `mp:ON` / `mp:OFF` | 连接 5s 后连发 3 次；状态变化时再推 |
 | FSM | `fsm:5` | 变化时连发 3 次；订阅时 1 次 |
-| ACK | `ACK:M_default` | 模式/动作/脖子/MP 等指令回执 |
+| ACK | `ACK:M_default` | 模式/动作/脖子等指令回执 |
+| 原文确认 | `MP ON` / `LT+RT+LB` | 电机电源、步态：回传与上行相同指令 |
 
 ---
 

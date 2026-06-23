@@ -8,6 +8,7 @@ const NOTIFY_UUID = '0000FFE2-0000-1000-8000-00805F9B34FB'
 const TARGET_NAME = 'Bird_BLE_Test'
 const STICK_INTERVAL_MS = 50 // 20Hz
 const STICK_DEADZONE = 10 // UI -100~100 刻度
+const STICK_XY_SCALE = 1.8 // 前后/左右满量程 ±1.8
 const STICK_Z_SCALE = 1.5 // 右转 Z 满量程 ±1.5
 const CMD_COOLDOWN_MS = 800
 const CHEER_COOLDOWN_MS = 8000
@@ -44,8 +45,10 @@ function applyDeadzone(axis100) {
 
 /** lx=UI横(右+), ly=UI纵(上为负) → 协议 X前后/Y左右/Z右转 */
 function formatStick(lx, ly, rz) {
-  const x = applyDeadzone(-ly * 100)
-  const y = applyDeadzone(lx * 100)
+  let x = applyDeadzone(-ly * 100) * STICK_XY_SCALE
+  let y = applyDeadzone(lx * 100) * STICK_XY_SCALE
+  x = Math.max(-STICK_XY_SCALE, Math.min(STICK_XY_SCALE, x))
+  y = Math.max(-STICK_XY_SCALE, Math.min(STICK_XY_SCALE, y))
   let z = applyDeadzone(rz * 100) * STICK_Z_SCALE
   z = Math.max(-STICK_Z_SCALE, Math.min(STICK_Z_SCALE, z))
   return `X:${x.toFixed(2)},Y:${y.toFixed(2)},Z:${z.toFixed(2)}`
@@ -203,6 +206,11 @@ Page({
       console.log('ACK', text.slice(4))
       return
     }
+    // 步态/电源：板端原样回传相同指令确认
+    if (text === 'MP ON' || text === 'MP OFF' || text === 'LT+RT+LB') {
+      console.log('CMD_ECHO', text)
+      return
+    }
     if (text.startsWith('IP:')) {
       this.setData({ robotIp: text.slice(3) })
       return
@@ -249,6 +257,10 @@ Page({
   },
   sendGaitToggle() { return this.sendCommand('LT+RT+LB') },
   sendUnload() { return this.sendCommand('LT+RT+B') },
+
+  /** 疾跑开关：按住策略侧 LT 加速（AMP Soccer 模式） */
+  sendSprintOn() { return this.sendCommand('LT ON') },
+  sendSprintOff() { return this.sendCommand('LT OFF') },
 
   /** 左摇杆 detail.x/y；右摇杆 detail.x→rz（formatStick 内转协议 X/Y/Z） */
   onLeftStick(e) {
