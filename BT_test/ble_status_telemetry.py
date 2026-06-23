@@ -150,6 +150,7 @@ class BleStatusTelemetry:
             self._mp_burst_gen += 1
             mp_gen = self._mp_burst_gen
         self._push_snapshot()
+        self._send_mp_state(force=True)
         threading.Thread(
             target=self._pwr_retry_loop, args=(pwr_gen,), daemon=True
         ).start()
@@ -384,6 +385,10 @@ class BleStatusTelemetry:
                 return
             self._last_mp_sent = wire
         self._tx(f"mp:{wire}")
+
+    def push_mp_state(self, wire: str, force: bool = True) -> None:
+        """MP 指令后立即推送 mp:ON/OFF，供小程序自动站立判断。"""
+        self._send_mp_wire(wire, force=force)
 
     def _send_fsm(self, state: int, force: bool = False) -> None:
         repeat = FSM_REPEAT if not force else 1

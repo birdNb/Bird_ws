@@ -123,7 +123,20 @@ neck0     # 回中
 - 断连自动关闭疾跑并松开 LT
 - 有 ACK：`ACK:LT ON` / `ACK:LT OFF`
 
-### 1.9 音量调节（V）
+### 1.9 实时语音（sound）
+
+| 指令 | 说明 |
+|------|------|
+| `sound ON` | 开启语音接收，FFE1 二进制 PCM 实时播放 |
+| `sound OFF` | 关闭语音，停止播放 |
+
+- **音频走 FFE1**（与控制同一写入特征），与摇杆文本包区分：音频首字节为 **`0x0B`**
+- 包格式：`[0x0B][seq_hi][seq_lo][pcm...]`，约 **180 字节 PCM**，8kHz / s16le / mono
+- 收到后 FFE2 **原样回传** `sound ON` / `sound OFF`（无 `ACK:` 前缀）
+- 未 `sound ON` 时音频包丢弃；`sound ON` 后终端 stderr 显示**实时电平条**
+- 可选：`--enable-voice` 额外注册 FFE3 备用通道
+
+### 1.10 音量调节（V）
 
 | 指令 | 说明 |
 |------|------|
@@ -139,13 +152,13 @@ V 10
 - 板端通过 PulseAudio `amixer -D pulse sset Master {n}%` 生效
 - 有 ACK：`ACK:V 10`
 
-### 1.10 指令 ACK（FFE2 notify）
+### 1.11 指令 ACK（FFE2 notify）
 
 ```text
 ACK:{原文}
 ```
 
-模式、动作（除步态外）、脖子、locate_face、HI、LT 疾跑、V 有 `ACK:` 回执；步态、电机电源为**原文回显**；摇杆无回执。
+模式、动作（除步态外）、脖子、locate_face、HI、LT 疾跑、V 有 `ACK:` 回执；步态、电机电源、**sound ON/OFF** 为**原文回显**；摇杆无回执。
 
 ---
 

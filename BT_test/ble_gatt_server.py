@@ -7,6 +7,7 @@ Bird BLE GATT 从机：微信小程序连接，FFE1 收指令，FFE2 回 ACK。
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import sys
 import threading
@@ -23,6 +24,11 @@ from gi.repository import GLib
 SERVICE_UUID = "0000ffe0-0000-1000-8000-00805f9b34fb"
 WRITE_CHAR_UUID = "0000ffe1-0000-1000-8000-00805f9b34fb"
 NOTIFY_CHAR_UUID = "0000ffe2-0000-1000-8000-00805f9b34fb"
+
+# 语音 FFE3（sound_demo）；仅 --enable-voice 时注册
+_BIRD_WS = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if _BIRD_WS not in sys.path:
+    sys.path.insert(0, _BIRD_WS)
 
 DEVICE_NAME = "Bird_BLE_Test"
 # 小程序也可按 MAC 连接（系统设置里看到的蓝牙地址）
@@ -226,13 +232,22 @@ class Advertisement(dbus.service.Object):
 
 
 class BleGattServer:
-    def __init__(self, adapter: str, name: str, echo: bool, ros_control: bool):
+    def __init__(
+        self,
+        adapter: str,
+        name: str,
+        echo: bool,
+        ros_control: bool,
+        enable_voice: bool = False,
+    ):
         self.adapter = adapter
         self.name = name
         self.echo = echo
         self.ros_control = ros_control
+        self.enable_voice = enable_voice
         self._notify_chrc: Optional[Characteristic] = None
         self._write_chrc: Optional[Characteristic] = None
+        self._audio_chrc: Optional[Characteristic] = None
         self._msg_count = 0
         self._connected_devices: set = set()
         self._adapter_path = ""
@@ -240,6 +255,7 @@ class BleGattServer:
         self._locate_face = None
         self._hand_identify = None
         self._volume = None
+        self._voice = None
         self._dispatcher = None
         self._telemetry = None
         self._connect_hint_ids: List[int] = []
@@ -295,6 +311,8 @@ class BleGattServer:
         log_info(f"--- 手机已断开: {label} ---")
         if self._dispatcher is not None:
             self._dispatcher.on_disconnect()
+        if self._voice is not None:
+            self._voice.on_disconnect()
         if self._ros_bridge is not None:
             self._ros_bridge.on_disconnect()
         if not self._connected_devices:
@@ -476,6 +494,13 @@ class BleGattServer:
             path_keyword="path",
         )
 
+    def _on_audio_write(self, data: bytes, options) -> None:
+        opt = dict(options) if options else {}
+        if opt.get("event") == "read":
+            return
+        if self._voice is not None:
+            self._voice.on_audio_write(data)
+
     def _on_write(self, data: bytes, options) -> None:
         opt = dict(options) if options else {}
         if opt.get("event") == "read":
@@ -483,6 +508,15 @@ class BleGattServer:
             return
 
         self._msg_count += 1
+
+        # 小程序语音：FFE1 二进制 [0x0B, seq_hi, seq_lo, pcm...]
+        if len(data) >= 3 and data[0] == 0x0B:
+            if self._voice is not None:
+                self._voice.on_audio_write(data)
+            else:
+                log_warn(f"[sound] 音频包 {len(data)}B 但语音模块未加载")
+            return
+
         if self._dispatcher is not None:
             self._dispatcher.dispatch(data)
 
@@ -524,6 +558,14 @@ class BleGattServer:
         if kind.value == "volume":
             if self._volume is not None:
                 self._volume.handle(payload)
+            return
+        if kind.value == "sound":
+            if self._voice is not None:
+                wire = self._voice.on_sound_command(payload)
+                if wire:
+                    self._send_command_echo(wire)
+            else:
+                log_warn("语音模块未加载（检查 sound_demo）")
             return
         if self._ros_bridge is not None and self.ros_control:
             self._ros_bridge.handle_command(kind.value, payload)
@@ -723,6 +765,15 @@ class BleGattServer:
         self._locate_face = LocateFaceManager(log=log_info)
         log_info("locate_face 管理器已就绪（locate_face ON/OFF）")
 
+    def _start_voice_manager(self) -> None:
+        try:
+            from sound_demo.integrate import VoiceBleIntegration
+
+            self._voice = VoiceBleIntegration(log=log_info)
+            log_info("语音传输已就绪（FFE1: sound ON/OFF + 0x0B 音频包）")
+        except ImportError as e:
+            log_warn(f"无法加载 sound_demo: {e}")
+
     def _start_ros_bridge(self) -> None:
         if not self.ros_control:
             return
@@ -753,6 +804,20 @@ class BleGattServer:
         )
         self._dispatcher.start()
         log_info("指令分发器已启动")
+
+    def _wire_mp_telemetry(self) -> None:
+        """MP 上电后立即推 mp:ON，避免小程序自动站立误判为未上电。"""
+        if self._ros_bridge is None or self._telemetry is None:
+            return
+
+        def _on_mp_state(motor_on: bool) -> None:
+            wire = "ON" if motor_on else "OFF"
+            self._telemetry.push_mp_state(wire, force=True)
+
+        self._ros_bridge.set_motor_power_listener(_on_mp_state)
+        wire = self._ros_bridge.get_motor_power_wire()
+        if wire in ("ON", "OFF"):
+            self._telemetry.push_mp_state(wire, force=True)
 
     def _start_telemetry(self) -> None:
         if self._notify_chrc is None:
@@ -788,6 +853,7 @@ class BleGattServer:
         self._start_locate_face_manager()
         self._start_hand_identify_manager()
         self._start_volume_manager()
+        self._start_voice_manager()
         self._start_ros_bridge()
         self._start_dispatcher()
 
@@ -813,8 +879,21 @@ class BleGattServer:
         write_chrc = self._write_chrc
         service.add_characteristic(write_chrc)
         service.add_characteristic(self._notify_chrc)
+        if self.enable_voice and self._voice is not None:
+            from sound_demo.integrate import AUDIO_CHAR_UUID
+
+            self._audio_chrc = Characteristic(
+                self.bus,
+                2,
+                AUDIO_CHAR_UUID,
+                ["write", "write-without-response"],
+                service,
+                on_write=self._on_audio_write,
+            )
+            service.add_characteristic(self._audio_chrc)
         app.add_service(service)
         self._start_telemetry()
+        self._wire_mp_telemetry()
 
         adv = Advertisement(self.bus, 0, self.name)
         adv._server = self
@@ -873,6 +952,10 @@ class BleGattServer:
         log_info(">>> Bird BLE 遥控服务 <<<")
         log_info(f"    广播名: {self.name}  MAC: {addr}")
         log_info("    FFE0/FFE1/FFE2 | 协议见 BLE_PROTOCOL.md")
+        if self._voice is not None:
+            log_info("    FFE1 语音: sound ON/OFF + 0x0B 音频包 | 见 sound_demo/README.md")
+        if self.enable_voice and self._voice is not None:
+            log_info("    FFE3 语音(可选备用通道)")
         log_info("    日志: RX红(收) TX绿(发)")
         if self.ros_control:
             log_info("    摇杆→/cmd_vel 20Hz | 模式/动作→/joy_msg | 状态→FFE2")
@@ -894,6 +977,8 @@ class BleGattServer:
                 self._locate_face.stop()
             if self._hand_identify is not None:
                 self._hand_identify.stop()
+            if self._voice is not None:
+                self._voice.on_disconnect()
         return 0
 
 
@@ -915,12 +1000,18 @@ def main() -> int:
         action="store_true",
         help="不将 BLE 指令转为 ROS 话题（仅打印）",
     )
+    parser.add_argument(
+        "--enable-voice",
+        action="store_true",
+        help="启用 FFE3 语音 PCM 实时播放（sound_demo）",
+    )
     args = parser.parse_args()
     server = BleGattServer(
         args.adapter,
         args.name,
         echo=not args.no_echo,
         ros_control=not args.no_ros,
+        enable_voice=args.enable_voice,
     )
     return server.run()
 

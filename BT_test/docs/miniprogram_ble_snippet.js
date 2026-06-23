@@ -206,8 +206,11 @@ Page({
       console.log('ACK', text.slice(4))
       return
     }
-    // 步态/电源：板端原样回传相同指令确认
-    if (text === 'MP ON' || text === 'MP OFF' || text === 'LT+RT+LB') {
+    // 步态/电源/语音：板端原样回传相同指令确认
+    if (
+      text === 'MP ON' || text === 'MP OFF' || text === 'LT+RT+LB' ||
+      text === 'sound ON' || text === 'sound OFF'
+    ) {
       console.log('CMD_ECHO', text)
       return
     }

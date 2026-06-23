@@ -385,6 +385,9 @@ class BleRosBridge:
     def get_motor_power_wire(self) -> Optional[str]:
         return self._motor_power.get_state_wire()
 
+    def set_motor_power_listener(self, fn) -> None:
+        self._motor_power.set_state_listener(fn)
+
     def get_battery_pct(self) -> Optional[int]:
         pct = self._battery_pct
         if pct is None:
@@ -426,7 +429,7 @@ class BleRosBridge:
         elif kind == "neck":
             self._neck.enqueue(text)
         elif kind == "motor_power":
-            self._motor_power.enqueue(text)
+            self._motor_power.apply_immediate(text)
         elif kind == "sprint":
             self._set_sprint(text.strip().upper() == "ON")
 
@@ -477,7 +480,7 @@ class BleRosBridge:
             )
 
             def _on_power_state(msg: Power_switch) -> None:
-                self._motor_power.update_state(bool(msg.power_switch))
+                self._motor_power.update_state_from_hardware(bool(msg.power_switch))
 
             rospy.Subscriber(
                 "/power_switch_state", Power_switch, _on_power_state, queue_size=1

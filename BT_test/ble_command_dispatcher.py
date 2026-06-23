@@ -44,6 +44,7 @@ LOCATE_FACE_RE = re.compile(r"^locate_face\s+(ON|OFF)$", re.IGNORECASE)
 HI_RE = re.compile(r"^HI\s+(ON|OFF)$", re.IGNORECASE)
 MP_RE = re.compile(r"^MP\s+(ON|OFF)$", re.IGNORECASE)
 SPRINT_RE = re.compile(r"^LT\s+(ON|OFF)$", re.IGNORECASE)
+SOUND_RE = re.compile(r"^sound\s+(ON|OFF)(?:\s+(\d+))?$", re.IGNORECASE)
 VOLUME_RE = re.compile(r"^V\s+(\d{1,3})$", re.IGNORECASE)
 
 
@@ -56,6 +57,7 @@ class CommandKind(str, Enum):
     HI = "hi"
     MOTOR_POWER = "motor_power"
     SPRINT = "sprint"
+    SOUND = "sound"
     VOLUME = "volume"
     UNKNOWN = "unknown"
 
@@ -133,6 +135,12 @@ def classify_payload(text: str) -> Tuple[CommandKind, str, str]:
         action = m_sprint.group(1).upper()
         wire = f"LT {action}"
         return CommandKind.SPRINT, action, wire
+
+    m_sound = SOUND_RE.match(raw)
+    if m_sound:
+        action = m_sound.group(1).upper()
+        wire = f"sound {action}"
+        return CommandKind.SOUND, action, wire
 
     m_vol = VOLUME_RE.match(raw)
     if m_vol:
@@ -255,6 +263,14 @@ class CommandDispatcher:
                 self._log_warn(f"疾跑处理失败: {e}")
             if self._ack is not None:
                 self._ack(wire)
+            return
+
+        if kind == CommandKind.SOUND:
+            self._log_rx(f"sound: {wire}")
+            try:
+                self._handle(kind, payload)
+            except Exception as e:
+                self._log_warn(f"语音处理失败: {e}")
             return
 
         if kind == CommandKind.VOLUME:
