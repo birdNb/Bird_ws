@@ -57,6 +57,11 @@ DEVICE_IFACE = "org.bluez.Device1"
 ADAPTER_IFACE = "org.bluez.Adapter1"
 
 
+def _dbus_sv_opts() -> dbus.Dictionary:
+    """BlueZ Register* 的 options 须为 a{sv}，空 dict 不能直接用 {}。"""
+    return dbus.Dictionary({}, signature="sv")
+
+
 from ble_log import log_info, log_rx, log_tx, log_warn
 
 
@@ -395,7 +400,7 @@ class BleGattServer:
         try:
             self._adv_manager.RegisterAdvertisement(
                 self._adv.get_path(),
-                {},
+                _dbus_sv_opts(),
                 reply_handler=adv_done,
                 error_handler=adv_failed,
             )
@@ -428,7 +433,7 @@ class BleGattServer:
             try:
                 self._adv_manager.RegisterAdvertisement(
                     self._adv.get_path(),
-                    {},
+                    _dbus_sv_opts(),
                     reply_handler=on_registered,
                     error_handler=on_register_failed,
                 )
@@ -1080,13 +1085,13 @@ class BleGattServer:
 
         gatt_manager.RegisterApplication(
             app.get_path(),
-            {},
+            _dbus_sv_opts(),
             reply_handler=register_done,
             error_handler=register_failed,
         )
         adv_manager.RegisterAdvertisement(
             adv.get_path(),
-            {},
+            _dbus_sv_opts(),
             reply_handler=adv_done,
             error_handler=adv_failed,
         )

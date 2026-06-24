@@ -5,8 +5,7 @@
 # systemd/sudo + set -u 时 ROS setup 脚本会引用未定义变量，须预先设置
 export ROS_DISTRO="${ROS_DISTRO:-noetic}"
 export ROS_MASTER_URI="${ROS_MASTER_URI:-http://127.0.0.1:11311}"
-# 空 ROS_HOSTNAME 会触发 rospy 警告，子进程里不预设
-export ROS_IP="${ROS_IP:-}"
+unset ROS_HOSTNAME ROS_IP
 
 _ros_strict_u=0
 case $- in *u*) _ros_strict_u=1 ;; esac
