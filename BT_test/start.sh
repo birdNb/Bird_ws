@@ -21,18 +21,18 @@ show_help() {
 启动 BLE GATT 从机，将小程序指令转发至 ROS。
 
 小程序连接参数（复制到微信开发者工具）:
-  设备名: Bird_BLE_Test  （可能扫不到名称，请用下面 UUID 扫描）
+  设备名: HT_88888888  （可用 rename HT_12345678 修改后8位）
   服务 FFE0:  0000FFE0-0000-1000-8000-00805F9B34FB  ← 扫描必用
   写入 FFE1:  0000FFE1-0000-1000-8000-00805F9B34FB
   通知 FFE2:  0000FFE2-0000-1000-8000-00805F9B34FB
   板子 MAC 参考:  00:19:86:00:2E:AF
 
 重要: 只在【微信小程序】里连接，不要在手机系统蓝牙里点配对
-      若手机反复弹连接框：设置里「忽略」Bird_BLE_Test 后重试
+      若手机反复弹连接框：设置里「忽略」设备后重试
       必须保持本脚本运行，小程序才能发现 BLE 广播
 
 选项:
-  --name NAME     广播名称 (默认 Bird_BLE_Test)
+  --name NAME     广播名称 (默认 ble_device_name.conf 或 HT_88888888)
   --no-echo       不回显 ACK 到 notify 特征
   --no-ros        不转发 ROS（仅验证 BLE 连接）
   --enable-voice  启用 FFE3 语音 PCM 播放（sound_demo）
@@ -57,7 +57,7 @@ show_help() {
 EOF
 }
 
-NAME="Bird_BLE_Test"
+NAME="$(python3 -c "from ble_device_name import load_ble_name; print(load_ble_name())")"
 EXTRA_ARGS=()
 DO_SETUP=0
 
@@ -72,7 +72,7 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     --name)
-      NAME="${2:-Bird_BLE_Test}"
+      NAME="${2:-HT_88888888}"
       EXTRA_ARGS+=(--name "$NAME")
       shift 2
       ;;
@@ -120,11 +120,11 @@ if [ "$DO_SETUP" -eq 1 ]; then
     echo "[setup] 已配置或无法修改 $CONF"
   fi
   sudo_n hciconfig hci0 up 2>/dev/null || true
-  sudo_n hciconfig hci0 name "Bird_BLE_Test" 2>/dev/null || true
+  sudo_n hciconfig hci0 name "${NAME}" 2>/dev/null || true
   bluetoothctl power on 2>/dev/null || true
   bluetoothctl discoverable off 2>/dev/null || true
   bluetoothctl pairable off 2>/dev/null || true
-  bluetoothctl system-alias "Bird_BLE_Test" 2>/dev/null || true
+  bluetoothctl system-alias "${NAME}" 2>/dev/null || true
 fi
 
 if ! systemctl is-active --quiet bluetooth 2>/dev/null; then
@@ -171,9 +171,9 @@ fi
 
 # BLE 广播名 + 关闭经典蓝牙配对（避免手机系统反复弹窗）
 sudo_n hciconfig hci0 up 2>/dev/null || true
-sudo_n hciconfig hci0 name "Bird_BLE_Test" 2>/dev/null || true
+sudo_n hciconfig hci0 name "${NAME}" 2>/dev/null || true
 sudo_n hciconfig hci0 noscan 2>/dev/null || true
-bluetoothctl system-alias "Bird_BLE_Test" 2>/dev/null || true
+bluetoothctl system-alias "${NAME}" 2>/dev/null || true
 bluetoothctl discoverable off 2>/dev/null || true
 bluetoothctl pairable off 2>/dev/null || true
 if command -v btmgmt >/dev/null && hciconfig hci0 2>/dev/null | grep -q "hci0"; then

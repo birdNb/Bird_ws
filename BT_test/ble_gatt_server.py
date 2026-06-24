@@ -30,7 +30,17 @@ _BIRD_WS = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if _BIRD_WS not in sys.path:
     sys.path.insert(0, _BIRD_WS)
 
-DEVICE_NAME = "Bird_BLE_Test"
+try:
+    from ble_device_name import DEFAULT_BLE_NAME, load_ble_name, save_ble_name
+except ImportError:
+    DEFAULT_BLE_NAME = "HT_88888888"
+
+    def load_ble_name() -> str:
+        return DEFAULT_BLE_NAME
+
+    def save_ble_name(name: str) -> None:
+        pass
+
 # 小程序也可按 MAC 连接（系统设置里看到的蓝牙地址）
 BOARD_BDADDR = "00:19:86:00:2E:AF"
 ADAPTER_PATH = "/org/bluez/hci0"
@@ -262,6 +272,7 @@ class BleGattServer:
         self._msg_count_at_connect = 0
         self._adv: Optional[Advertisement] = None
         self._adv_manager = None
+        self._adv_index = 0
         self._adv_reregister_pending = False
         self._adv_registered = False
 
@@ -571,8 +582,191 @@ class BleGattServer:
             else:
                 log_warn("语音模块未加载（检查 sound_demo）")
             return
+        if kind.value == "rename":
+            echo = f"rename {payload}"
+            if self.rename_ble_device(payload):
+                self._send_command_echo(echo)
+            else:
+                log_warn(f"BLE 改名失败: {payload}")
+            return
         if self._ros_bridge is not None and self.ros_control:
             self._ros_bridge.handle_command(kind.value, payload)
+
+    def _hci_index(self, hci_dev: str = "hci0") -> str:
+        return hci_dev.replace("hci", "")
+
+    def _build_le_adv_payload(self, name: Optional[str] = None) -> bytes:
+        """构造 LE 广播 AD：Flags + 16-bit UUID(FFE0) + Complete Local Name。"""
+        name_b = (name or self.name).encode("utf-8")
+        base = bytes([0x02, 0x01, 0x06, 0x03, 0x03, 0xE0, 0xFF])
+        budget = 31 - len(base) - 2
+        name_b = name_b[: max(0, budget)]
+        payload = base + bytes([len(name_b) + 1, 0x09]) + name_b
+        return payload[:31]
+
+    def _build_le_scan_rsp_payload(self, name: Optional[str] = None) -> bytes:
+        name_b = (name or self.name).encode("utf-8")[:25]
+        return bytes([len(name_b) + 1, 0x09]) + name_b
+
+    def _btmgmt_set_local_name(self, hci_idx: str, name: str) -> None:
+        try:
+            subprocess.run(
+                ["btmgmt", "--index", hci_idx, "name", name],
+                check=False,
+                capture_output=True,
+                timeout=4,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+            pass
+
+    def _set_system_ble_name(self, new_name: str) -> None:
+        hci_dev = self._adapter_path.split("/")[-1] if self._adapter_path else "hci0"
+        hci_idx = self._hci_index(hci_dev)
+        self._btmgmt_set_local_name(hci_idx, new_name)
+        for cmd in (
+            ["hciconfig", hci_dev, "name", new_name],
+            ["bluetoothctl", "system-alias", new_name],
+        ):
+            try:
+                subprocess.run(
+                    cmd,
+                    check=False,
+                    capture_output=True,
+                    timeout=4,
+                )
+            except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+                pass
+
+    def _replace_advertisement(self, new_name: str) -> None:
+        """新建 D-Bus 广播对象，避免 BlueZ 缓存旧 LocalName。"""
+        self._adv_index += 1
+        adv = Advertisement(self.bus, self._adv_index, new_name)
+        adv._server = self
+        self._adv = adv
+
+    def rename_ble_device(self, new_name: str) -> bool:
+        """更新 BLE 名称并刷新广播（可从分发线程调用）。"""
+        if not new_name or not new_name.startswith("HT_"):
+            return False
+        done = threading.Event()
+        ok: List[bool] = [False]
+
+        def _start() -> bool:
+            self._apply_ble_rename_on_main(new_name, done, ok)
+            return False
+
+        GLib.idle_add(_start)
+        done.wait(timeout=15.0)
+        return ok[0]
+
+    def _apply_ble_rename_on_main(
+        self, new_name: str, done: threading.Event, ok: List[bool]
+    ) -> None:
+        def _finish(success: bool) -> bool:
+            ok[0] = success
+            done.set()
+            return False
+
+        if new_name == self.name and self._adv_registered:
+            hci_dev = self._adapter_path.split("/")[-1] if self._adapter_path else "hci0"
+            threading.Thread(
+                target=self._patch_le_adv_data,
+                kwargs={"hci_dev": hci_dev, "force": True},
+                daemon=True,
+            ).start()
+            GLib.idle_add(_finish, True)
+            return
+
+        self.name = new_name
+        save_ble_name(new_name)
+        self._set_system_ble_name(new_name)
+
+        if self._adapter_path:
+            try:
+                props = dbus.Interface(
+                    self.bus.get_object(BLUEZ_SERVICE, self._adapter_path),
+                    DBUS_PROP_IFACE,
+                )
+                props.Set(ADAPTER_IFACE, "Alias", new_name)
+            except dbus.exceptions.DBusException as e:
+                log_warn(f"设置 Alias 失败: {e}")
+
+        old_adv = self._adv
+        self._replace_advertisement(new_name)
+
+        hci_dev = self._adapter_path.split("/")[-1] if self._adapter_path else "hci0"
+        connected = bool(self._connected_devices)
+
+        def _patch() -> None:
+            self._patch_le_adv_data(hci_dev=hci_dev, force=True)
+
+        def _after_adv_refresh(success: bool) -> bool:
+            threading.Thread(target=_patch, daemon=True).start()
+            return _finish(success)
+
+        if connected:
+            log_info(
+                f"BLE 名称已更新为 {new_name}（已连接，断连后请重新扫描）"
+            )
+            threading.Thread(target=_patch, daemon=True).start()
+            GLib.idle_add(_finish, True)
+            return
+
+        if not self._adv_manager or not self._adv:
+            threading.Thread(target=_patch, daemon=True).start()
+            GLib.idle_add(_finish, True)
+            return
+
+        def on_registered() -> None:
+            self._adv_registered = True
+            log_info(f"BLE 名称已更新: {new_name}，请手机重新扫描连接")
+            GLib.idle_add(_after_adv_refresh, True)
+
+        def on_register_failed(err: dbus.DBusException) -> None:
+            log_warn(f"改名后广播注册失败: {self._dbus_error_text(err)}")
+            GLib.idle_add(_after_adv_refresh, False)
+
+        def do_register() -> bool:
+            try:
+                self._adv_manager.RegisterAdvertisement(
+                    self._adv.get_path(),
+                    {},
+                    reply_handler=on_registered,
+                    error_handler=on_register_failed,
+                )
+            except dbus.exceptions.DBusException as e:
+                log_warn(f"RegisterAdvertisement 异常: {self._dbus_error_text(e)}")
+                GLib.idle_add(_after_adv_refresh, False)
+            return False
+
+        def on_unregistered() -> None:
+            self._adv_registered = False
+            GLib.idle_add(do_register)
+
+        def on_unregister_failed(err: dbus.DBusException) -> None:
+            err_txt = self._dbus_error_text(err)
+            if "DoesNotExist" in err_txt or "NotFound" in err_txt:
+                on_unregistered()
+                return
+            log_warn(f"注销广播失败: {err_txt}")
+            GLib.idle_add(do_register)
+
+        if self._adv_registered and old_adv is not None:
+            try:
+                self._adv_manager.UnregisterAdvertisement(
+                    old_adv.get_path(),
+                    reply_handler=on_unregistered,
+                    error_handler=on_unregister_failed,
+                )
+            except dbus.exceptions.DBusException as e:
+                err_txt = self._dbus_error_text(e)
+                if "DoesNotExist" in err_txt or "NotFound" in err_txt:
+                    GLib.idle_add(do_register)
+                else:
+                    log_warn(f"UnregisterAdvertisement 异常: {err_txt}")
+                    GLib.idle_add(_after_adv_refresh, False)
+        else:
+            GLib.idle_add(do_register)
 
     def _on_notify_start(self) -> None:
         log_info("手机已订阅 FFE2 notify")
@@ -671,7 +865,7 @@ class BleGattServer:
         except dbus.exceptions.DBusException as e:
             log_warn(f"读取适配器信息失败: {e}")
 
-    def _patch_le_adv_data(self, hci_dev: str = "hci0") -> None:
+    def _patch_le_adv_data(self, hci_dev: str = "hci0", force: bool = False) -> None:
         """
         BlueZ 5.53 + BT 5.1 adapter workaround：
 
@@ -679,54 +873,61 @@ class BleGattServer:
         → 内核使用 Extended Advertising (0x0037) 广播**空数据包**（无 Name/UUID）
         → Legacy hcitool cmd (0x0008/0x0009) 被 Extended Advertising 忽略
 
-        正确做法：用 btmgmt add-adv 覆盖 instance 1，写入 UUID+Name。
+        正确做法：btmgmt name + add-adv，在 -d/-s 中显式写入 UUID 与名称。
         fallback：直接写 LE Set Extended Advertising Data (0x0037) HCI 命令。
         """
         time.sleep(0.4)  # 等 BlueZ MGMT 流程完成
 
-        hci_idx = hci_dev.replace("hci", "")  # "hci0" → "0"
+        hci_idx = self._hci_index(hci_dev)
+        name = self.name
+        self._btmgmt_set_local_name(hci_idx, name)
+
+        if force:
+            try:
+                subprocess.run(
+                    ["btmgmt", "--index", hci_idx, "rm-adv", "1"],
+                    check=False,
+                    capture_output=True,
+                    timeout=4,
+                )
+            except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+                pass
+            time.sleep(0.15)
+
+        adv_hex = self._build_le_adv_payload(name).hex()
+        sr_hex = self._build_le_scan_rsp_payload(name).hex()
 
         # ── 主路径：btmgmt add-adv 覆盖 instance 1 ──────────────────
-        # -u ffe0  : 将 0xFFE0 写入 Complete 16-bit UUID AD
-        # -n name  : 将设备名写入 Complete Local Name AD
-        # -g       : General Discoverable (Flags 0x02)
-        # -b       : BR/EDR Not Supported (Flags 0x04)
-        # 1        : Instance 1（覆盖 D-Bus 注册的空 instance 1）
         try:
-            # -u ffe0 : Service UUID 0xFFE0
-            # -n      : 将适配器 Alias 写入 scan-rsp-local-name（无需带值）
-            # -g      : General Discoverable flag
-            # -m      : managed-flags（内核自动管理 Flags AD type）
-            # -c      : connectable
-            # 1       : instance 1（覆盖 D-Bus 注册的空 instance）
             r = subprocess.run(
-                ["btmgmt", "--index", hci_idx, "add-adv",
-                 "-u", "ffe0", "-n", "-g", "-m", "-c", "1"],
-                capture_output=True, timeout=6,
+                [
+                    "btmgmt",
+                    "--index",
+                    hci_idx,
+                    "add-adv",
+                    "-d",
+                    adv_hex,
+                    "-s",
+                    sr_hex,
+                    "-g",
+                    "-m",
+                    "-c",
+                    "1",
+                ],
+                capture_output=True,
+                timeout=6,
             )
             out = r.stdout.decode("utf-8", errors="replace").strip()
             err = r.stderr.decode("utf-8", errors="replace").strip()
             if r.returncode == 0:
-                log_info(f"[adv] LE 广播包已写入: UUID=FFE0 + Name={self.name}")
+                log_info(f"[adv] LE 广播包已写入: UUID=FFE0 + Name={name}")
                 return
             log_warn(f"[adv] btmgmt add-adv 失败(rc={r.returncode}): {out} {err}")
         except Exception as exc:
             log_warn(f"[adv] btmgmt add-adv 异常: {exc}")
 
         # ── fallback：直接写 LE Set Extended Advertising Data (0x0037) ──
-        # 针对 BT 5.0+ 控制器，Extended Advertising handle=1
-        # HCI LE Set Extended Advertising Data:
-        #   Advertising_Handle (1B) | Operation (1B=0x03完整) |
-        #   Fragment_Preference (1B=0x01) | Data_Length (1B) | Data
-        name_b = self.name.encode("utf-8")[:25]  # 留余量
-        # ADV data: Flags(3B) + 16-bit UUID(4B) + LocalName(2+N B)
-        adv_payload = (
-            bytes([0x02, 0x01, 0x06])                        # Flags
-            + bytes([0x03, 0x03, 0xE0, 0xFF])                # 16-bit UUID
-            + bytes([len(name_b) + 1, 0x09]) + name_b        # Complete Local Name
-        )
-        if len(adv_payload) > 31:
-            adv_payload = adv_payload[:31]
+        adv_payload = self._build_le_adv_payload(name)
         ext_args = (
             ["0x01", "0x03", "0x01", f"0x{len(adv_payload):02x}"]
             + [f"0x{b:02x}" for b in adv_payload]
@@ -990,8 +1191,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Bird BLE GATT 遥控服务")
     parser.add_argument(
         "--name",
-        default=DEVICE_NAME,
-        help=f"BLE 广播设备名 (默认 {DEVICE_NAME})",
+        default=None,
+        help=f"BLE 广播设备名 (默认从 ble_device_name.conf 读取，缺省 {DEFAULT_BLE_NAME})",
     )
     parser.add_argument("--adapter", default="hci0", help="hci0 或 dbus 路径")
     parser.add_argument(
@@ -1010,9 +1211,10 @@ def main() -> int:
         help="启用 FFE3 语音 PCM 实时播放（sound_demo）",
     )
     args = parser.parse_args()
+    ble_name = args.name if args.name else load_ble_name()
     server = BleGattServer(
         args.adapter,
-        args.name,
+        ble_name,
         echo=not args.no_echo,
         ros_control=not args.no_ros,
         enable_voice=args.enable_voice,

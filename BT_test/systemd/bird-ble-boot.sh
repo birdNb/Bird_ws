@@ -43,10 +43,12 @@ prep_bluetooth() {
   sleep 2
   wait_hci0
 
+  BLE_NAME="$(python3 -c "from ble_device_name import load_ble_name; print(load_ble_name())")"
+
   hciconfig hci0 up 2>/dev/null || true
-  hciconfig hci0 name "Bird_BLE_Test" 2>/dev/null || true
+  hciconfig hci0 name "${BLE_NAME}" 2>/dev/null || true
   hciconfig hci0 noscan 2>/dev/null || true
-  bluetoothctl system-alias "Bird_BLE_Test" 2>/dev/null || true
+  bluetoothctl system-alias "${BLE_NAME}" 2>/dev/null || true
   bluetoothctl discoverable off 2>/dev/null || true
   bluetoothctl pairable off 2>/dev/null || true
 
@@ -68,4 +70,4 @@ if [ -f /etc/default/bird-ble ]; then
   source /etc/default/bird-ble
 fi
 
-exec "${BT_DIR}/run_ble_with_ros.sh" --name "Bird_BLE_Test" "${EXTRA_ARGS[@]}"
+exec "${BT_DIR}/run_ble_with_ros.sh" "${EXTRA_ARGS[@]}"

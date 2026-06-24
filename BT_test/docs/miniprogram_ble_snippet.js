@@ -5,7 +5,7 @@
 const SERVICE_UUID = '0000FFE0-0000-1000-8000-00805F9B34FB'
 const WRITE_UUID = '0000FFE1-0000-1000-8000-00805F9B34FB'
 const NOTIFY_UUID = '0000FFE2-0000-1000-8000-00805F9B34FB'
-const TARGET_NAME = 'Bird_BLE_Test'
+const TARGET_NAME = 'HT_88888888' // 可被 rename HT_12345678 修改
 const STICK_INTERVAL_MS = 50 // 20Hz
 const STICK_DEADZONE = 10 // UI -100~100 刻度
 const STICK_XY_SCALE = 1.8 // 前后/左右满量程 ±1.8
@@ -215,7 +215,11 @@ Page({
       console.log('CMD_ECHO', text)
       return
     }
-    if (text.startsWith('IP:')) {
+    if (text.startsWith('rename HT_')) {
+      console.log('BLE_RENAME', text)
+      this.setData({ targetName: text.slice(7) })
+      return
+    }
       this.setData({ robotIp: text.slice(3) })
       return
     }
@@ -261,6 +265,11 @@ Page({
   },
   sendGaitOn() { return this.sendCommand('GAIT ON') },
   sendGaitOff() { return this.sendCommand('GAIT OFF') },
+  /** 修改 BLE 广播名后8位，例如 sendRename('12345678') */
+  sendRename(digits8) {
+    const d = String(digits8 || '').replace(/\D/g, '').slice(-8).padStart(8, '0')
+    return this.sendCommand(`rename HT_${d}`)
+  },
   sendUnload() { return this.sendCommand('LT+RT+B') },
 
   /** 疾跑开关：按住策略侧 LT 加速（AMP Soccer 模式） */

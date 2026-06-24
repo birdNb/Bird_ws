@@ -47,6 +47,11 @@ SPRINT_RE = re.compile(r"^LT\s+(ON|OFF)$", re.IGNORECASE)
 SOUND_RE = re.compile(r"^sound\s+(ON|OFF)(?:\s+(\d+))?$", re.IGNORECASE)
 VOLUME_RE = re.compile(r"^V\s+(\d{1,3})$", re.IGNORECASE)
 
+try:
+    from ble_device_name import RENAME_RE as _RENAME_RE
+except ImportError:
+    _RENAME_RE = re.compile(r"^rename\s+HT_(\d{8})$", re.IGNORECASE)
+
 
 class CommandKind(str, Enum):
     STICK = "stick"
@@ -60,6 +65,7 @@ class CommandKind(str, Enum):
     SPRINT = "sprint"
     SOUND = "sound"
     VOLUME = "volume"
+    RENAME = "rename"
     UNKNOWN = "unknown"
 
 
@@ -150,6 +156,12 @@ def classify_payload(text: str) -> Tuple[CommandKind, str, str]:
         pct = max(0, min(100, int(m_vol.group(1))))
         wire = f"V {pct}"
         return CommandKind.VOLUME, str(pct), wire
+
+    m_rename = _RENAME_RE.match(raw)
+    if m_rename:
+        digits = m_rename.group(1)
+        name = f"HT_{digits}"
+        return CommandKind.RENAME, name, f"rename {name}"
 
     return CommandKind.UNKNOWN, raw, raw
 
@@ -295,6 +307,14 @@ class CommandDispatcher:
                 self._log_warn(f"音量处理失败: {e}")
             if self._ack is not None:
                 self._ack(wire)
+            return
+
+        if kind == CommandKind.RENAME:
+            self._log_rx(f"rename: {wire}")
+            try:
+                self._handle(kind, payload)
+            except Exception as e:
+                self._log_warn(f"rename 处理失败: {e}")
             return
 
         if kind == CommandKind.ACTION:

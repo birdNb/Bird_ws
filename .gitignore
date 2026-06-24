@@ -37,3 +37,6 @@ Thumbs.db
 
 # Miniconda 安装包（运行时由 setup_env.sh 下载，勿提交）
 Miniconda3-*.sh
+
+# 大体积压缩包（语音包等本地保留，勿提交）
+*.tar.gz
