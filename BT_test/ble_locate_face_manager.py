@@ -17,11 +17,15 @@ LOCATE_FACE_SCRIPT = os.path.expanduser("~/Bird_ws/locate_face/locate_face.py")
 NECK_HOME_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "neck_smooth_home.py")
 NECK_STATE_FILE = "/tmp/locate_face_neck.state"
 ROS_ENV_SH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ros_env.sh")
-START_VERIFY_SEC = 1.5
+LOG_PATH = os.path.expanduser("~/Bird_ws/locate_face_cpp/locate_face_ble.log")
+START_VERIFY_SEC = 12.0
 PROC_EXIT_WAIT_SEC = 3.0
 HOMING_EXIT_SEC = 8.0
+ORPHAN_KILL_WAIT_SEC = 2.5
 
 LogFn = Callable[[str], None]
+
+_READY_MARKERS = ("[FSM] OK", "进入视觉伺服", "[gui] 后台模式", "[gui] 全屏预览")
 
 
 class LocateFaceManager:
@@ -73,6 +77,85 @@ class LocateFaceManager:
         except subprocess.TimeoutExpired:
             self._log("[locate_face] BLE 侧脖子回中超时")
 
+    @staticmethod
+    def _read_log_tail(path: str, max_bytes: int = 65536) -> str:
+        try:
+            with open(path, "rb") as f:
+                f.seek(0, os.SEEK_END)
+                size = f.tell()
+                f.seek(max(0, size - max_bytes))
+                return f.read().decode("utf-8", errors="replace")
+        except OSError:
+            return ""
+
+    def _wait_ready(self, proc: subprocess.Popen, log_path: str) -> Tuple[bool, str]:
+        deadline = time.monotonic() + START_VERIFY_SEC
+        while time.monotonic() < deadline:
+            code = proc.poll()
+            if code is not None:
+                return False, f"进程已退出 (code={code})"
+
+            if not log_path:
+                time.sleep(0.2)
+                continue
+
+            tail = self._read_log_tail(log_path)
+            if "无法打开相机" in tail or "[cam] 无法打开" in tail:
+                return False, "相机打开失败（/dev/video0 可能被占用）"
+            if "人脸后端初始化失败" in tail:
+                return False, "人脸检测后端初始化失败"
+            if "未进入默认执行态" in tail:
+                return False, "机器人未处于默认模式，请先发送 M_default"
+            if any(m in tail for m in _READY_MARKERS):
+                return True, "ready"
+            if "[track]" in tail and "face=" in tail:
+                return True, "tracking"
+
+            time.sleep(0.25)
+
+        if proc.poll() is not None:
+            return False, f"进程已退出 (code={proc.returncode})"
+
+        tail = self._read_log_tail(log_path) if log_path else ""
+        if "[FSM] 等待" in tail and not any(m in tail for m in _READY_MARKERS):
+            return (
+                False,
+                "等待 FSM 超时，请先 M_default 并确认 sim2real_master 在运行",
+            )
+        return False, f"启动超时 ({START_VERIFY_SEC:.0f}s)，详见日志: {log_path}"
+
+    def _kill_orphans(self) -> None:
+        for pattern in (
+            r"locate_face_cpp/build/locate_face",
+            r"locate_face_cpp/start\.sh",
+            r"locate_face\.py",
+            r"face_yunet_worker\.py",
+            r"face_mediapipe_worker\.py",
+        ):
+            subprocess.run(
+                ["pkill", "-f", pattern],
+                check=False,
+                capture_output=True,
+            )
+        deadline = time.monotonic() + ORPHAN_KILL_WAIT_SEC
+        while time.monotonic() < deadline:
+            alive = False
+            for pattern in (
+                r"locate_face_cpp/build/locate_face",
+                r"face_yunet_worker\.py",
+            ):
+                r = subprocess.run(
+                    ["pgrep", "-f", pattern],
+                    check=False,
+                    capture_output=True,
+                )
+                if r.returncode == 0:
+                    alive = True
+                    break
+            if not alive:
+                return
+            time.sleep(0.15)
+
     def _start(self) -> bool:
         with self._lock:
             if self._proc is not None and self._proc.poll() is None:
@@ -88,6 +171,7 @@ class LocateFaceManager:
         if os.path.exists(xauth):
             env.setdefault("XAUTHORITY", xauth)
         env["LOCATE_FACE_CPP_ROOT"] = os.path.expanduser("~/Bird_ws/locate_face_cpp")
+        env.pop("ROS_HOSTNAME", None)
 
         if os.path.isfile(LOCATE_FACE_CPP_BIN) and os.access(LOCATE_FACE_CPP_BIN, os.X_OK):
             shell_cmd = (
@@ -114,7 +198,7 @@ class LocateFaceManager:
             self._log("[locate_face] 请先执行: cd ~/Bird_ws/locate_face_cpp && ./build.sh")
             return False
 
-        log_path = os.path.expanduser("~/Bird_ws/locate_face_cpp/locate_face_ble.log")
+        log_path = LOG_PATH
         try:
             log_f = open(log_path, "ab", buffering=0)
         except OSError:
@@ -136,12 +220,22 @@ class LocateFaceManager:
                 log_f.close()
             return False
 
-        time.sleep(START_VERIFY_SEC)
-        if proc.poll() is not None:
-            self._log(
-                f"[locate_face] {backend} 进程已退出 (code={proc.returncode})"
-                + (f", 日志: {log_path}" if log_path else "")
-            )
+        ok, reason = self._wait_ready(proc, log_path)
+        if not ok:
+            self._log(f"[locate_face] 启动失败: {reason}")
+            if log_path:
+                self._log(f"[locate_face] 日志: {log_path}")
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+            except OSError:
+                proc.terminate()
+            try:
+                proc.wait(timeout=3.0)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                except OSError:
+                    proc.kill()
             if log_f not in (None, subprocess.DEVNULL):
                 log_f.close()
             return False
@@ -152,6 +246,8 @@ class LocateFaceManager:
             self._log(f"[locate_face] 已启动 ON ({backend}, pid={proc.pid}), 日志: {log_path}")
         else:
             self._log(f"[locate_face] 已启动 ON ({backend}, pid={proc.pid})")
+        if log_f not in (None, subprocess.DEVNULL):
+            pass  # 保持日志文件打开供子进程写入
         return True
 
     def _stop(self) -> bool:
@@ -187,15 +283,3 @@ class LocateFaceManager:
 
         self._log("[locate_face] 已停止 OFF")
         return True
-
-    def _kill_orphans(self) -> None:
-        for pattern in (
-            r"locate_face_cpp/build/locate_face",
-            r"locate_face_cpp/start\.sh",
-            r"locate_face\.py",
-        ):
-            subprocess.run(
-                ["pkill", "-f", pattern],
-                check=False,
-                capture_output=True,
-            )

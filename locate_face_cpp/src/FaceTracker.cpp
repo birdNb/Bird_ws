@@ -84,10 +84,17 @@ FaceTracker::FaceTracker(ros::NodeHandle& nh, FsmMonitor* fsm) : fsm_(fsm) {
     initFaceBackend();
     neck_pub_ = nh.advertise<sensor_msgs::JointState>(ABSOLUTE_TOPIC, 10);
     last_face_ms_ = getCurrentTimeMs();
-    pub_thread_ = std::thread(&FaceTracker::publisherLoop, this);
 }
 
 FaceTracker::~FaceTracker() { shutdown(); }
+
+void FaceTracker::startPublisher() {
+    if (pub_thread_.joinable()) {
+        return;
+    }
+    running_.store(true);
+    pub_thread_ = std::thread(&FaceTracker::publisherLoop, this);
+}
 
 void FaceTracker::stepHoming(float dt) {
     const float step = deg2rad(RETURN_HOME_RATE_DEG_PER_SEC * dt);
@@ -356,17 +363,20 @@ void FaceTracker::publisherLoop() {
     bool warned_fsm = false;
     int publish_tick = 0;
     while (running_.load()) {
-        if (fsm_ != nullptr && fsm_->enabled() && !fsm_->isExecDefault()
-            && !homing_active_.load()) {
-            if (!warned_fsm) {
-                ROS_WARN_THROTTLE(
-                    2.0,
-                    "[ctrl] FSM %s, 暂停下发(等待 EXEC_DEFAULT)",
-                    FsmMonitor::stateName(fsm_->state()));
-                warned_fsm = true;
+        if (fsm_ != nullptr && fsm_->enabled() && !homing_active_.load()) {
+            const int st = fsm_->state();
+            if (st >= 0 && st != FSM_EXEC_DEFAULT) {
+                if (!warned_fsm) {
+                    ROS_WARN_THROTTLE(
+                        2.0,
+                        "[ctrl] FSM %s(%d), 暂停脖子下发(需 EXEC_DEFAULT)",
+                        FsmMonitor::stateName(st),
+                        st);
+                    warned_fsm = true;
+                }
+                rate.sleep();
+                continue;
             }
-            rate.sleep();
-            continue;
         }
         warned_fsm = false;
         float y = 0.0f;

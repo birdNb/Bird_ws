@@ -29,6 +29,7 @@ public:
     FaceTracker(ros::NodeHandle& nh, FsmMonitor* fsm);
     ~FaceTracker();
 
+    void startPublisher();
     void trackFrame(const cv::Mat& frame);
     FaceTelemetry getTelemetry() const;
     /** 平滑回中（与丢失人脸超时后相同速率），退出前调用 */

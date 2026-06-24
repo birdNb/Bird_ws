@@ -56,7 +56,6 @@ bool FsmMonitor::waitForExecDefault(float timeout_sec) {
     }
     const ros::Time deadline = ros::Time::now() + ros::Duration(timeout_sec);
     ros::Time last_log = ros::Time(0);
-    bool warned_timeout = false;
     while (ros::ok()) {
         if (isExecDefault()) {
             return true;
@@ -71,9 +70,22 @@ bool FsmMonitor::waitForExecDefault(float timeout_sec) {
             }
             last_log = now;
         }
-        if (!warned_timeout && now > deadline) {
-            ROS_ERROR("[FSM] 等待 %.0fs 仍未进入 EXEC_DEFAULT, 继续等...", timeout_sec);
-            warned_timeout = true;
+        if (now > deadline) {
+            const int s = state();
+            if (s < 0) {
+                ROS_ERROR(
+                    "[FSM] 等待 %.0fs 仍未收到 %s，请先 M_default 并确认 sim2real_master 已运行",
+                    timeout_sec,
+                    FSM_STATE_TOPIC);
+            } else {
+                ROS_ERROR(
+                    "[FSM] 等待 %.0fs 当前仍为 %s(%d)，需要 EXEC_DEFAULT(%d)",
+                    timeout_sec,
+                    stateName(s),
+                    s,
+                    FSM_EXEC_DEFAULT);
+            }
+            return false;
         }
         ros::Duration(0.1).sleep();
         ros::spinOnce();

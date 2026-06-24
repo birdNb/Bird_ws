@@ -69,13 +69,18 @@ int main(int argc, char** argv) {
     }
 
     FsmMonitor fsm(nh, !opt.no_fsm);
-    FaceTracker tracker(nh, opt.no_fsm ? nullptr : &fsm);
 
     if (!opt.no_fsm) {
         ROS_INFO("[FSM] 等待 EXEC_DEFAULT(%d)...", FSM_EXEC_DEFAULT);
-        fsm.waitForExecDefault(FSM_WAIT_TIMEOUT_SEC);
+        if (!fsm.waitForExecDefault(FSM_WAIT_TIMEOUT_SEC)) {
+            ROS_ERROR("[FSM] 未进入默认执行态，头追退出（请先 BLE: M_default）");
+            return 2;
+        }
         ROS_INFO("[FSM] OK, 进入视觉伺服");
     }
+
+    FaceTracker tracker(nh, opt.no_fsm ? nullptr : &fsm);
+    tracker.startPublisher();
 
     const bool use_gui = opt.show_gui && std::getenv("DISPLAY") != nullptr;
     int screen_w = 0;
