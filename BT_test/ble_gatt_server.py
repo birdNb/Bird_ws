@@ -532,6 +532,9 @@ class BleGattServer:
     def _send_ack(self, wire: str) -> None:
         if not self.echo or self._notify_chrc is None:
             return
+        upper = wire.strip().upper()
+        if upper in ("GAIT ON", "GAIT OFF"):
+            return
         from ble_command_dispatcher import make_notify_reply
 
         payload = make_notify_reply(wire)
@@ -539,12 +542,13 @@ class BleGattServer:
         log_tx(f"ACK:{wire}")
 
     def _send_command_echo(self, wire: str) -> None:
-        """步态/电源：回传与上行相同的原文（无 ACK: 前缀）。"""
+        """FFE2 回传上行原文（无 ACK: 等前缀）。"""
         if not self.echo or self._notify_chrc is None:
             return
-        payload = wire.encode("utf-8", errors="replace")[:180]
+        plain = wire.strip()
+        payload = plain.encode("utf-8", errors="replace")[:180]
         self._notify_on_main_thread(payload)
-        log_tx(wire)
+        log_tx(plain)
 
     def _handle_dispatched(self, kind, payload: str) -> None:
         if kind.value == "locate_face":

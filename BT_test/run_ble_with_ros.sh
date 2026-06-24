@@ -1,6 +1,6 @@
 #!/bin/bash
 # 在已 source ROS 的环境下启动 BLE 服务（供 sudo 调用）
-set -euo pipefail
+set -eo pipefail
 cd "$(dirname "$0")"
 
 # source setup.bash 会把当前 $@ 传给 _setup_util.py，必须先清空

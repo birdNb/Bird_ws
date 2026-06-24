@@ -32,6 +32,8 @@ COMBO_HOLD_SEC = 1.0
 MODE_PULSE_SEC = 0.45
 STEP_GAP_SEC = 0.12
 MENU_STEP_GAP_SEC = 0.35  # master joyMsgCallback 每步后 sleep 200ms
+MENU_PULSE_FRAMES = 3      # 菜单键须短脉冲，长按会连跳多项
+MENU_RELEASE_FRAMES = 10
 CMD_VEL_HZ = 20
 CMD_VEL_TIMEOUT_SEC = 0.20
 STICK_FILTER_ALPHA = 0.45
@@ -81,13 +83,27 @@ MODE_LABELS: Dict[str, str] = {
 # - dpad/a/b 仅在 LT+RT 同时按下时有效；back 字段被忽略
 # - dpad_h==1 → LastOption, ==-1 → NextOption, a==1 → Confirm
 FSM_INIT = 0
+FSM_ERROR = 1
 FSM_PROTECTION = 8
 FSM_CANDIDATE_DEFAULT = 2
 FSM_CANDIDATE_CUSTOM = 3
 FSM_CANDIDATE_REMOTE = 4
 FSM_CANDIDATE_CALIBRATION = 9
 FSM_CANDIDATE_TEACHING = 13
+FSM_EXEC_TEACHING = 14
+FSM_EXEC_CALIBRATING = 10
+FSM_EXEC_CALIB_OK = 11
+FSM_EXEC_CALIB_FAILED = 12
 FSM_CANDIDATE_DEVELOP = 15
+
+# 调零执行中 joy 不响应，须等 FSM 10→11→2 后再切模式
+CALIB_LOCK_STATES = frozenset({FSM_EXEC_CALIBRATING, FSM_EXEC_CALIB_OK})
+
+CANDIDATE_TO_EXEC: Dict[int, int] = {
+    FSM_CANDIDATE_DEFAULT: 5,
+    FSM_CANDIDATE_TEACHING: FSM_EXEC_TEACHING,
+    FSM_CANDIDATE_CALIBRATION: FSM_EXEC_CALIBRATING,
+}
 MENU_CANDIDATES = (
     FSM_CANDIDATE_DEFAULT,
     FSM_CANDIDATE_CUSTOM,
@@ -102,10 +118,12 @@ ACTION_COMMANDS: Dict[str, Tuple[str, str]] = {
     "lt+rt+start": ("起立", "lt+rt+start"),
     "lt+rt+rb": ("蹲下", "lt+rt+rb"),
     "lt+rt+b": ("卸力", "lt+rt+b"),
-    "lt+rt+lb": ("步态启停", "lt+rt+lb"),
     "rt+a": ("挥双手", "rt+a"),
     "rt+x": ("挥单手", "rt+x"),
 }
+
+# 步态 GAIT ON/OFF → 底层仍发 lt+rt+lb 组合键
+GAIT_JOY_KEY = "lt+rt+lb"
 
 # 自定义动作：短脉冲触发（对应 custom_action.yaml 的 cheer/hello）
 PULSE_CUSTOM_ACTIONS = {
@@ -169,6 +187,13 @@ def _joy_key_value(key: str, pressed: bool) -> float:
 
 def _parse_key_combo(combo: str) -> Set[str]:
     return {p.strip().lower() for p in combo.split("+") if p.strip()}
+
+
+def _is_menu_nav_step(token: str) -> bool:
+    """方向/A/center 为边沿触发；长按会连跳菜单项。"""
+    if token in ("center", "lt+rt+a"):
+        return True
+    return "→" in token or "←" in token
 
 
 @dataclass
@@ -377,6 +402,7 @@ class BleRosBridge:
         self._motor_power = MotorPowerController(log=log)
         self._battery_pct: Optional[int] = None
         self._sprint_enabled = False
+        self._joy_lock = threading.Lock()
 
     @property
     def ready(self) -> bool:
@@ -430,6 +456,8 @@ class BleRosBridge:
             self._neck.enqueue(text)
         elif kind == "motor_power":
             self._motor_power.apply_immediate(text)
+        elif kind == "gait":
+            self._trigger_gait(text.strip().upper())
         elif kind == "sprint":
             self._set_sprint(text.strip().upper() == "ON")
 
@@ -494,7 +522,7 @@ class BleRosBridge:
             self._has_joy = True
             self._log("[ros] 已启用 /cmd_vel + /joy + /joy_msg")
             self._log("[ros] 模式: M_default/M_init/M_protect/M_resetzero/M_tech")
-            self._log("[ros] 动作: LT+RT+start/RB/B")
+            self._log("[ros] 动作: LT+RT+start/RB/B | 步态: GAIT ON/OFF")
             self._log("[ros] 疾跑: LT ON/OFF → /joy_msg lt 按住（AMP 加速）")
         except ImportError:
             self._has_joy = False
@@ -634,12 +662,77 @@ class BleRosBridge:
                 start, FSM_CANDIDATE_CALIBRATION
             )
         if mode_key == "m_tech":
+            if fsm == FSM_EXEC_TEACHING:
+                return label, []
             prefix = self._steps_enter_init_menu(fsm)
             start = FSM_INIT if prefix else fsm
             return label, prefix + self._steps_navigate_to_candidate(
                 start, FSM_CANDIDATE_TEACHING
             )
         return label, []
+
+    def _wait_fsm_leave(self, state: int, timeout: float = 6.0) -> bool:
+        if self._last_fsm_state != state:
+            return True
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline and not self._stop.is_set():
+            if self._last_fsm_state != state:
+                return True
+            time.sleep(0.05)
+        return self._last_fsm_state != state
+
+    def _wait_calibration_finish(self, timeout: float = 60.0) -> bool:
+        """调零执行中无法切模式；须等 10→11→候选菜单。"""
+        if self._last_fsm_state not in CALIB_LOCK_STATES:
+            return True
+
+        if self._last_fsm_state == FSM_EXEC_CALIBRATING:
+            self._log("[ros]   调零进行中 (FSM=10)，等待完成后再切换…")
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline and not self._stop.is_set():
+                if self._last_fsm_state != FSM_EXEC_CALIBRATING:
+                    break
+                time.sleep(0.05)
+            if self._last_fsm_state == FSM_EXEC_CALIBRATING:
+                self._log("[ros][warn] 调零等待超时，仍停留在 EXEC_CALIBRATING")
+                return False
+
+        if self._last_fsm_state == FSM_EXEC_CALIB_FAILED:
+            self._log("[ros][warn] 调零失败 (FSM=12)，等待恢复…")
+            if not self._wait_fsm_leave(FSM_EXEC_CALIB_FAILED, timeout=8.0):
+                return False
+
+        if self._last_fsm_state == FSM_EXEC_CALIB_OK:
+            self._log("[ros]   调零成功 (FSM=11)，等待返回菜单 (~3s)…")
+            if not self._wait_fsm_leave(FSM_EXEC_CALIB_OK, timeout=6.0):
+                self._log("[ros][warn] 未能离开 EXEC_CALIB_OK")
+                return False
+
+        cur = self._last_fsm_state
+        name = FSM_STATE_NAMES.get(cur, str(cur)) if cur is not None else "?"
+        self._log(f"[ros]   调零流程结束，当前 FSM={cur}({name})")
+        return True
+
+    def _switch_to_exec_default(self, label: str) -> None:
+        cur = self._last_fsm_state
+        if cur == 5:
+            self._log("[ros]   已在 EXEC_DEFAULT")
+            self._log_mode_result(label)
+            return
+        if cur in MENU_CANDIDATES:
+            self._log("[ros]   序列(1步): ['center']")
+            self._pulse_menu_key("center")
+            self._wait_fsm(5, timeout=3.0)
+            self._log_mode_result(label)
+            return
+        if self._enter_init_menu():
+            if self._last_fsm_state == FSM_INIT:
+                self._pulse_menu_key("lt+rt+→")
+                self._wait_fsm(FSM_CANDIDATE_DEFAULT, timeout=1.5)
+            if self._last_fsm_state in MENU_CANDIDATES:
+                self._pulse_menu_key("center")
+                self._wait_fsm(5, timeout=3.0)
+        self._log_mode_result(label)
 
     def _trigger_mode(self, mode_key: str) -> None:
         if mode_key not in MODE_LABELS:
@@ -649,26 +742,194 @@ class BleRosBridge:
             return
         self._last_mode_ts[mode_key] = now
 
-        label, steps = self._build_mode_steps(mode_key)
+        if self._last_fsm_state == FSM_ERROR:
+            self._log("[ros][warn] FSM=ERROR(电机异常)，等待恢复…")
+            if not self._wait_fsm_leave(FSM_ERROR, timeout=6.0):
+                self._log("[ros][warn] 仍处于 ERROR，无法切换模式（请检查电机状态）")
+                return
+            fsm_name = FSM_STATE_NAMES.get(self._last_fsm_state, str(self._last_fsm_state))
+            self._log(f"[ros]   FSM 已恢复为 {self._last_fsm_state}({fsm_name})")
+
+        label = MODE_LABELS[mode_key]
+
+        if (
+            mode_key == "m_resetzero"
+            and self._last_fsm_state == FSM_EXEC_CALIBRATING
+        ):
+            self._log(f"[ros] 模式 {label}: {mode_key} | 起始FSM=10(EXEC_CALIBRATING)")
+            self._log("[ros]   已在调零执行中")
+            self._log_mode_result(label)
+            return
+
+        if self._last_fsm_state in CALIB_LOCK_STATES and mode_key != "m_resetzero":
+            if not self._wait_calibration_finish():
+                self._log("[ros][warn] 调零未完成，无法切换模式")
+                return
+
+        steps = self._build_mode_steps(mode_key)[1]
         fsm = self._last_fsm_state
         fsm_name = FSM_STATE_NAMES.get(fsm, str(fsm)) if fsm is not None else "?"
         self._log(f"[ros] 模式 {label}: {mode_key} | 起始FSM={fsm}({fsm_name})")
-        self._log(f"[ros]   序列({len(steps)}步): {steps}")
-        if not steps:
-            self._log(f"[ros]   已在目标菜单状态，无需操作")
-            return
 
         self._publish_zero_twist()
         with self._lock:
             self._stick_target = None
             self._stick_filtered = None
 
-        gap = MENU_STEP_GAP_SEC if len(steps) > 1 else STEP_GAP_SEC
-        threading.Thread(
-            target=self._run_steps,
-            args=(steps, label, MODE_PULSE_SEC, gap),
-            daemon=True,
-        ).start()
+        with self._joy_lock:
+            with self._lock:
+                was_sprint = self._sprint_enabled
+            self._set_sprint(False, log=False)
+            try:
+                if mode_key == "m_tech":
+                    self._switch_to_candidate(FSM_CANDIDATE_TEACHING, label)
+                    return
+                if mode_key == "m_resetzero":
+                    self._switch_to_candidate(FSM_CANDIDATE_CALIBRATION, label)
+                    return
+                if mode_key == "m_default":
+                    self._switch_to_exec_default(label)
+                    return
+
+                self._log(f"[ros]   序列({len(steps)}步): {steps}")
+                if not steps:
+                    self._log(f"[ros]   已在目标菜单状态，无需操作")
+                    return
+                gap = MENU_STEP_GAP_SEC if len(steps) > 1 else STEP_GAP_SEC
+                self._run_steps_locked(steps, label, MODE_PULSE_SEC, gap)
+            finally:
+                if was_sprint:
+                    self._set_sprint(True, log=False)
+
+    def _log_mode_result(self, label: str) -> None:
+        fsm = self._last_fsm_state
+        if fsm is not None:
+            name = FSM_STATE_NAMES.get(fsm, str(fsm))
+            self._log(f"[ros] 完成: {label} | 当前 FSM={fsm} ({name})")
+        else:
+            self._log(f"[ros] 完成: {label}")
+
+    def _pulse_menu_key(self, token: str) -> None:
+        interval = 1.0 / JOY_PUBLISH_HZ
+        for _ in range(MENU_PULSE_FRAMES):
+            if self._stop.is_set():
+                return
+            self._publish_token(token, True)
+            time.sleep(interval)
+        for _ in range(MENU_RELEASE_FRAMES):
+            if self._stop.is_set():
+                return
+            self._publish_token(token, False)
+            time.sleep(interval)
+        time.sleep(MENU_STEP_GAP_SEC)
+
+    def _wait_fsm(self, target: int, timeout: float = 2.0) -> bool:
+        if self._last_fsm_state == target:
+            return True
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline and not self._stop.is_set():
+            if self._last_fsm_state == target:
+                return True
+            time.sleep(0.02)
+        return self._last_fsm_state == target
+
+    def _wait_fsm_change(self, prev: int, timeout: float = 1.2) -> bool:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline and not self._stop.is_set():
+            cur = self._last_fsm_state
+            if cur is not None and cur != prev:
+                return True
+            time.sleep(0.02)
+        return self._last_fsm_state != prev
+
+    def _enter_init_menu(self) -> bool:
+        cur = self._last_fsm_state
+        if cur == FSM_INIT:
+            return True
+        if cur in MENU_CANDIDATES:
+            return True
+        if cur == FSM_PROTECTION:
+            self._run_steps_locked(["lt+rt+b"], "回INIT", COMBO_HOLD_SEC, STEP_GAP_SEC)
+            return self._wait_fsm(FSM_INIT, timeout=3.0)
+        # 执行态：先卸力到 PROTECTION，再回到 INIT（每步等待 FSM）
+        self._run_steps_locked(["lt+rt+b"], "→PROTECTION", COMBO_HOLD_SEC, STEP_GAP_SEC)
+        if self._wait_fsm(FSM_PROTECTION, timeout=2.5):
+            self._run_steps_locked(["lt+rt+b"], "→INIT", COMBO_HOLD_SEC, STEP_GAP_SEC)
+            return self._wait_fsm(FSM_INIT, timeout=3.0)
+        return self._last_fsm_state in (FSM_INIT, *MENU_CANDIDATES)
+
+    def _switch_to_candidate(self, target: int, label: str) -> None:
+        """按实时 FSM 短脉冲导航到候选菜单并 A 确认（避免长按连跳）。"""
+        if self._last_fsm_state in CALIB_LOCK_STATES:
+            if not self._wait_calibration_finish():
+                self._log_mode_result(label)
+                return
+
+        exec_tgt = CANDIDATE_TO_EXEC.get(target)
+        cur = self._last_fsm_state
+
+        if exec_tgt is not None and cur == exec_tgt:
+            name = FSM_STATE_NAMES.get(cur, str(cur))
+            self._log(f"[ros]   已在目标执行态 {name}")
+            self._log_mode_result(label)
+            return
+
+        if cur == target:
+            self._log(f"[ros]   已在候选 {FSM_STATE_NAMES.get(target, target)}，确认进入…")
+            self._pulse_menu_key("lt+rt+a")
+            if exec_tgt:
+                self._wait_fsm(exec_tgt, timeout=3.0)
+            self._log_mode_result(label)
+            return
+
+        if not self._enter_init_menu():
+            self._log(
+                f"[ros][warn] 未能回到 INIT/菜单，当前 FSM={self._last_fsm_state}"
+            )
+            self._log_mode_result(label)
+            return
+
+        if self._last_fsm_state == FSM_INIT:
+            self._pulse_menu_key("lt+rt+→")
+            if not self._wait_fsm(FSM_CANDIDATE_DEFAULT, timeout=1.5):
+                self._log("[ros][warn] 未能进入候选菜单 (CANDIDATE_DEFAULT)")
+
+        deadline = time.monotonic() + 15.0
+        while time.monotonic() < deadline and not self._stop.is_set():
+            cur = self._last_fsm_state
+            if cur == target:
+                break
+            if cur not in MENU_CANDIDATES:
+                time.sleep(0.05)
+                continue
+            idx_cur = MENU_CANDIDATES.index(cur)
+            idx_tgt = MENU_CANDIDATES.index(target)
+            if idx_cur < idx_tgt:
+                self._pulse_menu_key("lt+rt+→")
+            elif idx_cur > idx_tgt:
+                self._pulse_menu_key("lt+rt+←")
+            else:
+                break
+            self._wait_fsm_change(cur, timeout=1.2)
+
+        if self._last_fsm_state != target:
+            self._log(
+                f"[ros][warn] 未能导航到 {FSM_STATE_NAMES.get(target, target)}，"
+                f"当前 FSM={self._last_fsm_state}"
+            )
+            self._log_mode_result(label)
+            return
+
+        self._log(
+            f"[ros]   已选中 {FSM_STATE_NAMES.get(target, target)}，确认进入…"
+        )
+        self._pulse_menu_key("lt+rt+a")
+        if exec_tgt and not self._wait_fsm(exec_tgt, timeout=3.0):
+            self._log(
+                f"[ros][warn] 确认后未进入执行态，期望 FSM={exec_tgt}，"
+                f"当前 FSM={self._last_fsm_state}"
+            )
+        self._log_mode_result(label)
 
     def _trigger_action(self, action_key: str) -> None:
         if action_key not in ACTION_COMMANDS:
@@ -684,6 +945,29 @@ class BleRosBridge:
 
         label, combo = ACTION_COMMANDS[action_key]
         self._log(f"[ros] 动作 {label}: {combo} → /joy ({COMBO_HOLD_SEC}s)")
+        self._publish_zero_twist()
+        with self._lock:
+            self._stick_target = None
+            self._stick_filtered = None
+
+        threading.Thread(
+            target=self._run_steps,
+            args=([combo], label, COMBO_HOLD_SEC),
+            daemon=True,
+        ).start()
+
+    def _trigger_gait(self, state: str) -> None:
+        """GAIT ON/OFF → /joy 发送 lt+rt+lb（步态启停）。"""
+        if state not in ("ON", "OFF"):
+            return
+        now = time.monotonic()
+        if now - self._last_action_ts.get(GAIT_JOY_KEY, 0.0) < ACTION_COOLDOWN_SEC:
+            return
+        self._last_action_ts[GAIT_JOY_KEY] = now
+
+        label = "步态开启" if state == "ON" else "步态关闭"
+        combo = GAIT_JOY_KEY
+        self._log(f"[ros] {label}: GAIT {state} → /joy ({COMBO_HOLD_SEC}s)")
         self._publish_zero_twist()
         with self._lock:
             self._stick_target = None
@@ -768,26 +1052,51 @@ class BleRosBridge:
         hold_sec: float,
         step_gap: float = STEP_GAP_SEC,
     ) -> None:
+        with self._joy_lock:
+            with self._lock:
+                was_sprint = self._sprint_enabled
+            self._set_sprint(False, log=False)
+            try:
+                self._run_steps_locked(steps, label, hold_sec, step_gap)
+            finally:
+                if was_sprint:
+                    self._set_sprint(True, log=False)
+
+    def _run_steps_locked(
+        self,
+        steps: List[str],
+        label: str,
+        hold_sec: float,
+        step_gap: float = STEP_GAP_SEC,
+    ) -> None:
         self._wait_joy_path()
         interval = 1.0 / JOY_PUBLISH_HZ
-        n_hold = max(1, int(hold_sec * JOY_PUBLISH_HZ))
         for step in steps:
             if self._stop.is_set():
                 break
-            for _ in range(n_hold):
-                if self._stop.is_set():
-                    break
-                self._publish_token(step, True)
-                time.sleep(interval)
-            for _ in range(3):
-                if self._stop.is_set():
-                    break
-                self._publish_token(step, False)
-                time.sleep(interval)
-            time.sleep(step_gap)
-        fsm = self._last_fsm_state
-        if fsm is not None:
-            name = FSM_STATE_NAMES.get(fsm, str(fsm))
-            self._log(f"[ros] 完成: {label} | 当前 FSM={fsm} ({name})")
-        else:
-            self._log(f"[ros] 完成: {label}")
+            if _is_menu_nav_step(step):
+                for _ in range(MENU_PULSE_FRAMES):
+                    if self._stop.is_set():
+                        break
+                    self._publish_token(step, True)
+                    time.sleep(interval)
+                for _ in range(MENU_RELEASE_FRAMES):
+                    if self._stop.is_set():
+                        break
+                    self._publish_token(step, False)
+                    time.sleep(interval)
+                time.sleep(MENU_STEP_GAP_SEC)
+            else:
+                n_hold = max(1, int(hold_sec * JOY_PUBLISH_HZ))
+                for _ in range(n_hold):
+                    if self._stop.is_set():
+                        break
+                    self._publish_token(step, True)
+                    time.sleep(interval)
+                for _ in range(3):
+                    if self._stop.is_set():
+                        break
+                    self._publish_token(step, False)
+                    time.sleep(interval)
+                time.sleep(step_gap)
+        self._log_mode_result(label)

@@ -2,6 +2,9 @@
 # 加载 ROS + sim2real 工作空间（供 start.sh / run_ble_with_ros.sh 共用）
 # sim2real_msg 在 install 目录，仅 source devel 会缺包导致 FSM 模式无效
 
+# systemd 最小环境下 ROS setup 脚本会引用 ROS_DISTRO，须预先设置
+export ROS_DISTRO="${ROS_DISTRO:-noetic}"
+
 if [ -f /opt/ros/noetic/setup.bash ]; then
   # shellcheck disable=SC1091
   source /opt/ros/noetic/setup.bash

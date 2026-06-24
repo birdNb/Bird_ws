@@ -39,6 +39,11 @@ show_help() {
   --setup         尝试开启 BlueZ Experimental 并重启 bluetooth
   -h, --help      显示帮助
 
+开机自启动:
+  sudo ./install-autostart.sh          # 安装 systemd 服务 bird-ble
+  sudo systemctl status bird-ble     # 查看状态
+  journalctl -u bird-ble -f          # 查看日志
+
 示例:
   ./start.sh
   ./start.sh --setup

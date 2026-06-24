@@ -208,7 +208,8 @@ Page({
     }
     // 步态/电源/语音：板端原样回传相同指令确认
     if (
-      text === 'MP ON' || text === 'MP OFF' || text === 'LT+RT+LB' ||
+      text === 'MP ON' || text === 'MP OFF' ||
+      text === 'GAIT ON' || text === 'GAIT OFF' ||
       text === 'sound ON' || text === 'sound OFF'
     ) {
       console.log('CMD_ECHO', text)
@@ -258,7 +259,8 @@ Page({
     this._lastCheerAt = now
     return this.sendCommand('RT+A')
   },
-  sendGaitToggle() { return this.sendCommand('LT+RT+LB') },
+  sendGaitOn() { return this.sendCommand('GAIT ON') },
+  sendGaitOff() { return this.sendCommand('GAIT OFF') },
   sendUnload() { return this.sendCommand('LT+RT+B') },
 
   /** 疾跑开关：按住策略侧 LT 加速（AMP Soccer 模式） */

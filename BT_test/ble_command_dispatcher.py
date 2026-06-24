@@ -30,12 +30,11 @@ ACTION_WIRE = {
     "lt+rt+start": "LT+RT+start",
     "lt+rt+rb": "LT+RT+RB",
     "lt+rt+b": "LT+RT+B",
-    "lt+rt+lb": "LT+RT+LB",
     "rt+a": "RT+A",
     "rt+x": "RT+X",
 }
 ACTION_RE = re.compile(
-    r"^(LT\+RT\+start|LT\+RT\+RB|LT\+RT\+B|LT\+RT\+LB|RT\+A|RT\+X)$",
+    r"^(LT\+RT\+start|LT\+RT\+RB|LT\+RT\+B|RT\+A|RT\+X)$",
     re.IGNORECASE,
 )
 NECK_OFFSET_RE = re.compile(r"^[Pp]([+-]?\d+)Y([+-]?\d+)$")
@@ -43,6 +42,7 @@ NECK_CENTER_RE = re.compile(r"^neck0$", re.IGNORECASE)
 LOCATE_FACE_RE = re.compile(r"^locate_face\s+(ON|OFF)$", re.IGNORECASE)
 HI_RE = re.compile(r"^HI\s+(ON|OFF)$", re.IGNORECASE)
 MP_RE = re.compile(r"^MP\s+(ON|OFF)$", re.IGNORECASE)
+GAIT_RE = re.compile(r"^GAIT\s+(ON|OFF)$", re.IGNORECASE)
 SPRINT_RE = re.compile(r"^LT\s+(ON|OFF)$", re.IGNORECASE)
 SOUND_RE = re.compile(r"^sound\s+(ON|OFF)(?:\s+(\d+))?$", re.IGNORECASE)
 VOLUME_RE = re.compile(r"^V\s+(\d{1,3})$", re.IGNORECASE)
@@ -56,6 +56,7 @@ class CommandKind(str, Enum):
     LOCATE_FACE = "locate_face"
     HI = "hi"
     MOTOR_POWER = "motor_power"
+    GAIT = "gait"
     SPRINT = "sprint"
     SOUND = "sound"
     VOLUME = "volume"
@@ -73,10 +74,6 @@ LogFn = Callable[[str], None]
 HandleFn = Callable[[CommandKind, str], None]
 AckFn = Callable[[str], None]
 EchoConfirmFn = Callable[[str], None]
-
-# 步态/电源：FFE2 回传与上行相同的原文（无 ACK: 前缀）
-ECHO_CONFIRM_ACTIONS = frozenset({"lt+rt+lb"})
-
 
 def _normalize_stick(x: float, y: float, z: float) -> str:
     x = max(-STICK_XY_LIMIT, min(STICK_XY_LIMIT, x))
@@ -129,6 +126,12 @@ def classify_payload(text: str) -> Tuple[CommandKind, str, str]:
         action = m_mp.group(1).upper()
         wire = f"MP {action}"
         return CommandKind.MOTOR_POWER, action, wire
+
+    m_gait = GAIT_RE.match(raw)
+    if m_gait:
+        action = m_gait.group(1).upper()
+        wire = f"GAIT {action}"
+        return CommandKind.GAIT, action, wire
 
     m_sprint = SPRINT_RE.match(raw)
     if m_sprint:
@@ -252,7 +255,18 @@ class CommandDispatcher:
                 self._log_warn(f"MP 处理失败: {e}")
                 return
             if self._echo_confirm is not None:
-                self._echo_confirm(wire)
+                self._echo_confirm(text)
+            return
+
+        if kind == CommandKind.GAIT:
+            self._log_rx(f"GAIT: {wire}")
+            try:
+                self._handle(kind, payload)
+            except Exception as e:
+                self._log_warn(f"步态处理失败: {e}")
+                return
+            if self._echo_confirm is not None:
+                self._echo_confirm(text)
             return
 
         if kind == CommandKind.SPRINT:
@@ -317,13 +331,7 @@ class CommandDispatcher:
                 time.sleep(TICK_INTERVAL_SEC)
                 continue
 
-            if (
-                cmd.kind == CommandKind.ACTION
-                and cmd.payload in ECHO_CONFIRM_ACTIONS
-            ):
-                if self._echo_confirm is not None:
-                    self._echo_confirm(cmd.wire)
-            elif self._ack is not None:
+            if self._ack is not None:
                 self._ack(cmd.wire)
 
             time.sleep(TICK_INTERVAL_SEC)
