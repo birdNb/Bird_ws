@@ -268,7 +268,6 @@ class BleGattServer:
         self._adapter_path = ""
         self._ros_bridge = None
         self._locate_face = None
-        self._hand_identify = None
         self._volume = None
         self._voice = None
         self._dispatcher = None
@@ -571,10 +570,6 @@ class BleGattServer:
             if self._locate_face is not None:
                 if not self._locate_face.handle(payload):
                     log_warn(f"locate_face {payload} 未成功，请先 M_default 或查看日志")
-            return
-        if kind.value == "hi":
-            if self._hand_identify is not None:
-                self._hand_identify.handle(payload)
             return
         if kind.value == "volume":
             if self._volume is not None:
@@ -896,15 +891,6 @@ class BleGattServer:
             return
         self._volume = VolumeController(log=log_info)
 
-    def _start_hand_identify_manager(self) -> None:
-        try:
-            from ble_hand_identify_manager import HandIdentifyManager
-        except ImportError as e:
-            log_warn(f"无法加载 ble_hand_identify_manager: {e}")
-            return
-        self._hand_identify = HandIdentifyManager(log=log_info)
-        log_info("手势管理器已就绪（HI ON/OFF）")
-
     def _start_locate_face_manager(self) -> None:
         try:
             from ble_locate_face_manager import LocateFaceManager
@@ -1000,7 +986,6 @@ class BleGattServer:
         self._set_adapter_props(adapter_path)
         self._watch_devices()
         self._start_locate_face_manager()
-        self._start_hand_identify_manager()
         self._start_volume_manager()
         self._start_voice_manager()
         self._start_ros_bridge()
@@ -1124,8 +1109,6 @@ class BleGattServer:
                 self._ros_bridge.stop()
             if self._locate_face is not None:
                 self._locate_face.stop()
-            if self._hand_identify is not None:
-                self._hand_identify.stop()
             if self._voice is not None:
                 self._voice.on_disconnect()
         return 0

@@ -12,9 +12,11 @@ User=root
 Group=root
 WorkingDirectory=/home/nvidia/Bird_ws/BT_test
 Environment=ROS_DISTRO=noetic
+Environment=BIRD_WS=/home/nvidia/Bird_ws
 Environment=PULSE_SERVER=unix:/run/user/1000/pulse/native
 Environment=XDG_RUNTIME_DIR=/run/user/1000
-Environment=HOME=/root
+# 与手动 sudo -E ./start.sh 一致，避免 expanduser/~/.local 落到 /root
+Environment=HOME=/home/nvidia
 ExecStartPre=/bin/sleep 3
 ExecStart=/home/nvidia/Bird_ws/BT_test/systemd/bird-ble-boot.sh
 Restart=always

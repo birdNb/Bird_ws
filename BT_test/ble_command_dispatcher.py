@@ -40,7 +40,6 @@ ACTION_RE = re.compile(
 NECK_OFFSET_RE = re.compile(r"^[Pp]([+-]?\d+)Y([+-]?\d+)$")
 NECK_CENTER_RE = re.compile(r"^neck0$", re.IGNORECASE)
 LOCATE_FACE_RE = re.compile(r"^locate_face\s+(ON|OFF)$", re.IGNORECASE)
-HI_RE = re.compile(r"^HI\s+(ON|OFF)$", re.IGNORECASE)
 MP_RE = re.compile(r"^MP\s+(ON|OFF)$", re.IGNORECASE)
 GAIT_RE = re.compile(r"^GAIT\s+(ON|OFF)$", re.IGNORECASE)
 SPRINT_RE = re.compile(r"^LT\s+(ON|OFF)$", re.IGNORECASE)
@@ -59,7 +58,6 @@ class CommandKind(str, Enum):
     ACTION = "action"
     NECK = "neck"
     LOCATE_FACE = "locate_face"
-    HI = "hi"
     MOTOR_POWER = "motor_power"
     GAIT = "gait"
     SPRINT = "sprint"
@@ -120,12 +118,6 @@ def classify_payload(text: str) -> Tuple[CommandKind, str, str]:
         action = m_lf.group(1).upper()
         wire = f"locate_face {action}"
         return CommandKind.LOCATE_FACE, action, wire
-
-    m_hi = HI_RE.match(raw)
-    if m_hi:
-        action = m_hi.group(1).upper()
-        wire = f"HI {action}"
-        return CommandKind.HI, action, wire
 
     m_mp = MP_RE.match(raw)
     if m_mp:
@@ -245,16 +237,6 @@ class CommandDispatcher:
                 self._handle(kind, payload)
             except Exception as e:
                 self._log_warn(f"locate_face 处理失败: {e}")
-            if self._ack is not None:
-                self._ack(wire)
-            return
-
-        if kind == CommandKind.HI:
-            self._log_rx(f"HI: {wire}")
-            try:
-                self._handle(kind, payload)
-            except Exception as e:
-                self._log_warn(f"HI 处理失败: {e}")
             if self._ack is not None:
                 self._ack(wire)
             return

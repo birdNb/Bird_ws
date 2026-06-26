@@ -3,7 +3,7 @@
 """
 机器人 → 小程序 状态遥测（FFE2 notify）。
 
-  IP:19.11     局域网 IP 后两段
+  IP:192.168.19.11   局域网 IPv4 四段完整地址
   pwr:83       电量 0~100 实际值；握手后立即发送，下降时再推
   mp:ON        电机电源状态；连接后 5s 连发 3 次，变化时再推
   fsm:5        FSM 状态变化时连发 3 次
@@ -51,8 +51,8 @@ def _bootstrap_ros_python_path() -> None:
             sys.path.insert(0, p)
 
 
-def read_lan_ip_suffix() -> Optional[str]:
-    """192.168.19.11 → 19.11"""
+def read_lan_ip() -> Optional[str]:
+    """返回局域网 IPv4 四段，如 192.168.19.11。"""
     candidates = []
     try:
         out = socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET)
@@ -76,12 +76,16 @@ def read_lan_ip_suffix() -> Optional[str]:
     for ip in candidates:
         parts = ip.split(".")
         if len(parts) == 4 and (parts[0] == "192" or parts[0] == "10"):
-            return f"{parts[2]}.{parts[3]}"
+            return ip
     for ip in candidates:
         parts = ip.split(".")
         if len(parts) == 4:
-            return f"{parts[2]}.{parts[3]}"
+            return ip
     return None
+
+
+# 兼容旧调用名
+read_lan_ip_suffix = read_lan_ip
 
 
 def read_battery_percent() -> Optional[int]:
@@ -222,7 +226,7 @@ class BleStatusTelemetry:
         return None
 
     def _push_snapshot(self) -> None:
-        ip = read_lan_ip_suffix()
+        ip = read_lan_ip()
         if ip:
             self._send_ip(ip, force=True)
         pct = self._read_pwr_source()
@@ -237,7 +241,7 @@ class BleStatusTelemetry:
 
     def _poll_loop(self) -> None:
         while not self._stop.is_set():
-            ip = read_lan_ip_suffix()
+            ip = read_lan_ip()
             if ip:
                 self._send_ip(ip)
             pct = self._read_pwr_source()
@@ -349,12 +353,12 @@ class BleStatusTelemetry:
                 time.sleep(FSM_REPEAT_GAP_SEC)
         return True
 
-    def _send_ip(self, suffix: str, force: bool = False) -> None:
+    def _send_ip(self, ip: str, force: bool = False) -> None:
         with self._lock:
-            if not force and suffix == self._last_ip:
+            if not force and ip == self._last_ip:
                 return
-            self._last_ip = suffix
-        self._tx(f"IP:{suffix}")
+            self._last_ip = ip
+        self._tx(f"IP:{ip}")
 
     def _maybe_send_pwr(self, raw_pct: int, force: bool = False) -> None:
         if not self._subscribed.is_set():

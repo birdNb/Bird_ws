@@ -11,13 +11,16 @@ import threading
 import time
 from typing import Callable, Optional, Tuple
 
-LOCATE_FACE_CPP_BIN = os.path.expanduser("~/Bird_ws/locate_face_cpp/build/locate_face")
-LOCATE_FACE_CPP_START = os.path.expanduser("~/Bird_ws/locate_face_cpp/start.sh")
-LOCATE_FACE_SCRIPT = os.path.expanduser("~/Bird_ws/locate_face/locate_face.py")
-NECK_HOME_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "neck_smooth_home.py")
+_BT_DIR = os.path.dirname(os.path.abspath(__file__))
+_BIRD_WS = os.environ.get("BIRD_WS") or os.path.abspath(os.path.join(_BT_DIR, ".."))
+_RUN_USER_HOME = "/home/nvidia"
+LOCATE_FACE_CPP_BIN = os.path.join(_BIRD_WS, "locate_face_cpp/build/locate_face")
+LOCATE_FACE_CPP_START = os.path.join(_BIRD_WS, "locate_face_cpp/start.sh")
+LOCATE_FACE_SCRIPT = os.path.join(_BIRD_WS, "locate_face/locate_face.py")
+NECK_HOME_SCRIPT = os.path.join(_BT_DIR, "neck_smooth_home.py")
 NECK_STATE_FILE = "/tmp/locate_face_neck.state"
-ROS_ENV_SH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ros_env.sh")
-LOG_PATH = os.path.expanduser("~/Bird_ws/locate_face_cpp/locate_face_ble.log")
+ROS_ENV_SH = os.path.join(_BT_DIR, "ros_env.sh")
+LOG_PATH = os.path.join(_BIRD_WS, "locate_face_cpp/locate_face_ble.log")
 START_VERIFY_SEC = 12.0
 PROC_EXIT_WAIT_SEC = 3.0
 HOMING_EXIT_SEC = 8.0
@@ -166,12 +169,21 @@ class LocateFaceManager:
         self._kill_orphans()
 
         env = os.environ.copy()
+        # systemd User=root 且 HOME=/root 时，子进程 python3 会落到系统 cv2 4.2（无 FaceDetectorYN）；
+        # 手动 ./start.sh 用 sudo -E 会保留 HOME=/home/nvidia，故自启与手启行为不一致。
+        env["HOME"] = _RUN_USER_HOME
+        env["USER"] = "nvidia"
         env.setdefault("DISPLAY", ":0")
-        xauth = os.path.expanduser("~/.Xauthority")
+        xauth = os.path.join(_RUN_USER_HOME, ".Xauthority")
         if os.path.exists(xauth):
             env.setdefault("XAUTHORITY", xauth)
-        env["LOCATE_FACE_CPP_ROOT"] = os.path.expanduser("~/Bird_ws/locate_face_cpp")
+        env["LOCATE_FACE_CPP_ROOT"] = os.path.join(_BIRD_WS, "locate_face_cpp")
+        env["BIRD_WS"] = _BIRD_WS
         env.pop("ROS_HOSTNAME", None)
+        _py_site = os.path.join(_RUN_USER_HOME, ".local/lib/python3.8/site-packages")
+        if os.path.isdir(_py_site):
+            _pp = env.get("PYTHONPATH", "")
+            env["PYTHONPATH"] = f"{_py_site}:{_pp}" if _pp else _py_site
 
         if os.path.isfile(LOCATE_FACE_CPP_BIN) and os.access(LOCATE_FACE_CPP_BIN, os.X_OK):
             shell_cmd = (
