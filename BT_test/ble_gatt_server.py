@@ -41,6 +41,13 @@ except ImportError:
     def save_ble_name(name: str) -> None:
         pass
 
+try:
+    from platform_detect import detect_platform
+    from ble_legacy_adv import start_advertising as _start_ble_advertising
+except ImportError:
+    detect_platform = None  # type: ignore
+    _start_ble_advertising = None  # type: ignore
+
 # 小程序也可按 MAC 连接（系统设置里看到的蓝牙地址）
 BOARD_BDADDR = "00:19:86:00:2E:AF"
 ADAPTER_PATH = "/org/bluez/hci0"
@@ -224,9 +231,7 @@ class Advertisement(dbus.service.Object):
             LE_ADV_IFACE: {
                 "Type": "peripheral",
                 "LocalName": self.local_name,
-                "ServiceUUIDs": dbus.Array(
-                    ["0000ffe0-0000-1000-8000-00805f9b34fb"], signature="s"
-                ),
+                "ServiceUUIDs": dbus.Array(["0000ffe0"], signature="s"),
                 "IncludeTxPower": dbus.Boolean(False),
                 "MinInterval": dbus.UInt16(0x00A0),
                 "MaxInterval": dbus.UInt16(0x00C0),
@@ -776,14 +781,17 @@ class BleGattServer:
             log_warn(f"设置 Alias 失败: {e}")
         try:
             props.Set(ADAPTER_IFACE, "Powered", dbus.Boolean(True))
-            # 勿开经典蓝牙可发现/可配对，否则手机系统会一直弹「连接/配对」
             props.Set(ADAPTER_IFACE, "Discoverable", dbus.Boolean(False))
             props.Set(ADAPTER_IFACE, "Pairable", dbus.Boolean(False))
             props.Set(ADAPTER_IFACE, "DiscoverableTimeout", dbus.UInt32(0))
             props.Set(ADAPTER_IFACE, "PairableTimeout", dbus.UInt32(0))
-            props.Set(ADAPTER_IFACE, "Discovering", dbus.Boolean(False))
         except dbus.exceptions.DBusException as e:
             log_warn(f"适配器属性: {e}")
+        # RK 板载网卡：Discovering 只读，单独处理避免误报警
+        try:
+            props.Set(ADAPTER_IFACE, "Discovering", dbus.Boolean(False))
+        except dbus.exceptions.DBusException:
+            pass
         self._enter_ble_only_mode()
 
     def _verify_le_advertising(self, adapter_path: str) -> None:
@@ -801,87 +809,20 @@ class BleGattServer:
     def _patch_le_adv_data(
         self, hci_dev: str = "hci0", force: bool = False, initial_delay: float = 0.4
     ) -> None:
-        """
-        BlueZ 5.53 + BT 5.1 adapter workaround：
-
-        D-Bus RegisterAdvertisement → MGMT Add Advertising (Flags=0, data=empty)
-        → 内核使用 Extended Advertising (0x0037) 广播**空数据包**（无 Name/UUID）
-        → Legacy hcitool cmd (0x0008/0x0009) 被 Extended Advertising 忽略
-
-        正确做法：btmgmt name + add-adv，在 -d/-s 中显式写入 UUID 与名称。
-        fallback：直接写 LE Set Extended Advertising Data (0x0037) HCI 命令。
-        """
+        """按平台外发广播：RK 板载 Legacy HCI，Orin USB btmgmt。"""
         if initial_delay > 0:
             time.sleep(initial_delay)
-
-        hci_idx = self._hci_index(hci_dev)
-        name = self.name
-        if not force:
-            self._btmgmt_set_local_name(hci_idx, name)
-
-        cmd_timeout = 2 if force else 4
-
-        if force:
-            try:
-                subprocess.run(
-                    ["btmgmt", "--index", hci_idx, "rm-adv", "1"],
-                    check=False,
-                    capture_output=True,
-                    timeout=cmd_timeout,
-                )
-            except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-                pass
-
-        adv_hex = self._build_le_adv_payload(name).hex()
-        sr_hex = self._build_le_scan_rsp_payload(name).hex()
-
-        # ── 主路径：btmgmt add-adv 覆盖 instance 1 ──────────────────
-        try:
-            r = subprocess.run(
-                [
-                    "btmgmt",
-                    "--index",
-                    hci_idx,
-                    "add-adv",
-                    "-d",
-                    adv_hex,
-                    "-s",
-                    sr_hex,
-                    "-g",
-                    "-m",
-                    "-c",
-                    "1",
-                ],
-                capture_output=True,
-                timeout=cmd_timeout + 2,
+        if _start_ble_advertising is not None:
+            plat = detect_platform() if detect_platform else None
+            _start_ble_advertising(
+                hci_dev,
+                self.name,
+                platform=plat,
+                force=force,
+                log=log_info,
             )
-            out = r.stdout.decode("utf-8", errors="replace").strip()
-            err = r.stderr.decode("utf-8", errors="replace").strip()
-            if r.returncode == 0:
-                log_info(f"[adv] LE 广播包已写入: UUID=FFE0 + Name={name}")
-                return
-            log_warn(f"[adv] btmgmt add-adv 失败(rc={r.returncode}): {out} {err}")
-        except Exception as exc:
-            log_warn(f"[adv] btmgmt add-adv 异常: {exc}")
-
-        # ── fallback：直接写 LE Set Extended Advertising Data (0x0037) ──
-        adv_payload = self._build_le_adv_payload(name)
-        ext_args = (
-            ["0x01", "0x03", "0x01", f"0x{len(adv_payload):02x}"]
-            + [f"0x{b:02x}" for b in adv_payload]
-        )
-        try:
-            r2 = subprocess.run(
-                ["hcitool", "-i", hci_dev, "cmd", "0x08", "0x0037"] + ext_args,
-                capture_output=True,
-                timeout=cmd_timeout,
-            )
-            if r2.returncode == 0:
-                log_info(f"[adv] LE Ext 广播包已写入 (fallback): Name={self.name}")
-            else:
-                log_warn(f"[adv] LE Ext 广播写入失败: rc={r2.returncode}")
-        except Exception as exc2:
-            log_warn(f"[adv] LE Ext fallback 异常: {exc2}")
+            return
+        log_warn("[adv] ble_legacy_adv 未加载，跳过广播刷新")
 
     def _start_volume_manager(self) -> None:
         try:
@@ -1040,8 +981,17 @@ class BleGattServer:
             self.bus.get_object(BLUEZ_SERVICE, adapter_path), GATT_MANAGER_IFACE
         )
 
+        plat = detect_platform() if detect_platform else None
+        use_dbus_adv = plat is None or plat.adv_mode != "legacy_hci"
+
         def register_done() -> None:
             log_info("GATT 服务已注册，等待手机连接")
+            hci_dev = adapter_path.split("/")[-1]
+            threading.Thread(
+                target=self._patch_le_adv_data,
+                kwargs={"hci_dev": hci_dev},
+                daemon=True,
+            ).start()
 
         def register_failed(error: dbus.DBusException) -> None:
             log_warn(f"GATT 注册失败: {error}")
@@ -1056,8 +1006,7 @@ class BleGattServer:
             log_info(f"BLE 广播已开启，小程序应能扫到名称: {self.name}")
             log_info(f"    或按服务 UUID 扫描: {SERVICE_UUID}")
             self._verify_le_advertising(adapter_path)
-            # BlueZ 5.53 bug: MGMT Add Advertising 数据为空，手动写入 HCI 广播包
-            hci_dev = adapter_path.split("/")[-1]  # /org/bluez/hci0 → hci0
+            hci_dev = adapter_path.split("/")[-1]
             threading.Thread(
                 target=self._patch_le_adv_data,
                 kwargs={"hci_dev": hci_dev},
@@ -1074,12 +1023,17 @@ class BleGattServer:
             reply_handler=register_done,
             error_handler=register_failed,
         )
-        adv_manager.RegisterAdvertisement(
-            adv.get_path(),
-            _dbus_sv_opts(),
-            reply_handler=adv_done,
-            error_handler=adv_failed,
-        )
+        if use_dbus_adv:
+            adv_manager.RegisterAdvertisement(
+                adv.get_path(),
+                _dbus_sv_opts(),
+                reply_handler=adv_done,
+                error_handler=adv_failed,
+            )
+        else:
+            if plat:
+                log_info(f"平台: {plat.platform_id} | {plat.hw_desc}")
+            log_info("RK 板载蓝牙：跳过 D-Bus 广播，使用 Legacy HCI 外发")
 
         print()
         addr = self._read_adapter_address(adapter_path)

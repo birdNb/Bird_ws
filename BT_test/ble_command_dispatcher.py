@@ -221,14 +221,11 @@ class CommandDispatcher:
             return
 
         if kind == CommandKind.NECK:
-            # 仅入队到 ROS 线程，不在此线程 publish
             self._log_rx(f"neck: {wire}")
             try:
                 self._handle(kind, payload)
             except Exception as e:
                 self._log_warn(f"脖子处理失败: {e}")
-            if self._ack is not None:
-                self._ack(wire)
             return
 
         if kind == CommandKind.LOCATE_FACE:

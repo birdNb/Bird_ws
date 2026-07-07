@@ -16,6 +16,8 @@ NECK_STEP_DEG = 10.0
 YAW_LIMIT_DEG = 80.0
 PITCH_UP_DEG = -40.0
 PITCH_DOWN_DEG = 60.0
+HOME_RATE_DEG_PER_SEC = 45.0
+TICK_HZ = 20.0
 
 NECK_OFFSET_RE = re.compile(r"^[Pp]([+-]?\d+)Y([+-]?\d+)$")
 NECK_CENTER_RE = re.compile(r"^neck0$", re.IGNORECASE)
@@ -45,8 +47,14 @@ def _clamp_yaw_deg(deg: float) -> float:
     return max(-YAW_LIMIT_DEG, min(YAW_LIMIT_DEG, deg))
 
 
+def _step_toward_zero(val: float, step: float) -> float:
+    if abs(val) <= 1e-4:
+        return 0.0
+    return val - math.copysign(min(step, abs(val)), val)
+
+
 class NeckController:
-    """P+步=抬头/右转 10°，P-步=低头/左转 10°；neck0 回中。"""
+    """P+步=抬头/右转 10°，P-步=低头/左转 10°；neck0 / P0Y0 平滑回中。"""
 
     def __init__(self, log: LogFn = print) -> None:
         self._log = log
@@ -55,6 +63,7 @@ class NeckController:
         self._pitch_deg = 0.0
         self._pub = None
         self._pending: Optional[str] = None
+        self._homing = False
 
     def attach_publisher(self, pub) -> None:
         self._pub = pub
@@ -74,6 +83,7 @@ class NeckController:
             self._pending = None
         if text is not None:
             self.handle(text)
+        self._tick_homing()
 
     def handle(self, text: str) -> bool:
         if self._pub is None:
@@ -83,11 +93,12 @@ class NeckController:
         if parsed is None:
             return False
         wire, p_steps, y_steps = parsed
-        if wire == "neck0":
-            self._set_center()
-            self._log("[neck] 回中 neck0 → yaw=0 pitch=0")
+        if wire == "neck0" or (p_steps == 0 and y_steps == 0):
+            self._start_smooth_home()
+            self._log(f"[neck] 回中 {wire} → yaw=0 pitch=0（平滑）")
             return True
         with self._lock:
+            self._homing = False
             # P+ = 抬头（pitch 减小，因 PITCH_UP_DEG 为负值）
             # Y+ = 右转（yaw 减小，因坐标系符号约定）
             self._pitch_deg = _clamp_pitch_deg(
@@ -101,6 +112,27 @@ class NeckController:
             f"(P{p_steps:+d} Y{y_steps:+d} ×{NECK_STEP_DEG:.0f}°)"
         )
         return True
+
+    def _start_smooth_home(self) -> None:
+        with self._lock:
+            self._homing = True
+
+    def _tick_homing(self) -> None:
+        if self._pub is None:
+            return
+        with self._lock:
+            if not self._homing:
+                return
+            step = HOME_RATE_DEG_PER_SEC / TICK_HZ
+            self._yaw_deg = _step_toward_zero(self._yaw_deg, step)
+            self._pitch_deg = _step_toward_zero(self._pitch_deg, step)
+            yaw, pitch = self._yaw_deg, self._pitch_deg
+            if abs(yaw) < 1e-4 and abs(pitch) < 1e-4:
+                self._yaw_deg = 0.0
+                self._pitch_deg = 0.0
+                self._homing = False
+                yaw, pitch = 0.0, 0.0
+        self._publish(yaw, pitch)
 
     def _set_center(self) -> None:
         with self._lock:

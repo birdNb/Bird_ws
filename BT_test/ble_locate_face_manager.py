@@ -13,7 +13,9 @@ from typing import Callable, Optional, Tuple
 
 _BT_DIR = os.path.dirname(os.path.abspath(__file__))
 _BIRD_WS = os.environ.get("BIRD_WS") or os.path.abspath(os.path.join(_BT_DIR, ".."))
-_RUN_USER_HOME = "/home/nvidia"
+_RUN_USER_HOME = os.environ.get("BIRD_HOME") or os.path.expanduser(
+    f"~{os.environ.get('BIRD_USER', 'hightorque')}"
+)
 LOCATE_FACE_CPP_BIN = os.path.join(_BIRD_WS, "locate_face_cpp/build/locate_face")
 LOCATE_FACE_CPP_START = os.path.join(_BIRD_WS, "locate_face_cpp/start.sh")
 LOCATE_FACE_SCRIPT = os.path.join(_BIRD_WS, "locate_face/locate_face.py")
@@ -170,9 +172,9 @@ class LocateFaceManager:
 
         env = os.environ.copy()
         # systemd User=root 且 HOME=/root 时，子进程 python3 会落到系统 cv2 4.2（无 FaceDetectorYN）；
-        # 手动 ./start.sh 用 sudo -E 会保留 HOME=/home/nvidia，故自启与手启行为不一致。
+        _run_user = os.environ.get("BIRD_USER", os.path.basename(_RUN_USER_HOME))
         env["HOME"] = _RUN_USER_HOME
-        env["USER"] = "nvidia"
+        env["USER"] = _run_user
         env.setdefault("DISPLAY", ":0")
         xauth = os.path.join(_RUN_USER_HOME, ".Xauthority")
         if os.path.exists(xauth):

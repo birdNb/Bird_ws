@@ -3,6 +3,8 @@
 set -euo pipefail
 
 BT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck disable=SC1091
+source "${BT_DIR}/platform_env.sh"
 SERVICE_NAME="bird-ble.service"
 UNIT_SRC="${BT_DIR}/systemd/bird-ble.service"
 BOOT_SRC="${BT_DIR}/systemd/bird-ble-boot.sh"
@@ -19,7 +21,7 @@ chmod +x "${BOOT_SRC}" "${BT_DIR}/run_ble_with_ros.sh" "${BT_DIR}/start.sh"
 # 首次安装：确保 BlueZ Experimental（否则 GATT/广播注册会失败）
 if [ -f /etc/bluetooth/main.conf ] && ! grep -qE '^[[:space:]]*Experimental[[:space:]]*=[[:space:]]*true' /etc/bluetooth/main.conf 2>/dev/null; then
   echo "[setup] 配置 BlueZ Experimental=true ..."
-  su - nvidia -c "cd '${BT_DIR}' && ./start.sh --setup" || true
+  su - "${BIRD_USER}" -c "cd '${BT_DIR}' && ./start.sh --setup" || true
 fi
 
 if ! python3 -c "import dbus; from gi.repository import GLib" 2>/dev/null; then
@@ -27,7 +29,13 @@ if ! python3 -c "import dbus; from gi.repository import GLib" 2>/dev/null; then
   exit 1
 fi
 
-cp -f "${UNIT_SRC}" "${UNIT_DST}"
+sed \
+  -e "s|@BT_DIR@|${BT_DIR}|g" \
+  -e "s|@BIRD_WS@|${BIRD_WS}|g" \
+  -e "s|@BIRD_USER@|${BIRD_USER}|g" \
+  -e "s|@BIRD_HOME@|${BIRD_HOME}|g" \
+  -e "s|@BIRD_BLE_UID@|${BIRD_BLE_UID}|g" \
+  "${UNIT_SRC}" >"${UNIT_DST}"
 
 if [ ! -f "${DEFAULT_ENV}" ]; then
   cat >"${DEFAULT_ENV}" <<'EOF'

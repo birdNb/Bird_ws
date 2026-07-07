@@ -167,7 +167,6 @@ def _bootstrap_ros_python_path() -> None:
     extra = [
         "/opt/ros/noetic/lib/python3/dist-packages",
         os.path.expanduser("~/sim2real/devel/lib/python3/dist-packages"),
-        "/home/nvidia/sim2real/devel/lib/python3/dist-packages",
         os.path.expanduser("~/sim2real/install/lib/python3/dist-packages"),
     ]
     for p in extra:

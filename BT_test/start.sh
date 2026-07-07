@@ -3,8 +3,11 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-# 板子默认 sudo 密码；可用环境变量 BIRD_BLE_SUDO_PW 覆盖
-SUDO_PW="${BIRD_BLE_SUDO_PW:-nvidia}"
+# shellcheck disable=SC1091
+source "$(pwd)/platform_env.sh"
+source "$(pwd)/platform_hw.sh"
+
+SUDO_PW="${BIRD_BLE_SUDO_PW:-${BIRD_USER:-hightorque}}"
 
 sudo_n() {
   if [ "$(id -u)" -eq 0 ]; then
@@ -133,18 +136,22 @@ if ! systemctl is-active --quiet bluetooth 2>/dev/null; then
   sleep 1
 fi
 
-# 启动前检查 hci0 是否存在（避免 btmgmt Invalid Index 误导）
-if ! hciconfig hci0 2>/dev/null | grep -q "hci0"; then
-  echo "[error] 未检测到蓝牙适配器 hci0（No default controller available）"
-  echo "  19:04 能连、现在不能 → 多半是驱动/适配器掉线，不是 BLE 脚本问题"
-  echo ""
-  echo "  请执行恢复:"
-  echo "    sudo ./scripts/recover.sh"
-  echo "  若仍失败:"
-  echo "    sudo reboot"
-  echo "  重启后确认: hciconfig -a  应出现 hci0"
+# 启动前检查蓝牙适配器
+_BLE_DEV="${BLE_HCI_DEV:-hci0}"
+if ! hciconfig "${_BLE_DEV}" 2>/dev/null | grep -q "${_BLE_DEV}"; then
+  echo "[error] 未检测到蓝牙 ${_BLE_DEV}"
+  echo "  平台: ${BLE_PLATFORM} | ${BLE_HW_DESC}"
+  if [ "${BLE_BT_KIND:-}" = "usb_dongle" ]; then
+    echo "  Orin: 请确认 USB 蓝牙模块已插入"
+  else
+    echo "  RK: 板载 RTL8822CE 蓝牙未就绪"
+  fi
+  echo "  恢复: sudo ./scripts/recover.sh"
   exit 1
 fi
+unset _BLE_DEV
+
+echo "平台: ${BLE_PLATFORM} | ${BLE_HW_DESC} | 广播: ${BLE_ADV_MODE}"
 
 if ! python3 -c "import dbus; from gi.repository import GLib" 2>/dev/null; then
   echo "缺少依赖，请执行:"
