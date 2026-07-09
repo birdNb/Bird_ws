@@ -5,38 +5,6 @@
 #include <cstdio>
 #include <unistd.h>
 
-namespace {
-
-cv::Rect clampRect(const cv::Rect& r, const cv::Size& limit) {
-    int x = std::max(0, r.x);
-    int y = std::max(0, r.y);
-    int w = std::min(r.width, limit.width - x);
-    int h = std::min(r.height, limit.height - y);
-    if (w <= 0 || h <= 0) {
-        return cv::Rect();
-    }
-    return cv::Rect(x, y, w, h);
-}
-
-}  // namespace
-
-bool FaceTracker::probeYuNet(cv::Ptr<cv::FaceDetectorYN> detector) {
-    if (detector.empty()) {
-        return false;
-    }
-    try {
-        // Jetson 上用小图 probe 会触发 DNN shape 异常，用接近实际的尺寸
-        cv::Mat img(240, 320, CV_8UC3, cv::Scalar(32, 32, 32));
-        detector->setInputSize(img.size());
-        cv::Mat faces;
-        detector->detect(img, faces);
-        return true;
-    } catch (const cv::Exception& e) {
-        ROS_WARN("YuNet probe failed: %s", e.what());
-        return false;
-    }
-}
-
 bool FaceTracker::initFaceBackend() {
     const std::string model_path = projectRoot() + "/model/face_detection_yunet_2023mar.onnx";
     const std::string yunet_py = projectRoot() + "/scripts/face_yunet_worker.py";
@@ -50,24 +18,6 @@ bool FaceTracker::initFaceBackend() {
             return true;
         }
     }
-
-    try {
-        detector_ = cv::FaceDetectorYN::create(
-            model_path,
-            "",
-            cv::Size(320, 320),
-            FACE_DETECT_SCORE_THRESH,
-            FACE_NMS_THRESH,
-            FACE_DETECT_TOP_K);
-        if (!detector_.empty() && probeYuNet(detector_)) {
-            backend_ = FaceDetectBackend::YuNet;
-            ROS_INFO("[face] backend YuNet C++ model=%s", model_path.c_str());
-            return true;
-        }
-    } catch (const cv::Exception& e) {
-        ROS_WARN("YuNet C++ create failed: %s", e.what());
-    }
-    detector_.release();
 
     if (access(mp_py.c_str(), R_OK) == 0 && mp_bridge_.start(mp_py)) {
         backend_ = FaceDetectBackend::MediaPipe;
@@ -208,146 +158,6 @@ void FaceTracker::shutdown() {
 FaceTelemetry FaceTracker::getTelemetry() const {
     std::lock_guard<std::mutex> lk(telem_mu_);
     return telem_;
-}
-
-cv::Rect FaceTracker::expandRoi(const cv::Rect& box, float pad_ratio, const cv::Size& frame_size) {
-    if (box.area() <= 0) {
-        return cv::Rect();
-    }
-    const float pad_x = box.width * pad_ratio;
-    const float pad_y = box.height * pad_ratio;
-    cv::Rect roi(
-        static_cast<int>(box.x - pad_x),
-        static_cast<int>(box.y - pad_y),
-        static_cast<int>(box.width + 2.0f * pad_x),
-        static_cast<int>(box.height + 2.0f * pad_y));
-    return clampRect(roi, frame_size);
-}
-
-cv::Rect FaceTracker::mapProcRectToFrame(
-    const cv::Rect& proc_rect,
-    int proc_w,
-    int proc_h,
-    int frame_w,
-    int frame_h) {
-    if (proc_rect.area() <= 0 || proc_w <= 0 || proc_h <= 0) {
-        return cv::Rect();
-    }
-    const float sx = static_cast<float>(frame_w) / static_cast<float>(proc_w);
-    const float sy = static_cast<float>(frame_h) / static_cast<float>(proc_h);
-    return cv::Rect(
-        static_cast<int>(proc_rect.x * sx),
-        static_cast<int>(proc_rect.y * sy),
-        static_cast<int>(proc_rect.width * sx),
-        static_cast<int>(proc_rect.height * sy));
-}
-
-bool FaceTracker::runYuNet(
-    const cv::Mat& proc_bgr,
-    const cv::Rect& roi,
-    std::vector<FaceDet>& out) const {
-    out.clear();
-    if (detector_.empty() || proc_bgr.empty()) {
-        return false;
-    }
-
-    cv::Mat input = proc_bgr;
-    cv::Rect use_roi = clampRect(roi, proc_bgr.size());
-    int off_x = 0;
-    int off_y = 0;
-    if (use_roi.area() > 0
-        && (use_roi.x > 0 || use_roi.y > 0 || use_roi.width < proc_bgr.cols
-            || use_roi.height < proc_bgr.rows)) {
-        input = proc_bgr(use_roi);
-        off_x = use_roi.x;
-        off_y = use_roi.y;
-    }
-
-    detector_->setInputSize(input.size());
-    cv::Mat faces;
-    detector_->detect(input, faces);
-    if (faces.empty() || faces.rows <= 0) {
-        return false;
-    }
-
-    for (int i = 0; i < faces.rows; ++i) {
-        const float score = faces.at<float>(i, 14);
-        if (score < FACE_DETECT_SCORE_THRESH) {
-            continue;
-        }
-        const int x = static_cast<int>(faces.at<float>(i, 0));
-        const int y = static_cast<int>(faces.at<float>(i, 1));
-        const int w = static_cast<int>(faces.at<float>(i, 2));
-        const int h = static_cast<int>(faces.at<float>(i, 3));
-        if (w < 20 || h < 20) {
-            continue;
-        }
-        FaceDet det;
-        det.bbox = cv::Rect(x + off_x, y + off_y, w, h);
-        det.score = score;
-        out.push_back(det);
-    }
-    return !out.empty();
-}
-
-cv::Rect FaceTracker::pickBestDet(const std::vector<FaceDet>& dets) {
-    if (dets.empty()) {
-        return cv::Rect();
-    }
-    const FaceDet* best = &dets[0];
-    for (const auto& d : dets) {
-        if (d.score > best->score) {
-            best = &d;
-        }
-    }
-    return best->bbox;
-}
-
-bool FaceTracker::detectWithYuNet(const cv::Mat& frame, float& dx_n, float& dy_n) {
-    int proc_w = 0;
-    int proc_h = 0;
-    computeProcSize(frame.cols, frame.rows, FACE_PROC_MAX_W, proc_w, proc_h);
-
-    cv::Mat proc_bgr;
-    if (proc_w != frame.cols || proc_h != frame.rows) {
-        cv::resize(frame, proc_bgr, cv::Size(proc_w, proc_h), 0, 0, cv::INTER_AREA);
-    } else {
-        proc_bgr = frame;
-    }
-
-    std::vector<FaceDet> dets;
-    runYuNet(proc_bgr, cv::Rect(), dets);
-
-    if (dets.empty() && has_last_bbox_) {
-        const cv::Rect roi = expandRoi(last_face_bbox_, FACE_ROI_PAD_RATIO, frame.size());
-        cv::Rect proc_roi;
-        const float sx = static_cast<float>(proc_w) / static_cast<float>(frame.cols);
-        const float sy = static_cast<float>(proc_h) / static_cast<float>(frame.rows);
-        proc_roi = cv::Rect(
-            static_cast<int>(roi.x * sx),
-            static_cast<int>(roi.y * sy),
-            static_cast<int>(roi.width * sx),
-            static_cast<int>(roi.height * sy));
-        runYuNet(proc_bgr, proc_roi, dets);
-    }
-
-    const cv::Rect face_proc = pickBestDet(dets);
-    if (face_proc.area() <= 0) {
-        return false;
-    }
-
-    const cv::Rect face_disp = mapProcRectToFrame(
-        face_proc, proc_w, proc_h, frame.cols, frame.rows);
-    last_face_bbox_ = face_disp;
-    has_last_bbox_ = true;
-
-    const float face_cx = face_disp.x + face_disp.width / 2.0f;
-    const float face_cy = face_disp.y + face_disp.height / 2.0f;
-    const float cx_img = frame.cols / 2.0f;
-    const float cy_img = frame.rows / 2.0f;
-    dx_n = (face_cx - cx_img) / (frame.cols / 2.0f);
-    dy_n = (face_cy - cy_img) / (frame.rows / 2.0f);
-    return true;
 }
 
 void FaceTracker::publishNeck(float yaw_rad, float pitch_rad) {
@@ -494,7 +304,7 @@ void FaceTracker::trackFrame(const cv::Mat& frame) {
         float face_cy = 0.0f;
         found = mp_bridge_.detect(frame, dx_n, dy_n, face_cx, face_cy);
     } else {
-        found = detectWithYuNet(frame, dx_n, dy_n);
+        found = false;
     }
 
     if (found) {

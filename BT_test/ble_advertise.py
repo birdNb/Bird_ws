@@ -51,17 +51,14 @@ def main() -> int:
     signal.signal(signal.SIGINT, _stop)
     signal.signal(signal.SIGTERM, _stop)
 
-    if not start_advertising(hci, name, plat, log=print):
+    if not start_advertising(hci, name, plat, log=print, keepalive=not args.once):
         return 1
     if args.once:
         return 0
 
-    print("持续广播，Ctrl+C 停止…", flush=True)
+    print("持续广播（保活重发），Ctrl+C 停止…", flush=True)
     while not stopping:
-        time.sleep(25)
-        if stopping:
-            break
-        start_advertising(hci, name, plat, log=print)
+        time.sleep(1)
 
     stop_advertising(hci)
     print("已停止", flush=True)

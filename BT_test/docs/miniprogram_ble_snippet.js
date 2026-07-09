@@ -87,22 +87,27 @@ Page({
   },
 
   startScan() {
-    wx.startBluetoothDevicesDiscovery({
-      services: [SERVICE_UUID],
+    const isIos = isIOS()
+    const opts = {
       allowDuplicatesKey: true,
       success: () => {
         wx.onBluetoothDeviceFound((res) => {
           res.devices.forEach((d) => {
             if (this.data.deviceId) return
             const name = (d.name || d.localName || '').toLowerCase()
-            if (!name.includes('bird_ble') && !uuidHit((d.advertisServiceUUIDs || [])[0], 'ffe0')) return
+            const uuids = d.advertisServiceUUIDs || []
+            const serviceHit = uuids.some((u) => uuidHit(u, 'ffe0'))
+            if (!name.includes('ht_') && !name.includes('bird_ble') && !serviceHit) return
             this.setData({ deviceId: d.deviceId })
             wx.stopBluetoothDevicesDiscovery({})
             this.establishBleLink(d.deviceId)
           })
         })
       },
-    })
+    }
+    // iOS 用 services 过滤常漏扫；先全量扫再按 HT_ 过滤
+    if (!isIos) opts.services = [SERVICE_UUID]
+    wx.startBluetoothDevicesDiscovery(opts)
   },
 
   async establishBleLink(deviceId) {
@@ -111,6 +116,7 @@ Page({
     if (wx.setBLEMTU) wx.setBLEMTU({ deviceId, mtu: 247 })
     await this._discoverGatt(deviceId)
     await this._subscribeNotify(deviceId)
+    await delay(isIOS() ? 350 : 150)
     await this._write('M_default', true)
     await delay(300)
     this.setData({ gattReady: true })
@@ -220,6 +226,7 @@ Page({
       this.setData({ targetName: text.slice(7) })
       return
     }
+    if (text.startsWith('ip:')) {
       this.setData({ robotIp: text.slice(3) })
       return
     }

@@ -284,6 +284,8 @@ class BleGattServer:
         self._adv_index = 0
         self._adv_reregister_pending = False
         self._adv_registered = False
+        self._notify_active = False
+        self._pending_notifies: List[bytes] = []
 
         dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
         self.bus = dbus.SystemBus()
@@ -313,10 +315,21 @@ class BleGattServer:
             log_info(f"      写入 UUID: {WRITE_CHAR_UUID}")
         return False
 
+    def _trust_device(self, path: str) -> None:
+        """部分手机（尤其 Android）未 Trusted 时 GATT 写入/订阅会失败。"""
+        try:
+            props = dbus.Interface(
+                self.bus.get_object(BLUEZ_SERVICE, path), DBUS_PROP_IFACE
+            )
+            props.Set(DEVICE_IFACE, "Trusted", dbus.Boolean(True))
+        except dbus.exceptions.DBusException:
+            pass
+
     def _on_phone_connected(self, path: str) -> None:
         if path in self._connected_devices:
             return
         self._connected_devices.add(path)
+        self._trust_device(path)
         label = self._device_label(path)
         log_info(f"*** 手机已连接: {label} ***")
         log_info("    等待 FFE1 写入（握手 M_default）")
@@ -336,6 +349,8 @@ class BleGattServer:
         if self._ros_bridge is not None:
             self._ros_bridge.on_disconnect()
         if not self._connected_devices:
+            self._notify_active = False
+            self._pending_notifies.clear()
             self._schedule_restart_advertising()
 
     @staticmethod
@@ -351,14 +366,13 @@ class BleGattServer:
         return "AlreadyExists" in text or "Already Exists" in text
 
     def _refresh_advertising_after_disconnect(self, hci_dev: str = "hci0") -> None:
-        """断连后恢复可扫描：广播 D-Bus 对象通常仍注册，重开 advertising 并刷新广播包。"""
+        """断连后恢复可扫描。Realtek 禁止 btmgmt advertising on。"""
         self._run_btmgmt("le", "on")
         self._run_btmgmt("connectable", "on")
-        self._run_btmgmt("advertising", "on")
 
         def _worker() -> None:
             try:
-                self._patch_le_adv_data(hci_dev=hci_dev)
+                self._patch_le_adv_data(hci_dev=hci_dev, force=True, initial_delay=0.2)
                 log_info(f"断连后 BLE 广播已恢复: {self.name}")
             except Exception as e:
                 log_warn(f"断连后刷新广播包失败: {e}")
@@ -380,8 +394,14 @@ class BleGattServer:
             return False
 
         hci_dev = self._adapter_path.split("/")[-1] if self._adapter_path else "hci0"
+        plat = detect_platform() if detect_platform else None
 
-        # 常见情况：断连后 BlueZ 仍保留 Advertisement 注册 → 直接 Register 会 AlreadyExists
+        if plat is not None and plat.adv_mode == "legacy_hci":
+            log_info("断连后恢复 Legacy HCI 广播...")
+            self._refresh_advertising_after_disconnect(hci_dev)
+            return False
+
+        # Orin：断连后 BlueZ 仍可能保留 Advertisement 注册
         if self._adv_registered or self._adv_manager is None:
             log_info("断连后恢复 BLE 可扫描状态...")
             self._refresh_advertising_after_disconnect(hci_dev)
@@ -529,6 +549,13 @@ class BleGattServer:
 
         self._msg_count += 1
 
+        try:
+            preview = data.decode("utf-8", errors="replace").strip()[:80]
+        except Exception:
+            preview = data[:24].hex()
+        if preview and not (len(data) >= 3 and data[0] == 0x0B):
+            log_rx(f"FFE1 ← {preview}")
+
         # 小程序语音：FFE1 二进制 [0x0B, seq_hi, seq_lo, pcm...]
         if len(data) >= 3 and data[0] == 0x0B:
             if self._voice is not None:
@@ -545,9 +572,22 @@ class BleGattServer:
         GLib.idle_add(self._do_notify, data)
 
     def _do_notify(self, data: bytes) -> bool:
-        if self._notify_chrc is not None:
-            self._notify_chrc.notify(data)
+        if self._notify_chrc is None:
+            return False
+        if not self._notify_active:
+            self._pending_notifies.append(data)
+            if len(self._pending_notifies) > 16:
+                self._pending_notifies.pop(0)
+            return False
+        self._notify_chrc.notify(data)
         return False
+
+    def _flush_pending_notifies(self) -> None:
+        pending = list(self._pending_notifies)
+        self._pending_notifies.clear()
+        for payload in pending:
+            if self._notify_chrc is not None:
+                self._notify_chrc.notify(payload)
 
     def _send_ack(self, wire: str) -> None:
         if not self.echo or self._notify_chrc is None:
@@ -707,11 +747,15 @@ class BleGattServer:
         threading.Thread(target=_patch_and_finish, daemon=True).start()
 
     def _on_notify_start(self) -> None:
+        self._notify_active = True
         log_info("手机已订阅 FFE2 notify")
+        self._flush_pending_notifies()
         if self._telemetry is not None:
             self._telemetry.on_subscribed()
 
     def _on_notify_stop(self) -> None:
+        self._notify_active = False
+        self._pending_notifies.clear()
         log_info("手机已取消 notify 订阅")
         if self._telemetry is not None:
             self._telemetry.on_unsubscribed()
@@ -820,6 +864,7 @@ class BleGattServer:
                 platform=plat,
                 force=force,
                 log=log_info,
+                keepalive=True,
             )
             return
         log_warn("[adv] ble_legacy_adv 未加载，跳过广播刷新")

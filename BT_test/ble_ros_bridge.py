@@ -57,6 +57,7 @@ AXIS_DPAD_Y = 7
 BTN_A = 0
 BTN_B = 1
 BTN_X = 2
+BTN_Y = 3
 BTN_LB = 4
 BTN_RB = 5
 BTN_BACK = 6
@@ -85,6 +86,9 @@ MODE_LABELS: Dict[str, str] = {
 FSM_INIT = 0
 FSM_ERROR = 1
 FSM_PROTECTION = 8
+
+# 倒地/保护态：禁止关步态；起立前先开步态
+RECOVERY_FSM_STATES = frozenset({FSM_PROTECTION, FSM_ERROR})
 FSM_CANDIDATE_DEFAULT = 2
 FSM_CANDIDATE_CUSTOM = 3
 FSM_CANDIDATE_REMOTE = 4
@@ -120,15 +124,30 @@ ACTION_COMMANDS: Dict[str, Tuple[str, str]] = {
     "lt+rt+b": ("卸力", "lt+rt+b"),
     "rt+a": ("挥双手", "rt+a"),
     "rt+x": ("挥单手", "rt+x"),
+    # policy_change_config（custom_action.yaml）
+    "a": ("小脚踢球", "a"),                 # byd_small_kick
+    "x": ("秀肌肉", "x"),                   # byd_power
+    "lt+rt+dpu": ("byd_bb", "lt+rt+dpu"),   # byd_bb
+    "lt+rt+dpr": ("猪猪侠", "lt+rt+dpr"),   # byd_zzx
+    "lt+dpr": ("踢腿", "lt+dpr"),           # byd_zhidengtui
+    "lt+dpd": ("重拳", "lt+dpd"),           # byd_zhongquan
+    "lt+dpl": ("上勾拳", "lt+dpl"),         # byd_shanggouquan
 }
 
 # 步态 GAIT ON/OFF → 底层仍发 lt+rt+lb 组合键
 GAIT_JOY_KEY = "lt+rt+lb"
 
-# 自定义动作：短脉冲触发（对应 custom_action.yaml 的 cheer/hello）
+# 自定义动作：短脉冲触发（multi_waypoint + policy_change_config）
 PULSE_CUSTOM_ACTIONS = {
     "rt+a": "挥双手",
     "rt+x": "挥单手",
+    "a": "小脚踢球",
+    "x": "秀肌肉",
+    "lt+rt+dpu": "byd_bb",
+    "lt+rt+dpr": "猪猪侠",
+    "lt+dpr": "踢腿",
+    "lt+dpd": "重拳",
+    "lt+dpl": "上勾拳",
 }
 
 BUTTON_PRESS = 1.0
@@ -312,18 +331,26 @@ def _joy_from_keys(keys: Set[str], pressed: bool):
         "↓": "dpad_vertical",
     }
     for key in keys:
-        attr = field_map.get(key)
-        if attr is None:
-            continue
-        if key == "→":
-            setattr(msg, attr, -1.0 if pressed else 0.0)
+        if key == "dpu":
+            msg.dpad_vertical = 1.0 if pressed else 0.0
+        elif key == "dpd":
+            msg.dpad_vertical = -1.0 if pressed else 0.0
+        elif key == "dpl":
+            msg.dpad_horizontal = 1.0 if pressed else 0.0
+        elif key == "dpr":
+            msg.dpad_horizontal = -1.0 if pressed else 0.0
+        elif key == "→":
+            msg.dpad_horizontal = -1.0 if pressed else 0.0
         elif key == "←":
-            setattr(msg, attr, 1.0 if pressed else 0.0)
+            msg.dpad_horizontal = 1.0 if pressed else 0.0
         elif key == "↑":
-            setattr(msg, attr, 1.0 if pressed else 0.0)
+            msg.dpad_vertical = 1.0 if pressed else 0.0
         elif key == "↓":
-            setattr(msg, attr, -1.0 if pressed else 0.0)
+            msg.dpad_vertical = -1.0 if pressed else 0.0
         else:
+            attr = field_map.get(key)
+            if attr is None:
+                continue
             setattr(msg, attr, _joy_key_value(key, pressed))
     return msg
 
@@ -361,20 +388,22 @@ def _sensor_joy_from_keys(keys: Set[str], pressed: bool):
             msg.buttons[BTN_A] = 1
         elif key == "x":
             msg.buttons[BTN_X] = 1
+        elif key == "y":
+            msg.buttons[BTN_Y] = 1
         elif key == "lb":
             msg.buttons[BTN_LB] = 1
         elif key == "back":
             msg.buttons[BTN_BACK] = 1
         elif key == "center":
             msg.buttons[BTN_CENTER] = 1
-        elif key in ("→", "right"):
-            msg.axes[AXIS_DPAD_X] = -1.0
-        elif key in ("←", "left"):
-            msg.axes[AXIS_DPAD_X] = 1.0
-        elif key in ("↑", "up"):
+        elif key in ("↑", "up", "dpu"):
             msg.axes[AXIS_DPAD_Y] = 1.0
-        elif key in ("↓", "down"):
+        elif key in ("↓", "down", "dpd"):
             msg.axes[AXIS_DPAD_Y] = -1.0
+        elif key in ("←", "left", "dpl"):
+            msg.axes[AXIS_DPAD_X] = 1.0
+        elif key in ("→", "right", "dpr"):
+            msg.axes[AXIS_DPAD_X] = -1.0
     return msg
 
 
@@ -442,6 +471,8 @@ class BleRosBridge:
         self._publish_zero_twist()
         self._flush_joy_release("rt+a")
         self._flush_joy_release("rt+x")
+        for key in PULSE_CUSTOM_ACTIONS:
+            self._flush_joy_release(key)
         self._log("[ros] 断连急停：零速")
 
     def handle_command(self, kind: str, text: str) -> None:
@@ -570,7 +601,7 @@ class BleRosBridge:
         if target is None or age > CMD_VEL_TIMEOUT_SEC:
             with self._lock:
                 self._stick_filtered = None
-            self._publish_zero_twist()
+            # 无摇杆输入时不发 /cmd_vel，避免零速抢占 sim2real 倒地起立
             return
         with self._lock:
             filtered = self._ema_stick(target, self._stick_filtered)
@@ -943,7 +974,16 @@ class BleRosBridge:
         self._last_action_ts[action_key] = now
 
         label, combo = ACTION_COMMANDS[action_key]
-        self._log(f"[ros] 动作 {label}: {combo} → /joy ({COMBO_HOLD_SEC}s)")
+        steps = [combo]
+        step_gap = STEP_GAP_SEC
+        if action_key == "lt+rt+start" and self._last_fsm_state in RECOVERY_FSM_STATES:
+            steps = [GAIT_JOY_KEY, combo]
+            label = "起立(先开步态)"
+            step_gap = MENU_STEP_GAP_SEC
+
+        self._log(
+            f"[ros] 动作 {label}: {' → '.join(steps)} → /joy ({COMBO_HOLD_SEC}s)"
+        )
         self._publish_zero_twist()
         with self._lock:
             self._stick_target = None
@@ -951,13 +991,23 @@ class BleRosBridge:
 
         threading.Thread(
             target=self._run_steps,
-            args=([combo], label, COMBO_HOLD_SEC),
+            args=(steps, label, COMBO_HOLD_SEC),
+            kwargs={"step_gap": step_gap},
             daemon=True,
         ).start()
 
     def _trigger_gait(self, state: str) -> None:
         """GAIT ON/OFF → /joy 发送 lt+rt+lb（步态启停）。"""
         if state not in ("ON", "OFF"):
+            return
+        if state == "OFF" and self._last_fsm_state in RECOVERY_FSM_STATES:
+            fsm_name = FSM_STATE_NAMES.get(
+                self._last_fsm_state, str(self._last_fsm_state)
+            )
+            self._log(
+                f"[ros] 拒绝 GAIT OFF：FSM={self._last_fsm_state}({fsm_name})，"
+                "倒地/保护态需保持步态以便起立"
+            )
             return
         now = time.monotonic()
         if now - self._last_action_ts.get(GAIT_JOY_KEY, 0.0) < ACTION_COOLDOWN_SEC:

@@ -32,11 +32,29 @@ ACTION_WIRE = {
     "lt+rt+b": "LT+RT+B",
     "rt+a": "RT+A",
     "rt+x": "RT+X",
+    # policy_change_config（custom_action.yaml）
+    "a": "A",
+    "x": "X",
+    "lt+rt+dpu": "LT+RT+DPU",
+    "lt+rt+dpr": "LT+RT+DPR",
+    "lt+dpr": "LT+DPR",
+    "lt+dpd": "LT+DPD",
+    "lt+dpl": "LT+DPL",
 }
 ACTION_RE = re.compile(
-    r"^(LT\+RT\+start|LT\+RT\+RB|LT\+RT\+B|RT\+A|RT\+X)$",
+    r"^(LT\+RT\+start|LT\+RT\+RB|LT\+RT\+B|RT\+A|RT\+X|"
+    r"LT\+RT\+DPU|LT\+RT\+DPR|LT\+DPR|LT\+DPD|LT\+DPL|"
+    r"A|X)$",
     re.IGNORECASE,
 )
+# 短脉冲自定义/策略动作：防连发窗口（秒）
+PULSE_ACTION_COOLDOWN_SEC = 8.0
+PULSE_ACTION_KEYS = frozenset({
+    "rt+a", "rt+x",
+    "a", "x",
+    "lt+rt+dpu", "lt+rt+dpr",
+    "lt+dpr", "lt+dpd", "lt+dpl",
+})
 NECK_OFFSET_RE = re.compile(r"^[Pp]([+-]?\d+)Y([+-]?\d+)$")
 NECK_CENTER_RE = re.compile(r"^neck0$", re.IGNORECASE)
 LOCATE_FACE_RE = re.compile(r"^locate_face\s+(ON|OFF)$", re.IGNORECASE)
@@ -296,9 +314,25 @@ class CommandDispatcher:
                 self._log_warn(f"rename 处理失败: {e}")
             return
 
+        # 模式指令同步处理并立即 ACK，避免握手 M_default 排队卡住
+        if kind == CommandKind.MODE:
+            self._log_rx(f"mode: {wire}")
+            try:
+                self._handle(kind, payload)
+            except Exception as e:
+                self._log_warn(f"模式处理失败: {e}")
+                return
+            if self._ack is not None:
+                self._ack(wire)
+            return
+
         if kind == CommandKind.ACTION:
             now = time.monotonic()
-            window = 8.0 if payload == "rt+a" else 1.5
+            window = (
+                PULSE_ACTION_COOLDOWN_SEC
+                if payload in PULSE_ACTION_KEYS
+                else 1.5
+            )
             if now - self._recent_action_ts.get(payload, 0.0) < window:
                 return
             self._recent_action_ts[payload] = now

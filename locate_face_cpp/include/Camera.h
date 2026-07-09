@@ -12,8 +12,13 @@ public:
     int frameHeight() const { return frame_h_; }
 
 private:
+    bool openAnyCamera();
+    bool tryOpenIndex(int index);
+    bool looksLikeColor(const cv::Mat& frame) const;
+
     cv::VideoCapture cap_;
     bool is_opened_ = false;
+    int camera_index_ = -1;
     int frame_w_ = 0;
     int frame_h_ = 0;
 };

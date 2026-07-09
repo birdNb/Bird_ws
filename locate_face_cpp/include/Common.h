@@ -9,13 +9,17 @@
 #include <opencv2/opencv.hpp>
 #include <ros/ros.h>
 
-// ----- 相机 (ZED Mini 左眼, 对齐 locate_face.py) -----
-constexpr int CAMERA_INDEX = 0;
-constexpr int CAMERA_WIDTH = 2560;
-constexpr int CAMERA_HEIGHT = 720;
-constexpr int CAMERA_TARGET_FPS = 30;
-constexpr bool ZED_STEREO = true;
-constexpr int PROC_MAX_W = 960;
+// ----- 相机 (D435i RGB，V4L2 /dev/video4) -----
+// D435i 上经实测:
+//   - /dev/video2: 红外流 (有点阵), 不适合头追
+//   - /dev/video4: YUYV 彩色流
+// 框架默认使用 640x480@15fps，既有彩色又比较稳定。
+constexpr int CAMERA_INDEX = 4;
+constexpr int CAMERA_WIDTH = 640;
+constexpr int CAMERA_HEIGHT = 480;
+constexpr int CAMERA_TARGET_FPS = 15;
+constexpr bool ZED_STEREO = false;
+constexpr int PROC_MAX_W = 640;
 
 // ----- 人脸检测 / 控制 (对齐 locate_face.py) -----
 constexpr int FACE_PROC_MAX_W = PROC_MAX_W;
