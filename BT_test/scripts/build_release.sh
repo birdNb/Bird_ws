@@ -3,8 +3,8 @@
 set -euo pipefail
 
 SRC_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-OUT_DIR="$(cd "${SRC_DIR}/.." && pwd)/BT_Control_0709"
-VERSION="0709"
+OUT_DIR="$(cd "${SRC_DIR}/.." && pwd)/BT_Control_0710"
+VERSION="0710"
 PY_FILES=(
   ble_gatt_server.py
   ble_ros_bridge.py
@@ -225,7 +225,7 @@ UNINSTALL_EOF
 chmod +x "${OUT_DIR}/install.sh" "${OUT_DIR}/uninstall.sh"
 
 cat >"${OUT_DIR}/README.md" <<'README_EOF'
-# Bird BLE 遥控安装包 (BT_Control_0709)
+# Bird BLE 遥控安装包 (BT_Control_0710)
 
 微信小程序 BLE 从机，适配 **Jetson Orin（USB 蓝牙）** 与 **RK3588s（板载 RTL8822CE）**。
 
@@ -234,7 +234,7 @@ cat >"${OUT_DIR}/README.md" <<'README_EOF'
 ## 一键安装
 
 ```bash
-cd BT_Control_0709
+cd BT_Control_0710
 sudo ./install.sh
 ```
 
@@ -259,7 +259,7 @@ sudo ./install.sh
 ## 目录结构
 
 ```
-BT_Control_0709/
+BT_Control_0710/
   install.sh / uninstall.sh   # 一键安装
   README.md / VERSION
   ble_device_name.conf        # 蓝牙广播名
