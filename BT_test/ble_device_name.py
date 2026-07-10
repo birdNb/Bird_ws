@@ -10,7 +10,16 @@ from typing import Optional, Tuple
 
 DEFAULT_BLE_NAME = "HT_88888888"
 BLE_NAME_PREFIX = "HT_"
-_NAME_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ble_device_name.conf")
+
+
+def _name_file_path() -> str:
+    env_file = os.environ.get("BLE_DEVICE_NAME_FILE")
+    if env_file:
+        return env_file
+    pkg = os.environ.get("PKG_DIR")
+    if pkg:
+        return os.path.join(pkg, "ble_device_name.conf")
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "ble_device_name.conf")
 
 RENAME_RE = re.compile(r"^rename\s+HT_(\d{8})$", re.IGNORECASE)
 BLE_NAME_RE = re.compile(r"^HT_(\d{8})$", re.IGNORECASE)
@@ -44,7 +53,7 @@ def parse_rename_command(text: str) -> Optional[Tuple[str, str]]:
 
 def load_ble_name() -> str:
     try:
-        with open(_NAME_FILE, encoding="utf-8") as f:
+        with open(_name_file_path(), encoding="utf-8") as f:
             line = f.readline().strip()
         parsed = parse_ble_name(line)
         if parsed:
@@ -58,7 +67,8 @@ def save_ble_name(name: str) -> None:
     parsed = parse_ble_name(name)
     if not parsed:
         return
-    tmp = f"{_NAME_FILE}.tmp"
+    name_file = _name_file_path()
+    tmp = f"{name_file}.tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         f.write(parsed + "\n")
-    os.replace(tmp, _NAME_FILE)
+    os.replace(tmp, name_file)

@@ -907,8 +907,9 @@ class BleGattServer:
         if self._ros_bridge.start():
             log_info("ROS 控制桥接已启动（/cmd_vel + /joy_msg）")
         else:
-            log_warn("ROS 桥接启动失败")
-            self._ros_bridge = None
+            log_warn(
+                "ROS 桥接等待 roscore 中（后台继续重试，roscore 就绪后指令自动生效）"
+            )
 
     def _start_dispatcher(self) -> None:
         try:

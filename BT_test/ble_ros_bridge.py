@@ -183,10 +183,12 @@ FSM_STATE_NAMES = {
 
 def _bootstrap_ros_python_path() -> None:
     """sudo 下 PYTHONPATH 可能丢失，补全 ROS / sim2real_msg 路径。"""
+    home = os.environ.get("BIRD_HOME") or os.path.expanduser("~")
+    ws = os.environ.get("SIM2REAL_WS") or os.path.join(home, "sim2real")
     extra = [
         "/opt/ros/noetic/lib/python3/dist-packages",
-        os.path.expanduser("~/sim2real/devel/lib/python3/dist-packages"),
-        os.path.expanduser("~/sim2real/install/lib/python3/dist-packages"),
+        os.path.join(ws, "devel/lib/python3/dist-packages"),
+        os.path.join(ws, "install/lib/python3/dist-packages"),
     ]
     for p in extra:
         if os.path.isdir(p) and p not in sys.path:
@@ -453,7 +455,11 @@ class BleRosBridge:
             return self.ready
         self._ros_thread = threading.Thread(target=self._ros_main, daemon=True)
         self._ros_thread.start()
-        return self._ready.wait(timeout=8.0)
+        # 开机 roscore 可能晚于 bird-ble，最长等待 120s
+        if self._ready.wait(timeout=120.0):
+            return True
+        self._log("[ros][warn] roscore 未在 120s 内就绪，后台继续等待…")
+        return False
 
     def stop(self) -> None:
         self._stop.set()
@@ -493,7 +499,7 @@ class BleRosBridge:
 
     def handle_text(self, text: str) -> None:
         if not self.ready:
-            self._log("[ros] 桥接未就绪，忽略指令")
+            self._log("[ros] 桥接未就绪（等待 roscore），忽略指令")
             return
 
         cmd = self._parser.parse(text)
@@ -519,11 +525,19 @@ class BleRosBridge:
             return
 
         self._Twist = Twist
-        try:
-            rospy.init_node("ble_command_bridge", anonymous=True, disable_signals=True)
-        except Exception as e:
-            self._log(f"[ros] 初始化失败: {e}")
-            return
+        init_deadline = time.monotonic() + 180.0
+        while not self._stop.is_set():
+            try:
+                rospy.init_node(
+                    "ble_command_bridge", anonymous=True, disable_signals=True
+                )
+                break
+            except Exception as e:
+                if time.monotonic() >= init_deadline:
+                    self._log(f"[ros] 初始化失败（roscore 超时）: {e}")
+                    return
+                self._log("[ros] 等待 roscore…")
+                time.sleep(2.0)
 
         self._cmd_pub = rospy.Publisher("/cmd_vel", Twist, queue_size=1)
         self._sensor_joy_pub = rospy.Publisher("/joy", SensorJoy, queue_size=1)
