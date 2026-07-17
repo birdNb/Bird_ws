@@ -57,6 +57,7 @@ X:{x},Y:{y},Z:{z},N:{seq}    # 可选序号，20Hz 保活
 
 ### 1.3 组合键与自定义动作
 
+**通用手柄识别：** 任意合法手柄组合键文本（如 `RT+Y`、`LT+RT+DPU`）均经 `ble_gamepad` 解析后，由板端**模拟实体手柄**发布到 `/joy_msg`，而非文本话题转发。`custom_action.yaml` 中新增的 `key` 组合键会自动识别。
 
 | 功能     | 指令            | 底层组合键（`/joy_msg`）         |
 | ------ | ------------- | ------------------------- |
@@ -65,6 +66,8 @@ X:{x},Y:{y},Z:{z},N:{seq}    # 可选序号，20Hz 保活
 | 卸力     | `LT+RT+B`     | `lt+rt+b` 长按 1s           |
 | 挥双手    | `RT+A`        | `rt+a` 短脉冲 ~0.35s         |
 | 挥单手    | `RT+X`        | `rt+x` 短脉冲 ~0.35s         |
+| 握手     | `RT+Y`        | `rt+y` 短脉冲 ~0.35s         |
+| 摇手防守   | `RT+B`        | `rt+b` 短脉冲 ~0.35s         |
 | 小脚踢球   | `A`           | `a` 短脉冲（`byd_small_kick`） |
 | 秀肌肉    | `X`           | `x` 短脉冲（`byd_power`）      |
 | byd_bb | `LT+RT+DPU`   | `lt+rt+dpu` 短脉冲           |
@@ -318,6 +321,8 @@ fsm:5
 | `LT+RT+B`         | 动作   | `lt+rt+b` 1s     | `/joy_msg` 卸力                       | `ACK:LT+RT+B`         |                           |
 | `RT+A`            | 动作   | `rt+a` 短脉冲       | `/joy_msg` 挥双手                      | `ACK:RT+A`            | 冷却 8s                     |
 | `RT+X`            | 动作   | `rt+x` 短脉冲       | `/joy_msg` 挥单手                      | `ACK:RT+X`            | 冷却 8s                     |
+| `RT+Y`            | 动作   | `rt+y` 短脉冲       | `/joy_msg` 握手                        | `ACK:RT+Y`            | 冷却 8s                     |
+| `RT+B`            | 动作   | `rt+b` 短脉冲       | `/joy_msg` 摇手防守                      | `ACK:RT+B`            | 冷却 8s                     |
 | `A`               | 自定义  | `a` 短脉冲          | `/joy_msg` `byd_small_kick`         | `ACK:A`               | 冷却 8s                     |
 | `X`               | 自定义  | `x` 短脉冲          | `/joy_msg` `byd_power`              | `ACK:X`               | 冷却 8s                     |
 | `LT+RT+DPU`       | 自定义  | `lt+rt+dpu`      | `/joy_msg` `byd_bb`                 | `ACK:LT+RT+DPU`       | 冷却 8s                     |
@@ -371,6 +376,7 @@ fsm:5
 | 模块        | 文件                           | 职责                    |
 | --------- | ---------------------------- | --------------------- |
 | 指令分类      | `ble_command_dispatcher.py`  | FFE1 文本 → 类型 + wire   |
+| 手柄解析      | `ble_gamepad.py`             | 组合键识别、custom_action 加载 |
 | GATT / 握手 | `ble_gatt_server.py`         | 连接、FFE2 notify、rename |
 | ROS 桥接    | `ble_ros_bridge.py`          | 摇杆、模式、动作、步态、疾跑        |
 | 脖子        | `ble_neck_bridge.py`         | `P{n}Y{m}` / `neck0`  |

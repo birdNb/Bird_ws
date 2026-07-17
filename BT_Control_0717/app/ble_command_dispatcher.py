@@ -26,35 +26,8 @@ STICK_RE = re.compile(
 )
 MODE_RE = re.compile(r"^M_(default|init|protect|resetzero|tech)$", re.IGNORECASE)
 
-ACTION_WIRE = {
-    "lt+rt+start": "LT+RT+start",
-    "lt+rt+rb": "LT+RT+RB",
-    "lt+rt+b": "LT+RT+B",
-    "rt+a": "RT+A",
-    "rt+x": "RT+X",
-    # policy_change_config（custom_action.yaml）
-    "a": "A",
-    "x": "X",
-    "lt+rt+dpu": "LT+RT+DPU",
-    "lt+rt+dpr": "LT+RT+DPR",
-    "lt+dpr": "LT+DPR",
-    "lt+dpd": "LT+DPD",
-    "lt+dpl": "LT+DPL",
-}
-ACTION_RE = re.compile(
-    r"^(LT\+RT\+start|LT\+RT\+RB|LT\+RT\+B|RT\+A|RT\+X|"
-    r"LT\+RT\+DPU|LT\+RT\+DPR|LT\+DPR|LT\+DPD|LT\+DPL|"
-    r"A|X)$",
-    re.IGNORECASE,
-)
-# 短脉冲自定义/策略动作：防连发窗口（秒）
+# 手柄组合键冷却：短脉冲动作防连发（秒）
 PULSE_ACTION_COOLDOWN_SEC = 8.0
-PULSE_ACTION_KEYS = frozenset({
-    "rt+a", "rt+x",
-    "a", "x",
-    "lt+rt+dpu", "lt+rt+dpr",
-    "lt+dpr", "lt+dpd", "lt+dpl",
-})
 NECK_OFFSET_RE = re.compile(r"^[Pp]([+-]?\d+)Y([+-]?\d+)$")
 NECK_CENTER_RE = re.compile(r"^neck0$", re.IGNORECASE)
 LOCATE_FACE_RE = re.compile(r"^locate_face\s+(ON|OFF)$", re.IGNORECASE)
@@ -68,6 +41,12 @@ try:
     from ble_device_name import RENAME_RE as _RENAME_RE
 except ImportError:
     _RENAME_RE = re.compile(r"^rename\s+HT_(\d{8})$", re.IGNORECASE)
+
+try:
+    from ble_gamepad import classify_gamepad_text, is_pulse_combo
+except ImportError:
+    classify_gamepad_text = None  # type: ignore
+    is_pulse_combo = None  # type: ignore
 
 
 class CommandKind(str, Enum):
@@ -119,9 +98,12 @@ def classify_payload(text: str) -> Tuple[CommandKind, str, str]:
         wire = f"M_{suffix}"
         return CommandKind.MODE, wire.lower(), wire
 
-    if ACTION_RE.match(raw):
-        key = re.sub(r"\s+", "", raw).lower()
-        return CommandKind.ACTION, key, ACTION_WIRE.get(key, raw)
+    # 通用手柄组合键：模拟 /joy_msg 按键，不做文本话题转发
+    if classify_gamepad_text is not None:
+        gp = classify_gamepad_text(raw)
+        if gp is not None:
+            combo, wire = gp
+            return CommandKind.ACTION, combo, wire
 
     if NECK_CENTER_RE.match(raw):
         return CommandKind.NECK, "neck0", "neck0"
@@ -328,11 +310,12 @@ class CommandDispatcher:
 
         if kind == CommandKind.ACTION:
             now = time.monotonic()
-            window = (
-                PULSE_ACTION_COOLDOWN_SEC
-                if payload in PULSE_ACTION_KEYS
-                else 1.5
+            pulse = (
+                is_pulse_combo(payload)
+                if is_pulse_combo is not None
+                else payload in ("rt+a", "rt+x", "rt+y", "rt+b", "a", "x")
             )
+            window = PULSE_ACTION_COOLDOWN_SEC if pulse else 1.5
             if now - self._recent_action_ts.get(payload, 0.0) < window:
                 return
             self._recent_action_ts[payload] = now

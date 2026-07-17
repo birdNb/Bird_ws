@@ -117,30 +117,22 @@ MENU_CANDIDATES = (
     FSM_CANDIDATE_DEVELOP,
 )
 
-# 预选动作（长按 1s / 顶栏按钮）
+# 预选动作（长按 1s）；其余合法手柄组合键由 ble_gamepad 动态识别
 ACTION_COMMANDS: Dict[str, Tuple[str, str]] = {
     "lt+rt+start": ("起立", "lt+rt+start"),
     "lt+rt+rb": ("蹲下", "lt+rt+rb"),
     "lt+rt+b": ("卸力", "lt+rt+b"),
-    "rt+a": ("挥双手", "rt+a"),
-    "rt+x": ("挥单手", "rt+x"),
-    # policy_change_config（custom_action.yaml）
-    "a": ("小脚踢球", "a"),                 # byd_small_kick
-    "x": ("秀肌肉", "x"),                   # byd_power
-    "lt+rt+dpu": ("byd_bb", "lt+rt+dpu"),   # byd_bb
-    "lt+rt+dpr": ("猪猪侠", "lt+rt+dpr"),   # byd_zzx
-    "lt+dpr": ("踢腿", "lt+dpr"),           # byd_zhidengtui
-    "lt+dpd": ("重拳", "lt+dpd"),           # byd_zhongquan
-    "lt+dpl": ("上勾拳", "lt+dpl"),         # byd_shanggouquan
 }
 
 # 步态 GAIT ON/OFF → 底层仍发 lt+rt+lb 组合键
 GAIT_JOY_KEY = "lt+rt+lb"
 
-# 自定义动作：短脉冲触发（multi_waypoint + policy_change_config）
+# 短脉冲动作（multi_waypoint + policy_change）；完整列表见 ble_gamepad.PULSE_COMBOS
 PULSE_CUSTOM_ACTIONS = {
     "rt+a": "挥双手",
     "rt+x": "挥单手",
+    "rt+y": "握手",
+    "rt+b": "摇手防守",
     "a": "小脚踢球",
     "x": "秀肌肉",
     "lt+rt+dpu": "byd_bb",
@@ -157,6 +149,21 @@ TRIGGER_RELEASE = 1.0
 
 from ble_neck_bridge import NeckController
 from ble_motor_power_manager import MotorPowerController, POWER_TOPIC
+
+try:
+    from ble_gamepad import (
+        is_hold_combo,
+        is_pulse_combo,
+        label_for_combo,
+        load_combo_labels,
+        parse_gamepad_combo,
+    )
+except ImportError:
+    is_hold_combo = None  # type: ignore
+    is_pulse_combo = None  # type: ignore
+    label_for_combo = lambda c: c  # type: ignore
+    load_combo_labels = lambda: {}  # type: ignore
+    parse_gamepad_combo = None  # type: ignore
 
 LogFn = Callable[[str], None]
 
@@ -259,12 +266,20 @@ class BleCommandParser:
         return result
 
     def _extract_action(self, text: str) -> Optional[str]:
+        if parse_gamepad_combo is not None:
+            combo = parse_gamepad_combo(text)
+            if combo is not None:
+                return combo
         norm = _norm_token(text)
         if norm in ACTION_COMMANDS:
             return norm
         rest = STICK_RE.sub("", text)
         rest = re.sub(r"[,;|]", " ", rest)
         norm2 = _norm_token(rest)
+        if parse_gamepad_combo is not None:
+            combo2 = parse_gamepad_combo(norm2)
+            if combo2 is not None:
+                return combo2
         if norm2 in ACTION_COMMANDS:
             return norm2
         return None
@@ -475,9 +490,14 @@ class BleRosBridge:
         self._pulse_action_running.clear()
         self._set_sprint(False, log=False)
         self._publish_zero_twist()
-        self._flush_joy_release("rt+a")
-        self._flush_joy_release("rt+x")
-        for key in PULSE_CUSTOM_ACTIONS:
+        flush_keys = set(PULSE_CUSTOM_ACTIONS)
+        try:
+            from ble_gamepad import is_pulse_combo, known_gamepad_combos
+
+            flush_keys |= {c for c in known_gamepad_combos() if is_pulse_combo(c)}
+        except ImportError:
+            pass
+        for key in flush_keys:
             self._flush_joy_release(key)
         self._log("[ros] 断连急停：零速")
 
@@ -566,6 +586,7 @@ class BleRosBridge:
             self._has_joy = True
             self._log("[ros] 已启用 /cmd_vel + /joy + /joy_msg")
             self._log("[ros] 模式: M_default/M_init/M_protect/M_resetzero/M_tech")
+            self._log("[ros] 手柄: 任意组合键文本 → 模拟 /joy_msg（见 ble_gamepad）")
             self._log("[ros] 动作: LT+RT+start/RB/B | 步态: GAIT ON/OFF")
             self._log("[ros] 疾跑: LT ON/OFF → /joy_msg lt 按住（AMP 加速）")
         except ImportError:
@@ -976,27 +997,51 @@ class BleRosBridge:
         self._log_mode_result(label)
 
     def _trigger_action(self, action_key: str) -> None:
-        if action_key not in ACTION_COMMANDS:
+        combo = action_key
+        if parse_gamepad_combo is not None:
+            parsed = parse_gamepad_combo(action_key)
+            if parsed is None:
+                self._log(f"[ros] 非手柄组合键，忽略: {action_key}")
+                return
+            combo = parsed
+
+        labels = load_combo_labels()
+        label = labels.get(combo) or PULSE_CUSTOM_ACTIONS.get(combo) or label_for_combo(combo)
+
+        pulse = (
+            is_pulse_combo(combo)
+            if is_pulse_combo is not None
+            else combo in PULSE_CUSTOM_ACTIONS
+        )
+        if pulse:
+            self._trigger_pulse_action(combo, label=label)
             return
-        if action_key in PULSE_CUSTOM_ACTIONS:
-            self._trigger_pulse_action(action_key)
+
+        hold = (
+            is_hold_combo(combo)
+            if is_hold_combo is not None
+            else combo in ACTION_COMMANDS
+        )
+        if not hold:
+            # 未知组合：默认短脉冲，仍走 /joy_msg 模拟
+            self._log(f"[ros] 未分类手柄键 {combo}，按短脉冲模拟")
+            self._trigger_pulse_action(combo, label=label)
             return
 
         now = time.monotonic()
-        if now - self._last_action_ts.get(action_key, 0.0) < ACTION_COOLDOWN_SEC:
+        if now - self._last_action_ts.get(combo, 0.0) < ACTION_COOLDOWN_SEC:
             return
-        self._last_action_ts[action_key] = now
+        self._last_action_ts[combo] = now
 
-        label, combo = ACTION_COMMANDS[action_key]
         steps = [combo]
         step_gap = STEP_GAP_SEC
-        if action_key == "lt+rt+start" and self._last_fsm_state in RECOVERY_FSM_STATES:
+        if combo == "lt+rt+start" and self._last_fsm_state in RECOVERY_FSM_STATES:
             steps = [GAIT_JOY_KEY, combo]
             label = "起立(先开步态)"
             step_gap = MENU_STEP_GAP_SEC
 
         self._log(
-            f"[ros] 动作 {label}: {' → '.join(steps)} → /joy ({COMBO_HOLD_SEC}s)"
+            f"[ros] 动作 {label}: {' → '.join(steps)} → /joy_msg ({COMBO_HOLD_SEC}s)"
         )
         self._publish_zero_twist()
         with self._lock:
@@ -1042,25 +1087,34 @@ class BleRosBridge:
             daemon=True,
         ).start()
 
-    def _trigger_pulse_action(self, action_key: str) -> None:
-        label = PULSE_CUSTOM_ACTIONS[action_key]
+    def _trigger_pulse_action(self, action_key: str, label: Optional[str] = None) -> None:
+        combo = action_key
+        if parse_gamepad_combo is not None:
+            parsed = parse_gamepad_combo(action_key)
+            if parsed is not None:
+                combo = parsed
+        if label is None:
+            labels = load_combo_labels()
+            label = labels.get(combo) or PULSE_CUSTOM_ACTIONS.get(combo, combo)
         now = time.monotonic()
-        if action_key in self._pulse_action_running:
+        if combo in self._pulse_action_running:
             self._log(f"[ros] {label}执行中，忽略重复指令")
             return
-        if now - self._last_action_ts.get(action_key, 0.0) < CHEER_COOLDOWN_SEC:
+        if now - self._last_action_ts.get(combo, 0.0) < CHEER_COOLDOWN_SEC:
             self._log(f"[ros] {label}冷却中，忽略")
             return
-        self._last_action_ts[action_key] = now
-        self._pulse_action_running.add(action_key)
-        self._log(f"[ros] {label}: {action_key.upper()} 短脉冲 {CHEER_PULSE_SEC}s（单次触发）")
+        self._last_action_ts[combo] = now
+        self._pulse_action_running.add(combo)
+        self._log(
+            f"[ros] {label}: {combo} 短脉冲 {CHEER_PULSE_SEC}s → /joy_msg（模拟手柄）"
+        )
         self._publish_zero_twist()
         with self._lock:
             self._stick_target = None
             self._stick_filtered = None
         threading.Thread(
             target=self._run_pulse_action_once,
-            args=(action_key, label),
+            args=(combo, label),
             daemon=True,
         ).start()
 

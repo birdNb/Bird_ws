@@ -272,6 +272,10 @@ Page({
     this._lastCheerAt = now
     return this.sendCommand('RT+A')
   },
+  /** 握手（RT+Y 短脉冲，模拟手柄） */
+  sendHandshake() { return this.sendCommand('RT+Y') },
+  /** 摇手防守（RT+B 短脉冲，模拟手柄） */
+  sendWaveDefense() { return this.sendCommand('RT+B') },
   sendGaitOn() { return this.sendCommand('GAIT ON') },
   sendGaitOff() { return this.sendCommand('GAIT OFF') },
   /** 修改 BLE 广播名后8位，例如 sendRename('12345678') */

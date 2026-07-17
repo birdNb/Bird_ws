@@ -12,6 +12,7 @@ PY_FILES=(
   ble_gatt_server.py
   ble_ros_bridge.py
   ble_command_dispatcher.py
+  ble_gamepad.py
   ble_legacy_adv.py
   ble_status_telemetry.py
   ble_neck_bridge.py
