@@ -28,8 +28,9 @@
   ./run_torque_bridge.sh --no-arms
 
 注意:
-  仅在 FSM=EXEC_DEFAULT(5) 时发布 /cmd_vel。
+  仅在 FSM=EXEC_DEFAULT(5)=行走模式 时发布 /cmd_vel。
   做自定义动作(EXEC_CUSTOM 等)时自动静默，避免力矩误触发速度、打断动作配乐。
+  开机自启: sudo ./install-autostart.sh
 """
 
 from __future__ import annotations
@@ -190,7 +191,7 @@ def _pick_stronger(a: float, b: float) -> float:
 
 
 class FsmGate:
-    """仅 EXEC_DEFAULT(5) 允许发 /cmd_vel。"""
+    """仅 EXEC_DEFAULT(5)=行走模式 允许发 /cmd_vel。"""
 
     def __init__(self, topic: str = FSM_STATE_TOPIC):
         self._lock = threading.Lock()
@@ -322,8 +323,8 @@ class TorqueCmdVelBridge:
             )
         if require_fsm:
             rospy.loginfo(
-                "[torque_bridge] FSM 守门: 仅 EXEC_DEFAULT(5) 发 /cmd_vel "
-                "(做动作时自动静默，不打断配乐)"
+                "[torque_bridge] FSM 守门: 仅 EXEC_DEFAULT(5)=行走模式 发 /cmd_vel "
+                "(非行走/做动作时自动静默，不打断配乐)"
             )
 
     def _on_joint_state(self, msg: JointState) -> None:
