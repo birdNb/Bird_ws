@@ -87,9 +87,11 @@ Page({
   },
 
   startScan() {
-    const isIos = isIOS()
+    // 主广播含 128-bit FFE0，Scan Response 含设备名。
+    // 安卓勿用 services 过滤（微信部分机型仍漏扫）；统一全量扫再按名/UUID 过滤。
     const opts = {
       allowDuplicatesKey: true,
+      powerLevel: 'high',
       success: () => {
         wx.onBluetoothDeviceFound((res) => {
           res.devices.forEach((d) => {
@@ -97,7 +99,9 @@ Page({
             const name = (d.name || d.localName || '').toLowerCase()
             const uuids = d.advertisServiceUUIDs || []
             const serviceHit = uuids.some((u) => uuidHit(u, 'ffe0'))
-            if (!name.includes('ht_') && !name.includes('bird_ble') && !serviceHit) return
+            const nameHit = name.includes('ht_') || name.includes('bird_ble')
+              || name === TARGET_NAME.toLowerCase()
+            if (!nameHit && !serviceHit) return
             this.setData({ deviceId: d.deviceId })
             wx.stopBluetoothDevicesDiscovery({})
             this.establishBleLink(d.deviceId)
@@ -105,8 +109,6 @@ Page({
         })
       },
     }
-    // iOS 用 services 过滤常漏扫；先全量扫再按 HT_ 过滤
-    if (!isIos) opts.services = [SERVICE_UUID]
     wx.startBluetoothDevicesDiscovery(opts)
   },
 

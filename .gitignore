@@ -40,3 +40,10 @@ Miniconda3-*.sh
 
 # 大体积压缩包（语音包等本地保留，勿提交）
 *.tar.gz
+
+# Qwen3-TTS 本地部署（体积大、含模型与 venv，勿提交）
+Qwen3-TTS-Openai-Fastapi/
+Qwen3-TTS-Openai-Fastapi.tar.gz
+
+# git 损坏修复时的本地备份（勿提交）
+.git.bak-corrupt-*/

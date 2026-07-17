@@ -1,5 +1,5 @@
 [Unit]
-Description=Bird BLE GATT Remote Control (BT_test)
+Description=Bird BLE GATT Remote Control (BT_Control_0717)
 Documentation=file://@PKG_DIR@/docs/BLE_PROTOCOL.md
 After=bluetooth.service network-online.target
 Wants=bluetooth.service
