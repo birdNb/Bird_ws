@@ -77,8 +77,8 @@ class MotorPowerController:
             self._pending = cmd
         return True
 
-    def apply_immediate(self, action: str) -> bool:
-        """已就绪则立刻下发，否则入队等待 tick。"""
+    def apply_immediate(self, action: str, soft: bool = False) -> bool:
+        """已就绪则立刻下发，否则入队等待 tick。soft=True 时 OFF 少发且不碰 com_power。"""
         cmd = action.strip().upper()
         if cmd not in ("ON", "OFF"):
             return False
@@ -87,7 +87,7 @@ class MotorPowerController:
             if pub is None:
                 self._pending = cmd
                 return False
-        self._apply(cmd)
+        self._apply(cmd, soft=soft)
         return True
 
     def tick(self) -> None:
@@ -118,7 +118,7 @@ class MotorPowerController:
             time.sleep(0.05)
         return n
 
-    def _apply(self, action: str) -> None:
+    def _apply(self, action: str, soft: bool = False) -> None:
         if self._pub is None:
             self._log("[MP] 未就绪，忽略指令")
             return
@@ -143,18 +143,22 @@ class MotorPowerController:
         com = UInt8()
         com.data = 1 if on else 0
 
-        for i in range(MP_PUBLISH_BURST):
+        # soft OFF：单次主通道，避免连发/双通道冲击主节点
+        bursts = 1 if (soft and not on) else MP_PUBLISH_BURST
+        use_com = not (soft and not on)
+
+        for i in range(bursts):
             try:
                 self._pub.publish(msg)
             except Exception as e:
                 self._log(f"[MP] publish 失败: {e}")
                 break
-            if self._com_pub is not None:
+            if use_com and self._com_pub is not None:
                 try:
                     self._com_pub.publish(com)
                 except Exception:
                     pass
-            if i + 1 < MP_PUBLISH_BURST:
+            if i + 1 < bursts:
                 time.sleep(MP_PUBLISH_GAP_SEC)
 
         with self._lock:
@@ -166,6 +170,7 @@ class MotorPowerController:
         self._log(
             f"[MP] 电机电源已{'开启' if on else '关闭'} ({action})"
             f" | subscribers={conns}"
+            + (" | soft" if soft else "")
         )
         self._notify_state(on)
 

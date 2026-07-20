@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import os
 import re
+import subprocess
 import sys
 import threading
 import time
@@ -96,6 +97,7 @@ SAFE_POWER_OFF_FSM = frozenset({0, 1, 2, 3, 4, 8, 9, 12, 13, 15})
 # MP ON 后等待电机/驱动就绪再允许起立
 POWER_ON_SETTLE_SEC = 2.5
 POWER_OFF_UNLOAD_TIMEOUT_SEC = 3.5
+POWER_OFF_SETTLE_SEC = 1.5  # 卸力后再等一会再断电，降低主节点被带崩概率
 
 # 断电后禁止这些指令（会打 /joy_msg，易崩 sim2real_master / 模式显示）
 _POWER_GATED_KINDS = frozenset({"stick", "mode", "action", "gait", "sprint"})
@@ -461,6 +463,7 @@ class BleRosBridge:
         self._gait_listener = None
         self._joy_lock = threading.Lock()
         self._power_ready_at = 0.0
+        self._reviving_master = False
 
     @property
     def ready(self) -> bool:
@@ -563,23 +566,93 @@ class BleRosBridge:
         if not self._motor_power_ready_for_motion():
             left = max(0.0, self._power_ready_at - time.monotonic())
             return False, f"上电未就绪，请再等 {left:.1f}s"
-        # 模式/起立依赖主节点；已崩溃时继续发会反复踩坑
+        # 模式/起立依赖主节点；断电后主节点常被打崩，先尝试拉起再拒绝
         if kind in ("mode", "action", "gait") and not self._joy_path_alive():
+            if self._ensure_sim2real_master(timeout=15.0):
+                return True, ""
             return (
                 False,
-                "sim2real_master 未运行(/joy_msg 无订阅)，请重启 roslaunch 后再操作",
+                "sim2real_master 未运行且自动拉起失败，请在终端重新 roslaunch",
             )
         return True, ""
+
+    def _ensure_sim2real_master(self, timeout: float = 20.0) -> bool:
+        """断电后主节点常 SIGSEGV 退出；在参数仍在时尝试单独拉起。"""
+        if self._joy_path_alive():
+            return True
+        # 避免并发多次拉起
+        if getattr(self, "_reviving_master", False):
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline and not self._stop.is_set():
+                if self._joy_path_alive():
+                    return True
+                time.sleep(0.3)
+            return self._joy_path_alive()
+
+        self._reviving_master = True
+        try:
+            self._log("[ros] sim2real_master 已退出，尝试自动拉起…")
+            bird_user = os.environ.get("BIRD_USER") or "hightorque"
+            bird_home = os.environ.get("BIRD_HOME") or f"/home/{bird_user}"
+            script = (
+                "source /opt/ros/noetic/setup.bash && "
+                "source \"$HOME/sim2real/install/setup.bash\" && "
+                "exec rosrun sim2real_master sim2real_master_node "
+                "__name:=sim2real_master_node"
+            )
+            # bird-ble 以 root 运行，需切回业务用户
+            cmd = [
+                "sudo",
+                "-u",
+                bird_user,
+                "-H",
+                "env",
+                f"HOME={bird_home}",
+                "ROS_MASTER_URI=http://127.0.0.1:11311",
+                "ROS_IP=127.0.0.1",
+                "bash",
+                "-lc",
+                script,
+            ]
+            try:
+                subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    start_new_session=True,
+                )
+            except OSError as e:
+                self._log(f"[ros] 拉起主节点失败: {e}")
+                return False
+
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline and not self._stop.is_set():
+                if self._joy_path_alive():
+                    self._log("[ros] sim2real_master 已恢复（/joy_msg 有订阅）")
+                    return True
+                time.sleep(0.4)
+            self._log("[ros][warn] 自动拉起 sim2real_master 超时")
+            return False
+        finally:
+            self._reviving_master = False
 
     def _handle_motor_power(self, action: str) -> None:
         if action == "OFF":
             self._safe_power_off()
         elif action == "ON":
             self._motor_power.apply_immediate("ON")
+            # 断电常把主节点打崩：上电后先恢复主节点，再开放切模式/起立
+            alive = self._ensure_sim2real_master(timeout=25.0)
             self._power_ready_at = time.monotonic() + POWER_ON_SETTLE_SEC
-            self._log(
-                f"[MP] 上电后等待 {POWER_ON_SETTLE_SEC:.1f}s 再允许起立/模式切换"
-            )
+            if alive:
+                self._log(
+                    f"[MP] 上电完成，主节点就绪，再等 {POWER_ON_SETTLE_SEC:.1f}s "
+                    "后允许起立/模式切换"
+                )
+            else:
+                self._log(
+                    "[MP][warn] 上电完成但主节点未恢复；切模式前会再试一次拉起"
+                )
 
     def _motor_power_ready_for_motion(self) -> bool:
         wire = self._motor_power.get_state_wire()
@@ -588,7 +661,7 @@ class BleRosBridge:
         return time.monotonic() >= self._power_ready_at
 
     def _safe_power_off(self) -> None:
-        """断电前先卸力退出执行态，避免带载断电打崩 sim2real_master。"""
+        """断电前先卸力并等待，降低带载断电打崩主节点概率。"""
         self._publish_zero_twist()
         with self._lock:
             self._stick_target = None
@@ -596,31 +669,34 @@ class BleRosBridge:
         self._set_sprint(False, log=False)
 
         fsm = self._last_fsm_state
-        need_unload = fsm is None or fsm in EXEC_FSM_STATES
+        need_unload = fsm is None or fsm not in SAFE_POWER_OFF_FSM
         if need_unload:
             name = (
                 FSM_STATE_NAMES.get(fsm, str(fsm)) if fsm is not None else "?"
             )
-            self._log(
-                f"[MP] 当前 FSM={fsm}({name}) 仍在执行态，断电前先卸力…"
-            )
-            with self._joy_lock:
-                self._run_steps_locked(
-                    ["lt+rt+b"], "断电前卸力", COMBO_HOLD_SEC, STEP_GAP_SEC
-                )
-            deadline = time.monotonic() + POWER_OFF_UNLOAD_TIMEOUT_SEC
-            while time.monotonic() < deadline and not self._stop.is_set():
-                cur = self._last_fsm_state
-                if cur is not None and cur in SAFE_POWER_OFF_FSM:
-                    break
-                time.sleep(0.05)
+            self._log(f"[MP] 当前 FSM={fsm}({name})，断电前先卸力…")
+            if self._joy_path_alive():
+                with self._joy_lock:
+                    self._run_steps_locked(
+                        ["lt+rt+b"], "断电前卸力", COMBO_HOLD_SEC, STEP_GAP_SEC
+                    )
+                deadline = time.monotonic() + POWER_OFF_UNLOAD_TIMEOUT_SEC
+                while time.monotonic() < deadline and not self._stop.is_set():
+                    cur = self._last_fsm_state
+                    if cur is not None and cur in SAFE_POWER_OFF_FSM:
+                        break
+                    time.sleep(0.05)
             cur = self._last_fsm_state
             cname = (
                 FSM_STATE_NAMES.get(cur, str(cur)) if cur is not None else "?"
             )
-            self._log(f"[MP] 卸力后 FSM={cur}({cname})，开始断电")
+            self._log(
+                f"[MP] 卸力后 FSM={cur}({cname})，再等 {POWER_OFF_SETTLE_SEC:.1f}s 后断电"
+            )
+            time.sleep(POWER_OFF_SETTLE_SEC)
 
-        self._motor_power.apply_immediate("OFF")
+        # OFF 只用主通道、少发几次，减轻功率板/主节点冲击
+        self._motor_power.apply_immediate("OFF", soft=True)
         self._power_ready_at = 0.0
 
     def handle_text(self, text: str) -> None:

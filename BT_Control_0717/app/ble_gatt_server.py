@@ -651,7 +651,7 @@ class BleGattServer:
             return False
 
     def _set_pull(self, on: bool, *, voice: bool = True) -> bool:
-        """开启/关闭 torque-cmd-vel；ON 用 restart 以恢复 failed 状态。"""
+        """开启/关闭 torque-cmd-vel；ON 用 start/restart，失败打出 stderr。"""
         try:
             if on:
                 subprocess.run(
@@ -660,18 +660,26 @@ class BleGattServer:
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
                 )
+                # 先 start，失败再 restart（兼容 inactive / failed）
                 r = subprocess.run(
-                    ["systemctl", "restart", _PULL_SERVICE],
+                    ["systemctl", "start", _PULL_SERVICE],
                     check=False,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
+                    capture_output=True,
+                    text=True,
                 )
+                if r.returncode != 0:
+                    r = subprocess.run(
+                        ["systemctl", "restart", _PULL_SERVICE],
+                        check=False,
+                        capture_output=True,
+                        text=True,
+                    )
             else:
                 r = subprocess.run(
                     ["systemctl", "stop", _PULL_SERVICE],
                     check=False,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
+                    capture_output=True,
+                    text=True,
                 )
                 if self._ros_bridge is not None:
                     try:
@@ -679,6 +687,10 @@ class BleGattServer:
                     except Exception:
                         pass
             ok = r.returncode == 0
+            # start 后稍等再确认 active
+            if ok and on:
+                time.sleep(0.8)
+                ok = self._pull_is_active()
             with self._pull_lock:
                 self._pull_on = on and ok
             if ok:
@@ -689,9 +701,10 @@ class BleGattServer:
                     else:
                         self._voice_remind.on_pull_off()
             else:
+                err = ((r.stderr or r.stdout or "").strip())[:200]
                 log_warn(
                     f"[pull] {'开启' if on else '关闭'}失败(rc={r.returncode}): "
-                    f"{_PULL_SERVICE}"
+                    f"{_PULL_SERVICE}" + (f" | {err}" if err else "")
                 )
             return ok
         except Exception as e:
