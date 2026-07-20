@@ -1278,7 +1278,7 @@ class BleRosBridge:
         ).start()
 
     def _trigger_gait(self, state: str) -> None:
-        """GAIT ON/OFF → /joy 发送 lt+rt+lb（步态启停）。"""
+        """GAIT ON/OFF → /joy 发送 lt+rt+lb（步态启停）；生效后再回调 listener。"""
         if state not in ("ON", "OFF"):
             return
         if state == "OFF" and self._last_fsm_state in RECOVERY_FSM_STATES:
@@ -1298,21 +1298,32 @@ class BleRosBridge:
         label = "步态开启" if state == "ON" else "步态关闭"
         combo = GAIT_JOY_KEY
         self._log(f"[ros] {label}: GAIT {state} → /joy ({COMBO_HOLD_SEC}s)")
-        if self._gait_listener is not None:
-            try:
-                self._gait_listener(state)
-            except Exception:
-                pass
         self._publish_zero_twist()
         with self._lock:
             self._stick_target = None
             self._stick_filtered = None
 
         threading.Thread(
-            target=self._run_steps,
-            args=([combo], label, COMBO_HOLD_SEC),
+            target=self._run_gait_and_confirm,
+            args=(state, combo, label),
             daemon=True,
         ).start()
+
+    def _run_gait_and_confirm(self, state: str, combo: str, label: str) -> None:
+        """长按组合键完成后视为步态已切换，再通知上层回传/语音。"""
+        try:
+            self._run_steps([combo], label, COMBO_HOLD_SEC)
+            if self._stop.is_set():
+                return
+            # 松键后稍等固件侧切换完成
+            time.sleep(0.15)
+            if self._gait_listener is not None:
+                try:
+                    self._gait_listener(state)
+                except Exception:
+                    pass
+        except Exception as e:
+            self._log(f"[ros][warn] 步态执行失败: {e}")
 
     def _trigger_pulse_action(self, action_key: str, label: Optional[str] = None) -> None:
         combo = action_key

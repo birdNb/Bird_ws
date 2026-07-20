@@ -79,7 +79,7 @@ X:{x},Y:{y},Z:{z},N:{seq}    # 可选序号，20Hz 保活
 | 步态关闭   | `GAIT OFF`    | `lt+rt+lb` 长按 1s（步态关）     |
 
 
-步态（`GAIT ON/OFF`）、电机电源（`MP ON/OFF`）收到后，板端经 FFE2 **原样回传相同指令**（无 `ACK:` 前缀）作为确认。
+步态（`GAIT ON/OFF`）在 `lt+rt+lb` 长按实际完成后，板端经 FFE2 **原样回传**相同指令（无 `ACK:` 前缀）；拒绝/冷却中不回传。电机电源（`MP ON/OFF`）收到后原样回传确认。
 
 **倒地保护（FSM=8/1）特殊规则：**
 
@@ -214,7 +214,7 @@ V 10
 ACK:{原文}
 ```
 
-模式、动作、locate_face、LT 疾跑、V 有 `ACK:` 回执；步态、电机电源、`PULL ON/OFF`、**sound ON/OFF** 为**原文回显**；摇杆、脖子无回执。
+模式、动作、locate_face、LT 疾跑、V 有 `ACK:` 回执；步态（生效后）、电机电源、`PULL ON/OFF`、**sound ON/OFF** 为**原文回显**；摇杆、脖子无回执。
 
 ---
 
@@ -265,8 +265,8 @@ mp:OFF
 | 格式  | `mp:` + `ON` / `OFF`                                      |
 | 含义  | 电机供电接通 / 断开                                               |
 | 连接后 | **FFE2 订阅成功 5 秒后**，连发 **3 次**（间隔 1s）                      |
-| 运行中 | `/power_switch_state` 变化时再推                               |
-| 数据源 | ROS `/power_switch_state`（`livelybot_power/Power_switch`） |
+| 运行中 | `MP ON/OFF` 指令生效后推送；硬件状态经板端意图过滤后再推（`MP OFF` 后忽略残留 ON） |
+| 数据源 | 板端 `MotorPowerController`（指令意图 + `/power_switch_state`） |
 
 
 ### 2.4 机器 FSM 模式
@@ -305,7 +305,7 @@ fsm:5
 | 电机电源 | `mp:ON` / `mp:OFF`          | 连接 5s 后连发 3 次；状态变化时再推 |
 | FSM  | `fsm:5`                     | 变化时连发 3 次；订阅时 1 次     |
 | ACK  | `ACK:M_default`             | 模式/动作/脖子等指令回执         |
-| 原文确认 | `MP ON/OFF` / `GAIT ON/OFF` | 电机电源、步态：回传与上行相同指令     |
+| 原文确认 | `MP ON/OFF` / `GAIT ON/OFF` | 电机电源收到即回传；步态在组合键生效后回传 |
 
 
 ---
@@ -353,8 +353,8 @@ fsm:5
 | `LT+DPR`          | 自定义  | `lt+dpr`         | `/joy_msg` `byd_zhidengtui`         | `ACK:LT+DPR`          | 冷却 8s                     |
 | `LT+DPD`          | 自定义  | `lt+dpd`         | `/joy_msg` `byd_zhongquan`          | `ACK:LT+DPD`          | 冷却 8s                     |
 | `LT+DPL`          | 自定义  | `lt+dpl`         | `/joy_msg` `byd_shanggouquan`       | `ACK:LT+DPL`          | 冷却 8s                     |
-| `GAIT ON`         | 步态   | `lt+rt+lb` 1s    | `/joy_msg` 步态开                      | 原文 `GAIT ON`          |                           |
-| `GAIT OFF`        | 步态   | `lt+rt+lb` 1s    | `/joy_msg` 步态关                      | 原文 `GAIT OFF`         | FSM=8/1 时拒绝               |
+| `GAIT ON`         | 步态   | `lt+rt+lb` 1s    | `/joy_msg` 步态开                      | 原文 `GAIT ON`（生效后）    | 长按完成后回传                 |
+| `GAIT OFF`        | 步态   | `lt+rt+lb` 1s    | `/joy_msg` 步态关                      | 原文 `GAIT OFF`（生效后）   | FSM=8/1 拒绝时不回传           |
 | `LT ON`           | 疾跑   | `lt` 持续按住        | `/joy_msg` lt=-1                    | `ACK:LT ON`           | 与摇杆并行                     |
 | `LT OFF`          | 疾跑   | 松开 `lt`          | `/joy_msg` lt 释放                    | `ACK:LT OFF`          | 断连自动 OFF                  |
 | `P{n}Y{m}`        | 脖子   | 步进解析             | `/pi_plus_absolute`                 | 无                     | 每步 10°；`P0Y0` 平滑回中        |

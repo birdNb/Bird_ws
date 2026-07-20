@@ -30,6 +30,8 @@ class MotorPowerController:
         self._com_pub = None
         self._pending: Optional[str] = None
         self._motor_on: Optional[bool] = None
+        # 最近一次 BLE/软件指令意图；None=尚未指令，以硬件为准
+        self._desired: Optional[bool] = None
         self._grace_until = 0.0
         self._on_state_changed: Optional[StateFn] = None
 
@@ -42,11 +44,17 @@ class MotorPowerController:
         self._log(f"[MP] 已发布 {POWER_TOPIC}" + (f" + {COM_POWER_TOPIC}" if com_pub else ""))
 
     def update_state_from_hardware(self, motor_on: bool) -> None:
-        """订阅 /power_switch_state 回调。"""
+        """订阅 /power_switch_state 回调（受最近指令意图过滤，避免误报）。"""
         now = time.monotonic()
         with self._lock:
+            desired = self._desired
+            # MP OFF 后功率板话题常仍短暂残留 ON → 勿当成真上电（会误推 mp:ON / 语音）
+            if motor_on and desired is False:
+                return
+            # MP ON 后短暂忽略硬件 OFF
             if (
                 not motor_on
+                and desired is True
                 and self._motor_on
                 and now < self._grace_until
             ):
@@ -162,17 +170,21 @@ class MotorPowerController:
                 time.sleep(MP_PUBLISH_GAP_SEC)
 
         with self._lock:
+            self._desired = on
             if on:
                 self._grace_until = time.monotonic() + HARDWARE_OFF_GRACE_SEC
             else:
                 self._grace_until = 0.0
+            prev = self._motor_on
             self._motor_on = on
         self._log(
             f"[MP] 电机电源已{'开启' if on else '关闭'} ({action})"
             f" | subscribers={conns}"
             + (" | soft" if soft else "")
         )
-        self._notify_state(on)
+        # 仅状态变化时回调，避免重复播「电机上电」
+        if prev != on:
+            self._notify_state(on)
 
     def _notify_state(self, motor_on: bool) -> None:
         if self._on_state_changed is not None:

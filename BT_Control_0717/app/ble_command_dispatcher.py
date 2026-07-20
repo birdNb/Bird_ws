@@ -272,12 +272,10 @@ class CommandDispatcher:
         if kind == CommandKind.GAIT:
             self._log_rx(f"GAIT: {wire}")
             try:
+                # 回传由 ROS 桥在 lt+rt+lb 实际生效后触发，此处不立即 echo
                 self._handle(kind, payload)
             except Exception as e:
                 self._log_warn(f"步态处理失败: {e}")
-                return
-            if self._echo_confirm is not None:
-                self._echo_confirm(text)
             return
 
         if kind == CommandKind.PULL:

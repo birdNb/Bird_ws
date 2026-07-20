@@ -331,18 +331,8 @@ class BleStatusTelemetry:
         except ImportError:
             pass
 
-        try:
-            from livelybot_power.msg import Power_switch
-
-            def on_power_switch(msg: Power_switch) -> None:
-                wire = "ON" if msg.power_switch else "OFF"
-                self._send_mp_wire(wire)
-
-            rospy.Subscriber(
-                "/power_switch_state", Power_switch, on_power_switch, queue_size=1
-            )
-        except ImportError:
-            pass
+        # 不直连 /power_switch_state：断电后硬件常短暂残留 ON，会误推 mp:ON。
+        # mp 状态只走 MotorPowerController 过滤后的 push_mp_state / motor_power_fn。
 
         rospy.spin()
 
