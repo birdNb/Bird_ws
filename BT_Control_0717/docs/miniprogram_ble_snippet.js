@@ -278,6 +278,9 @@ Page({
   sendWaveDefense() { return this.sendCommand('RT+B') },
   sendGaitOn() { return this.sendCommand('GAIT ON') },
   sendGaitOff() { return this.sendCommand('GAIT OFF') },
+  /** 拉动 pull_move 控制：开启/关闭 torque-cmd-vel.service */
+  sendPullOn() { return this.sendCommand('PULL ON') },
+  sendPullOff() { return this.sendCommand('PULL OFF') },
   /** 修改 BLE 广播名后8位，例如 sendRename('12345678') */
   sendRename(digits8) {
     const d = String(digits8 || '').replace(/\D/g, '').slice(-8).padStart(8, '0')
@@ -288,6 +291,11 @@ Page({
   /** 疾跑开关：按住策略侧 LT 加速（AMP Soccer 模式） */
   sendSprintOn() { return this.sendCommand('LT ON') },
   sendSprintOff() { return this.sendCommand('LT OFF') },
+
+  /** 对话语音：录音文案前5字拼音首字母大写，如 sendConversation('LYJXD') */
+  sendConversation(code) {
+    return this.sendCommand(String(code || '').trim().toUpperCase())
+  },
 
   /** 左摇杆 detail.x/y；右摇杆 detail.x→rz（formatStick 内转协议 X/Y/Z） */
   onLeftStick(e) {

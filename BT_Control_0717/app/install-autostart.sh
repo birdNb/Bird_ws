@@ -18,6 +18,20 @@ fi
 
 chmod +x "${BOOT_SRC}" "${BT_DIR}/run_ble_with_ros.sh" "${BT_DIR}/start.sh"
 
+# 持久化蓝牙名（rename 写入 /var/lib/bird-ble/，重启不丢失）
+PERSIST_NAME="/var/lib/bird-ble/ble_device_name.conf"
+mkdir -p /var/lib/bird-ble
+chmod 755 /var/lib/bird-ble
+if [ ! -f "${PERSIST_NAME}" ] && [ -f "${PKG_DIR}/ble_device_name.conf" ]; then
+  _n="$(head -1 "${PKG_DIR}/ble_device_name.conf" | tr -d '[:space:]')"
+  if [ -n "${_n}" ] && [ "${_n}" != "HT_88888888" ]; then
+    echo "${_n}" >"${PERSIST_NAME}"
+    chmod 644 "${PERSIST_NAME}"
+    echo "[ok] 已迁移广播名 → ${PERSIST_NAME}: ${_n}"
+  fi
+fi
+unset PERSIST_NAME _n
+
 # 首次安装：确保 BlueZ Experimental（否则 GATT/广播注册会失败）
 if [ -f /etc/bluetooth/main.conf ] && ! grep -qE '^[[:space:]]*Experimental[[:space:]]*=[[:space:]]*true' /etc/bluetooth/main.conf 2>/dev/null; then
   echo "[setup] 配置 BlueZ Experimental=true ..."
@@ -39,13 +53,17 @@ sed \
   "${UNIT_SRC}" >"${UNIT_DST}"
 
 if [ ! -f "${DEFAULT_ENV}" ]; then
-  cat >"${DEFAULT_ENV}" <<'EOF'
-# Bird BLE 额外启动参数（传给 run_ble_with_ros.sh）
-# 示例：开启语音 FFE3 备用通道
+  cat >"${DEFAULT_ENV}" <<EOF
+# Bird BLE 环境（install-autostart 维护 BLE_DEVICE_NAME_FILE）
+BLE_DEVICE_NAME_FILE=/var/lib/bird-ble/ble_device_name.conf
+# 额外启动参数（传给 run_ble_with_ros.sh）
 # EXTRA_ARGS=(--enable-voice)
 EXTRA_ARGS=()
 EOF
   echo "[ok] 已创建 ${DEFAULT_ENV}"
+elif ! grep -q '^BLE_DEVICE_NAME_FILE=' "${DEFAULT_ENV}" 2>/dev/null; then
+  echo 'BLE_DEVICE_NAME_FILE=/var/lib/bird-ble/ble_device_name.conf' >>"${DEFAULT_ENV}"
+  echo "[ok] 已向 ${DEFAULT_ENV} 追加 BLE_DEVICE_NAME_FILE"
 fi
 
 systemctl daemon-reload

@@ -3,6 +3,9 @@
 set -eo pipefail
 cd "$(dirname "$0")"
 
+# shellcheck disable=SC1091
+source "$(pwd)/platform_env.sh"
+
 # source setup.bash 会把当前 $@ 传给 _setup_util.py，必须先清空
 BLE_ARGS=("$@")
 set --

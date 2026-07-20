@@ -40,7 +40,12 @@ if _BIRD_WS not in sys.path:
     sys.path.insert(0, _BIRD_WS)
 
 try:
-    from ble_device_name import DEFAULT_BLE_NAME, load_ble_name, save_ble_name
+    from ble_device_name import (
+        DEFAULT_BLE_NAME,
+        load_ble_name,
+        persistent_name_file,
+        save_ble_name,
+    )
 except ImportError:
     DEFAULT_BLE_NAME = "HT_88888888"
 
@@ -71,6 +76,12 @@ GATT_CHAR_IFACE = "org.bluez.GattCharacteristic1"
 GATT_DESC_IFACE = "org.bluez.GattDescriptor1"
 DEVICE_IFACE = "org.bluez.Device1"
 ADAPTER_IFACE = "org.bluez.Adapter1"
+
+_PULL_SERVICE = "torque-cmd-vel.service"
+# 收到以下控制类指令时，若拖拽模式已开则自动关闭
+_PULL_AUTO_OFF_KINDS = frozenset(
+    {"stick", "mode", "action", "gait", "sprint", "neck", "motor_power"}
+)
 
 
 def _dbus_sv_opts() -> dbus.Dictionary:
@@ -284,8 +295,12 @@ class BleGattServer:
         self._locate_face = None
         self._volume = None
         self._voice = None
+        self._voice_remind = None
+        self._conversation = None
         self._dispatcher = None
         self._telemetry = None
+        self._pull_on = False
+        self._pull_lock = threading.Lock()
         self._connect_hint_ids: List[int] = []
         self._msg_count_at_connect = 0
         self._adv: Optional[Advertisement] = None
@@ -343,6 +358,8 @@ class BleGattServer:
         log_info(f"*** 手机已连接: {label} ***")
         log_info("    等待 FFE1 写入（握手 M_default）")
         log_info(f"    写入 UUID: {WRITE_CHAR_UUID}")
+        if self._voice_remind is not None:
+            self._voice_remind.on_ble_connected()
         self._schedule_connect_hint()
 
     def _on_phone_disconnected(self, path: str) -> None:
@@ -619,6 +636,76 @@ class BleGattServer:
         self._notify_on_main_thread(payload)
         log_tx(plain)
 
+    def _sync_pull_state(self) -> None:
+        with self._pull_lock:
+            self._pull_on = self._pull_is_active()
+
+    def _pull_is_active(self) -> bool:
+        try:
+            r = subprocess.run(
+                ["systemctl", "is-active", "--quiet", _PULL_SERVICE],
+                check=False,
+            )
+            return r.returncode == 0
+        except OSError:
+            return False
+
+    def _set_pull(self, on: bool, *, voice: bool = True) -> bool:
+        """开启/关闭 torque-cmd-vel；ON 用 restart 以恢复 failed 状态。"""
+        try:
+            if on:
+                subprocess.run(
+                    ["systemctl", "reset-failed", _PULL_SERVICE],
+                    check=False,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                r = subprocess.run(
+                    ["systemctl", "restart", _PULL_SERVICE],
+                    check=False,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+            else:
+                r = subprocess.run(
+                    ["systemctl", "stop", _PULL_SERVICE],
+                    check=False,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                if self._ros_bridge is not None:
+                    try:
+                        self._ros_bridge._publish_zero_twist()
+                    except Exception:
+                        pass
+            ok = r.returncode == 0
+            with self._pull_lock:
+                self._pull_on = on and ok
+            if ok:
+                log_info(f"[pull] {'已开启' if on else '已关闭'}: {_PULL_SERVICE}")
+                if voice and self._voice_remind is not None:
+                    if on:
+                        self._voice_remind.on_pull_on()
+                    else:
+                        self._voice_remind.on_pull_off()
+            else:
+                log_warn(
+                    f"[pull] {'开启' if on else '关闭'}失败(rc={r.returncode}): "
+                    f"{_PULL_SERVICE}"
+                )
+            return ok
+        except Exception as e:
+            log_warn(f"[pull] systemctl 执行异常: {e}")
+            return False
+
+    def _maybe_disable_pull_on_control(self, kind: str) -> None:
+        if kind not in _PULL_AUTO_OFF_KINDS:
+            return
+        with self._pull_lock:
+            if not self._pull_on:
+                return
+        self._set_pull(False, voice=True)
+
     def _handle_dispatched(self, kind, payload: str) -> None:
         if kind.value == "locate_face":
             if self._locate_face is not None:
@@ -644,6 +731,24 @@ class BleGattServer:
             else:
                 log_warn(f"BLE 改名失败: {payload}")
             return
+        if kind.value == "conversation":
+            if self._conversation is not None:
+                self._conversation.play(payload)
+            else:
+                log_warn("conversation_bag 未加载")
+            return
+
+        if kind.value == "pull":
+            action = (payload or "").strip().upper()
+            if action == "ON":
+                self._set_pull(True, voice=True)
+            elif action == "OFF":
+                self._set_pull(False, voice=True)
+            else:
+                log_warn(f"[pull] 无效动作: {payload!r}（期望 ON/OFF）")
+            return
+
+        self._maybe_disable_pull_on_control(kind.value)
         if self._ros_bridge is not None and self.ros_control:
             self._ros_bridge.handle_command(kind.value, payload)
 
@@ -730,7 +835,11 @@ class BleGattServer:
             return
 
         self.name = new_name
-        save_ble_name(new_name)
+        try:
+            save_ble_name(new_name)
+            log_info(f"广播名已持久化: {persistent_name_file()}")
+        except OSError as e:
+            log_warn(f"广播名持久化失败: {e}")
         self._btmgmt_set_local_name(hci_idx, new_name)
 
         if self._adapter_path:
@@ -904,6 +1013,23 @@ class BleGattServer:
         except ImportError as e:
             log_warn(f"无法加载 sound_demo: {e}")
 
+    def _start_voice_remind(self) -> None:
+        if os.environ.get("VOICE_REMIND", "1").strip().lower() in ("0", "false", "no", "off"):
+            log_info("语音提示已禁用 (VOICE_REMIND=0)")
+            return
+        try:
+            from voice_remind import VoiceRemindPlayer, get_conversation_bag
+
+            self._voice_remind = VoiceRemindPlayer(log=log_info)
+            self._voice_remind.start()
+            self._conversation = get_conversation_bag(
+                player=self._voice_remind, log=log_info
+            )
+            n = self._conversation.reload()
+            log_info(f"[conv] conversation_bag 已加载 {n} 条（FFE1 发前5字拼音首字母大写）")
+        except ImportError as e:
+            log_warn(f"无法加载 voice_remind: {e}")
+
     def _start_ros_bridge(self) -> None:
         if not self.ros_control:
             return
@@ -944,11 +1070,40 @@ class BleGattServer:
         def _on_mp_state(motor_on: bool) -> None:
             wire = "ON" if motor_on else "OFF"
             self._telemetry.push_mp_state(wire, force=True)
+            if motor_on and self._voice_remind is not None:
+                self._voice_remind.on_motor_on()
 
         self._ros_bridge.set_motor_power_listener(_on_mp_state)
+        if self._ros_bridge is not None:
+            self._ros_bridge.set_action_listener(self._on_ros_action)
+            self._ros_bridge.set_gait_listener(self._on_gait_state)
+
         wire = self._ros_bridge.get_motor_power_wire()
         if wire in ("ON", "OFF"):
             self._telemetry.push_mp_state(wire, force=True)
+
+    def _on_ros_action(self, action: str) -> None:
+        if self._voice_remind is None:
+            return
+        if action == "auto_stand":
+            self._voice_remind.on_auto_stand()
+
+    def _on_gait_state(self, state: str) -> None:
+        if self._voice_remind is None:
+            return
+        if state == "ON":
+            self._voice_remind.on_walk_mode()
+        elif state == "OFF":
+            self._voice_remind.on_stand_mode()
+
+    def _notify_ble_ready(self) -> None:
+        if self._voice_remind is not None:
+            self._voice_remind.on_ble_ready()
+
+    def _ble_ready_timeout_cb(self) -> bool:
+        """RK Legacy 广播路径：GATT 注册后延迟播报就绪。"""
+        self._notify_ble_ready()
+        return False
 
     def _start_telemetry(self) -> None:
         if self._notify_chrc is None:
@@ -962,6 +1117,9 @@ class BleGattServer:
             notify=self._notify_on_main_thread,
             motor_power_fn=self._read_motor_power_wire,
             battery_fn=self._read_battery_pct,
+            on_battery_pct=(
+                self._voice_remind.on_battery_pct if self._voice_remind else None
+            ),
         )
         self._telemetry.start()
 
@@ -984,6 +1142,8 @@ class BleGattServer:
         self._start_locate_face_manager()
         self._start_volume_manager()
         self._start_voice_manager()
+        self._start_voice_remind()
+        self._sync_pull_state()
         self._start_ros_bridge()
         self._start_dispatcher()
 
@@ -1047,6 +1207,8 @@ class BleGattServer:
                 kwargs={"hci_dev": hci_dev},
                 daemon=True,
             ).start()
+            if not use_dbus_adv:
+                GLib.timeout_add(2500, self._ble_ready_timeout_cb)
 
         def register_failed(error: dbus.DBusException) -> None:
             log_warn(f"GATT 注册失败: {error}")
@@ -1067,6 +1229,7 @@ class BleGattServer:
                 kwargs={"hci_dev": hci_dev},
                 daemon=True,
             ).start()
+            self._notify_ble_ready()
 
         def adv_failed(error: dbus.DBusException) -> None:
             log_warn(f"广播注册失败: {error}")
@@ -1120,6 +1283,8 @@ class BleGattServer:
                 self._locate_face.stop()
             if self._voice is not None:
                 self._voice.on_disconnect()
+            if self._voice_remind is not None:
+                self._voice_remind.stop()
         return 0
 
 

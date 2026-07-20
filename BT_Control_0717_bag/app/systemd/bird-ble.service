@@ -18,6 +18,7 @@ Environment=BIRD_HOME=@BIRD_HOME@
 Environment=PULSE_SERVER=unix:/run/user/@BIRD_BLE_UID@/pulse/native
 Environment=XDG_RUNTIME_DIR=/run/user/@BIRD_BLE_UID@
 Environment=HOME=@BIRD_HOME@
+Environment=BLE_DEVICE_NAME_FILE=/var/lib/bird-ble/ble_device_name.conf
 ExecStartPre=/bin/sleep 3
 ExecStart=@BT_DIR@/systemd/bird-ble-boot.sh
 Restart=always

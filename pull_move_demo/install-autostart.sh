@@ -48,13 +48,15 @@ EOF
 fi
 
 systemctl daemon-reload
-systemctl enable "${SERVICE_NAME}"
+systemctl disable "${SERVICE_NAME}" 2>/dev/null || true
+systemctl stop "${SERVICE_NAME}" 2>/dev/null || true
 
 echo ""
 echo "=========================================="
-echo " torque-cmd-vel 已设置开机自启动"
+echo " torque-cmd-vel 已安装（默认不开机自启）"
 echo " 服务名: ${SERVICE_NAME}"
 echo " FSM: 仅 EXEC_DEFAULT(5)=行走模式 发 /cmd_vel"
+echo " 开启: 小程序 PULL ON 或 sudo systemctl start"
 echo "=========================================="
 echo ""
 echo "常用命令:"

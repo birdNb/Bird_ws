@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""BLE MP ON/OFF → /power_switch_control（livelybot 功率板电机供电）。"""
+"""BLE MP ON/OFF → /power_switch_control（+ /com_power_control 兜底）。"""
 
 from __future__ import annotations
 
@@ -9,8 +9,12 @@ import time
 from typing import Callable, Optional
 
 POWER_TOPIC = "/power_switch_control"
+COM_POWER_TOPIC = "/com_power_control"
 # 上电后硬件 /power_switch_state 可能短暂仍为 OFF，勿立刻覆盖
 HARDWARE_OFF_GRACE_SEC = 3.0
+MP_PUBLISH_BURST = 2
+MP_PUBLISH_GAP_SEC = 0.1
+SUBSCRIBER_WAIT_SEC = 1.0
 
 LogFn = Callable[[str], None]
 StateFn = Callable[[bool], None]
@@ -23,6 +27,7 @@ class MotorPowerController:
         self._log = log
         self._lock = threading.Lock()
         self._pub = None
+        self._com_pub = None
         self._pending: Optional[str] = None
         self._motor_on: Optional[bool] = None
         self._grace_until = 0.0
@@ -31,9 +36,10 @@ class MotorPowerController:
     def set_state_listener(self, fn: Optional[StateFn]) -> None:
         self._on_state_changed = fn
 
-    def attach_publisher(self, pub) -> None:
+    def attach_publisher(self, pub, com_pub=None) -> None:
         self._pub = pub
-        self._log(f"[MP] 已发布 {POWER_TOPIC}")
+        self._com_pub = com_pub
+        self._log(f"[MP] 已发布 {POWER_TOPIC}" + (f" + {COM_POWER_TOPIC}" if com_pub else ""))
 
     def update_state_from_hardware(self, motor_on: bool) -> None:
         """订阅 /power_switch_state 回调。"""
@@ -91,28 +97,76 @@ class MotorPowerController:
         if action is not None:
             self._apply(action)
 
+    def _wait_subscribers(self) -> int:
+        """等待 power_node 等订阅者连上；返回连接数。"""
+        deadline = time.monotonic() + SUBSCRIBER_WAIT_SEC
+        n = 0
+        while time.monotonic() < deadline:
+            n = 0
+            if self._pub is not None:
+                try:
+                    n = max(n, int(self._pub.get_num_connections()))
+                except Exception:
+                    pass
+            if self._com_pub is not None:
+                try:
+                    n = max(n, int(self._com_pub.get_num_connections()))
+                except Exception:
+                    pass
+            if n > 0:
+                return n
+            time.sleep(0.05)
+        return n
+
     def _apply(self, action: str) -> None:
         if self._pub is None:
             self._log("[MP] 未就绪，忽略指令")
             return
         try:
             from livelybot_power.msg import Power_switch
+            from std_msgs.msg import UInt8
         except ImportError:
             self._log("[MP] 未找到 livelybot_power，无法控制电机电源")
             return
 
         on = action == "ON"
+        conns = self._wait_subscribers()
+        if conns <= 0:
+            self._log(
+                f"[MP][warn] {POWER_TOPIC} 无订阅者（power_node 可能未运行），"
+                f"仍尝试下发 {action}"
+            )
+
         msg = Power_switch()
         msg.control_switch = 1
         msg.power_switch = 1 if on else 0
-        self._pub.publish(msg)
+        com = UInt8()
+        com.data = 1 if on else 0
+
+        for i in range(MP_PUBLISH_BURST):
+            try:
+                self._pub.publish(msg)
+            except Exception as e:
+                self._log(f"[MP] publish 失败: {e}")
+                break
+            if self._com_pub is not None:
+                try:
+                    self._com_pub.publish(com)
+                except Exception:
+                    pass
+            if i + 1 < MP_PUBLISH_BURST:
+                time.sleep(MP_PUBLISH_GAP_SEC)
+
         with self._lock:
             if on:
                 self._grace_until = time.monotonic() + HARDWARE_OFF_GRACE_SEC
             else:
                 self._grace_until = 0.0
             self._motor_on = on
-        self._log(f"[MP] 电机电源已{'开启' if on else '关闭'} ({action})")
+        self._log(
+            f"[MP] 电机电源已{'开启' if on else '关闭'} ({action})"
+            f" | subscribers={conns}"
+        )
         self._notify_state(on)
 
     def _notify_state(self, motor_on: bool) -> None:

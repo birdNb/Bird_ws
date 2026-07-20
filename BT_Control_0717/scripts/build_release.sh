@@ -30,12 +30,28 @@ echo "[build] 源目录: ${SRC_DIR}"
 echo "[build] 输出:   ${OUT_DIR}"
 echo "[build] 版本:   ${VERSION}"
 
+# 保留已改过的广播名（避免 rebuild 覆盖 rename）
+SAVED_BLE_NAME=""
+if [ -f "${OUT_DIR}/ble_device_name.conf" ]; then
+  SAVED_BLE_NAME="$(tr -d '[:space:]' < "${OUT_DIR}/ble_device_name.conf")"
+fi
+PERSIST_BLE_NAME=""
+if [ -f /var/lib/bird-ble/ble_device_name.conf ]; then
+  PERSIST_BLE_NAME="$(tr -d '[:space:]' < /var/lib/bird-ble/ble_device_name.conf)"
+fi
+
 rm -rf "${OUT_DIR}"
 APP_DIR="${OUT_DIR}/app"
 mkdir -p "${APP_DIR}/systemd" "${APP_DIR}/scripts" "${OUT_DIR}/docs"
 
-# 包根：配置 + 文档
-cp "${SRC_DIR}/ble_device_name.conf" "${OUT_DIR}/"
+# 包根：配置 + 文档（优先持久化/旧包中的名称，不用源码默认值覆盖）
+if [ -n "${PERSIST_BLE_NAME}" ]; then
+  echo "${PERSIST_BLE_NAME}" >"${OUT_DIR}/ble_device_name.conf"
+elif [ -n "${SAVED_BLE_NAME}" ]; then
+  echo "${SAVED_BLE_NAME}" >"${OUT_DIR}/ble_device_name.conf"
+else
+  cp "${SRC_DIR}/ble_device_name.conf" "${OUT_DIR}/"
+fi
 chmod 664 "${OUT_DIR}/ble_device_name.conf" 2>/dev/null || true
 if [ -n "${SUDO_USER:-}" ]; then
   chown "${SUDO_USER}:$(id -g "${SUDO_USER}" 2>/dev/null || echo 1000)" "${OUT_DIR}/ble_device_name.conf" 2>/dev/null || true
@@ -135,8 +151,21 @@ BIRD_HOME=${INSTALL_HOME}
 BIRD_BLE_UID=${INSTALL_UID}
 BIRD_WS=${BIRD_WS}
 SIM2REAL_WS=${SIM2REAL_WS}
+BLE_DEVICE_NAME_FILE=/var/lib/bird-ble/ble_device_name.conf
 EXTRA_ARGS=()
 EOF
+
+mkdir -p /var/lib/bird-ble
+chmod 755 /var/lib/bird-ble
+if [ ! -f /var/lib/bird-ble/ble_device_name.conf ] && [ -f "${PKG_DIR}/ble_device_name.conf" ]; then
+  _bn="$(tr -d '[:space:]' < "${PKG_DIR}/ble_device_name.conf")"
+  if [ -n "${_bn}" ]; then
+    echo "${_bn}" > /var/lib/bird-ble/ble_device_name.conf
+    chmod 644 /var/lib/bird-ble/ble_device_name.conf
+    echo "[ok] 广播名持久化: /var/lib/bird-ble/ble_device_name.conf (${_bn})"
+  fi
+fi
+unset _bn
 
 export BIRD_USER="${INSTALL_USER}"
 export BIRD_HOME="${INSTALL_HOME}"

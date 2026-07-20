@@ -15,8 +15,7 @@ Environment=DEMO_DIR=@DEMO_DIR@
 EnvironmentFile=-/etc/default/torque-cmd-vel
 ExecStartPre=/bin/sleep 5
 ExecStart=@DEMO_DIR@/systemd/torque-cmd-vel-boot.sh
-Restart=always
-RestartSec=8
+Restart=no
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=torque-cmd-vel

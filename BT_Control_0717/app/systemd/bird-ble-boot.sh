@@ -35,6 +35,25 @@ wait_roscore() {
 
 wait_roscore
 
+wait_sim2real_master() {
+  # 避免 BLE 抢先占 ROS / 下发指令导致 sim2real_master 启动即退出
+  local i
+  echo "[bird-ble] 等待 sim2real_master_node（模式显示依赖此节点）…"
+  for i in $(seq 1 90); do
+    if rosnode list 2>/dev/null | grep -qx '/sim2real_master_node'; then
+      if timeout 2 rosnode ping -c 1 /sim2real_master_node >/dev/null 2>&1; then
+        echo "[bird-ble] sim2real_master_node 已就绪"
+        return 0
+      fi
+    fi
+    sleep 2
+  done
+  echo "[bird-ble] 警告: 未检测到 sim2real_master，继续启动；切模式/起立将不可用直到主节点起来" >&2
+  return 0
+}
+
+wait_sim2real_master
+
 wait_hci() {
   local i
   for i in $(seq 1 45); do
@@ -71,6 +90,9 @@ prep_bluetooth() {
 }
 
 prep_bluetooth
+
+# 拖拽模式默认关闭（由小程序 PULL ON 或 BLE 控制开启）
+systemctl stop torque-cmd-vel.service 2>/dev/null || true
 
 EXTRA_ARGS=()
 if [ -f /etc/default/bird-ble ]; then

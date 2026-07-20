@@ -21,6 +21,7 @@ from typing import Callable, Optional
 
 MotorPowerFn = Callable[[], Optional[str]]
 BatteryFn = Callable[[], Optional[int]]
+OnBatteryFn = Callable[[int], None]
 
 from ble_log import log_info, log_tx, log_warn
 
@@ -115,10 +116,12 @@ class BleStatusTelemetry:
         notify: NotifyFn,
         motor_power_fn: Optional[MotorPowerFn] = None,
         battery_fn: Optional[BatteryFn] = None,
+        on_battery_pct: Optional[OnBatteryFn] = None,
     ) -> None:
         self._notify = notify
         self._motor_power_fn = motor_power_fn
         self._battery_fn = battery_fn
+        self._on_battery_pct_fn = on_battery_pct
         self._stop = threading.Event()
         self._subscribed = threading.Event()
         self._lock = threading.Lock()
@@ -268,6 +271,11 @@ class BleStatusTelemetry:
         with self._lock:
             self._ros_battery_pct = pct
             need_send = self._subscribed.is_set() and self._last_pwr_sent is None
+        if self._on_battery_pct_fn is not None:
+            try:
+                self._on_battery_pct_fn(pct)
+            except Exception:
+                pass
         if need_send:
             self._maybe_send_pwr(pct, force=True)
         elif self._subscribed.is_set():

@@ -61,8 +61,21 @@ BIRD_HOME=${INSTALL_HOME}
 BIRD_BLE_UID=${INSTALL_UID}
 BIRD_WS=${BIRD_WS}
 SIM2REAL_WS=${SIM2REAL_WS}
+BLE_DEVICE_NAME_FILE=/var/lib/bird-ble/ble_device_name.conf
 EXTRA_ARGS=()
 EOF
+
+mkdir -p /var/lib/bird-ble
+chmod 755 /var/lib/bird-ble
+if [ ! -f /var/lib/bird-ble/ble_device_name.conf ] && [ -f "${PKG_DIR}/ble_device_name.conf" ]; then
+  _bn="$(tr -d '[:space:]' < "${PKG_DIR}/ble_device_name.conf")"
+  if [ -n "${_bn}" ]; then
+    echo "${_bn}" > /var/lib/bird-ble/ble_device_name.conf
+    chmod 644 /var/lib/bird-ble/ble_device_name.conf
+    echo "[ok] 广播名持久化: /var/lib/bird-ble/ble_device_name.conf (${_bn})"
+  fi
+fi
+unset _bn
 
 export BIRD_USER="${INSTALL_USER}"
 export BIRD_HOME="${INSTALL_HOME}"

@@ -10,7 +10,7 @@ else
   export PKG_DIR="${PKG_DIR:-${BT_DIR}}"
 fi
 export BIRD_WS="${BIRD_WS:-$(cd "${PKG_DIR}/.." && pwd)}"
-export BLE_DEVICE_NAME_FILE="${BLE_DEVICE_NAME_FILE:-${PKG_DIR}/ble_device_name.conf}"
+export BLE_DEVICE_NAME_FILE="${BLE_DEVICE_NAME_FILE:-/var/lib/bird-ble/ble_device_name.conf}"
 _ws_owner="$(stat -c '%U' "${BIRD_WS}" 2>/dev/null || true)"
 if [ -n "${BIRD_USER:-}" ]; then
   :

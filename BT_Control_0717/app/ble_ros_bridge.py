@@ -89,6 +89,16 @@ FSM_PROTECTION = 8
 
 # 倒地/保护态：禁止关步态；起立前先开步态
 RECOVERY_FSM_STATES = frozenset({FSM_PROTECTION, FSM_ERROR})
+# 执行态：仍有力矩闭环，直接断电会导致 sim2real_master 崩溃(SIGSEGV)
+EXEC_FSM_STATES = frozenset({5, 6, 7, 10, 11, 14, 16})
+# 相对安全可断电的状态
+SAFE_POWER_OFF_FSM = frozenset({0, 1, 2, 3, 4, 8, 9, 12, 13, 15})
+# MP ON 后等待电机/驱动就绪再允许起立
+POWER_ON_SETTLE_SEC = 2.5
+POWER_OFF_UNLOAD_TIMEOUT_SEC = 3.5
+
+# 断电后禁止这些指令（会打 /joy_msg，易崩 sim2real_master / 模式显示）
+_POWER_GATED_KINDS = frozenset({"stick", "mode", "action", "gait", "sprint"})
 FSM_CANDIDATE_DEFAULT = 2
 FSM_CANDIDATE_CUSTOM = 3
 FSM_CANDIDATE_REMOTE = 4
@@ -447,7 +457,10 @@ class BleRosBridge:
         self._motor_power = MotorPowerController(log=log)
         self._battery_pct: Optional[int] = None
         self._sprint_enabled = False
+        self._action_listener = None
+        self._gait_listener = None
         self._joy_lock = threading.Lock()
+        self._power_ready_at = 0.0
 
     @property
     def ready(self) -> bool:
@@ -458,6 +471,12 @@ class BleRosBridge:
 
     def set_motor_power_listener(self, fn) -> None:
         self._motor_power.set_state_listener(fn)
+
+    def set_action_listener(self, fn) -> None:
+        self._action_listener = fn
+
+    def set_gait_listener(self, fn) -> None:
+        self._gait_listener = fn
 
     def get_battery_pct(self) -> Optional[int]:
         pct = self._battery_pct
@@ -502,6 +521,11 @@ class BleRosBridge:
         self._log("[ros] 断连急停：零速")
 
     def handle_command(self, kind: str, text: str) -> None:
+        if kind in _POWER_GATED_KINDS:
+            ok, reason = self._check_motion_allowed(kind)
+            if not ok:
+                self._log(f"[ros] 拒绝 {kind}: {reason}")
+                return
         if kind == "stick":
             self.handle_text(text)
         elif kind == "mode":
@@ -511,11 +535,93 @@ class BleRosBridge:
         elif kind == "neck":
             self._neck.enqueue(text)
         elif kind == "motor_power":
-            self._motor_power.apply_immediate(text)
+            self._handle_motor_power(text.strip().upper())
         elif kind == "gait":
             self._trigger_gait(text.strip().upper())
         elif kind == "sprint":
             self._set_sprint(text.strip().upper() == "ON")
+
+    def _joy_path_alive(self) -> bool:
+        """sim2real_master 是否仍在订阅 /joy_msg（或 /joy）。"""
+        try:
+            if self._has_joy and self._joy_msg_pub is not None:
+                return int(self._joy_msg_pub.get_num_connections()) > 0
+            if self._sensor_joy_pub is not None:
+                return int(self._sensor_joy_pub.get_num_connections()) > 0
+        except Exception:
+            pass
+        return False
+
+    def _check_motion_allowed(self, kind: str) -> Tuple[bool, str]:
+        """未上电 / 上电未就绪 / 主节点已挂 → 拒绝模式与站立相关指令。"""
+        wire = self._motor_power.get_state_wire()
+        if wire != "ON":
+            return (
+                False,
+                f"电机电源未开启(mp={wire})，请先 MP ON；断电后勿发站立/切模式",
+            )
+        if not self._motor_power_ready_for_motion():
+            left = max(0.0, self._power_ready_at - time.monotonic())
+            return False, f"上电未就绪，请再等 {left:.1f}s"
+        # 模式/起立依赖主节点；已崩溃时继续发会反复踩坑
+        if kind in ("mode", "action", "gait") and not self._joy_path_alive():
+            return (
+                False,
+                "sim2real_master 未运行(/joy_msg 无订阅)，请重启 roslaunch 后再操作",
+            )
+        return True, ""
+
+    def _handle_motor_power(self, action: str) -> None:
+        if action == "OFF":
+            self._safe_power_off()
+        elif action == "ON":
+            self._motor_power.apply_immediate("ON")
+            self._power_ready_at = time.monotonic() + POWER_ON_SETTLE_SEC
+            self._log(
+                f"[MP] 上电后等待 {POWER_ON_SETTLE_SEC:.1f}s 再允许起立/模式切换"
+            )
+
+    def _motor_power_ready_for_motion(self) -> bool:
+        wire = self._motor_power.get_state_wire()
+        if wire != "ON":
+            return False
+        return time.monotonic() >= self._power_ready_at
+
+    def _safe_power_off(self) -> None:
+        """断电前先卸力退出执行态，避免带载断电打崩 sim2real_master。"""
+        self._publish_zero_twist()
+        with self._lock:
+            self._stick_target = None
+            self._stick_filtered = None
+        self._set_sprint(False, log=False)
+
+        fsm = self._last_fsm_state
+        need_unload = fsm is None or fsm in EXEC_FSM_STATES
+        if need_unload:
+            name = (
+                FSM_STATE_NAMES.get(fsm, str(fsm)) if fsm is not None else "?"
+            )
+            self._log(
+                f"[MP] 当前 FSM={fsm}({name}) 仍在执行态，断电前先卸力…"
+            )
+            with self._joy_lock:
+                self._run_steps_locked(
+                    ["lt+rt+b"], "断电前卸力", COMBO_HOLD_SEC, STEP_GAP_SEC
+                )
+            deadline = time.monotonic() + POWER_OFF_UNLOAD_TIMEOUT_SEC
+            while time.monotonic() < deadline and not self._stop.is_set():
+                cur = self._last_fsm_state
+                if cur is not None and cur in SAFE_POWER_OFF_FSM:
+                    break
+                time.sleep(0.05)
+            cur = self._last_fsm_state
+            cname = (
+                FSM_STATE_NAMES.get(cur, str(cur)) if cur is not None else "?"
+            )
+            self._log(f"[MP] 卸力后 FSM={cur}({cname})，开始断电")
+
+        self._motor_power.apply_immediate("OFF")
+        self._power_ready_at = 0.0
 
     def handle_text(self, text: str) -> None:
         if not self.ready:
@@ -566,10 +672,16 @@ class BleRosBridge:
         )
         try:
             from livelybot_power.msg import Power_switch
+            from std_msgs.msg import UInt8
 
-            self._motor_power.attach_publisher(
-                rospy.Publisher(POWER_TOPIC, Power_switch, queue_size=1)
+            # 禁止 latch：否则断电/上电残留会在主节点重启时重放，干扰模式节点
+            mp_pub = rospy.Publisher(
+                POWER_TOPIC, Power_switch, queue_size=10, latch=False
             )
+            com_pub = rospy.Publisher(
+                "/com_power_control", UInt8, queue_size=10, latch=False
+            )
+            self._motor_power.attach_publisher(mp_pub, com_pub)
 
             def _on_power_state(msg: Power_switch) -> None:
                 self._motor_power.update_state_from_hardware(bool(msg.power_switch))
@@ -603,6 +715,22 @@ class BleRosBridge:
 
         rospy.Subscriber("/fsm_state", Int32, _on_fsm, queue_size=1)
         rospy.Subscriber("/battery_level", UInt8, _on_battery, queue_size=1)
+
+        # 等模式节点订阅 /joy_msg 后再对外接指令，避免启动竞态打崩主节点
+        self._log("[ros] 等待 sim2real_master 订阅 /joy_msg…")
+        joy_wait_deadline = time.monotonic() + 120.0
+        while not self._stop.is_set() and time.monotonic() < joy_wait_deadline:
+            if self._joy_path_alive():
+                self._log("[ros] 已检测到 /joy_msg 订阅者（模式节点就绪）")
+                break
+            time.sleep(0.5)
+        else:
+            if not self._stop.is_set():
+                self._log(
+                    "[ros][warn] 等待 /joy_msg 订阅超时；"
+                    "切模式/起立将被拒绝直到主节点起来"
+                )
+
         self._ready.set()
         self._log(f"[ros] /cmd_vel {CMD_VEL_HZ}Hz | 超时 {CMD_VEL_TIMEOUT_SEC}s | EMA={STICK_FILTER_ALPHA}")
         interval = 1.0 / CMD_VEL_HZ
@@ -1033,12 +1161,24 @@ class BleRosBridge:
             return
         self._last_action_ts[combo] = now
 
+        # 起立/蹲下/卸力：二次校验（handle_command 已闸，此处防直接调用）
+        if combo in ("lt+rt+start", "lt+rt+rb", "lt+rt+b"):
+            ok, reason = self._check_motion_allowed("action")
+            if not ok:
+                self._log(f"[ros] 拒绝{label}：{reason}")
+                return
+
         steps = [combo]
         step_gap = STEP_GAP_SEC
+        # ERROR/保护态下勿再先开步态猛打组合键（易崩主节点）；等 FSM 恢复后再起立
         if combo == "lt+rt+start" and self._last_fsm_state in RECOVERY_FSM_STATES:
-            steps = [GAIT_JOY_KEY, combo]
-            label = "起立(先开步态)"
-            step_gap = MENU_STEP_GAP_SEC
+            fsm = self._last_fsm_state
+            name = FSM_STATE_NAMES.get(fsm, str(fsm)) if fsm is not None else "?"
+            self._log(
+                f"[ros] 拒绝起立：当前 FSM={fsm}({name})，"
+                "请先 MP ON 并等电机恢复后再试"
+            )
+            return
 
         self._log(
             f"[ros] 动作 {label}: {' → '.join(steps)} → /joy_msg ({COMBO_HOLD_SEC}s)"
@@ -1047,6 +1187,12 @@ class BleRosBridge:
         with self._lock:
             self._stick_target = None
             self._stick_filtered = None
+
+        if combo == "lt+rt+start" and self._action_listener is not None:
+            try:
+                self._action_listener("auto_stand")
+            except Exception:
+                pass
 
         threading.Thread(
             target=self._run_steps,
@@ -1076,6 +1222,11 @@ class BleRosBridge:
         label = "步态开启" if state == "ON" else "步态关闭"
         combo = GAIT_JOY_KEY
         self._log(f"[ros] {label}: GAIT {state} → /joy ({COMBO_HOLD_SEC}s)")
+        if self._gait_listener is not None:
+            try:
+                self._gait_listener(state)
+            except Exception:
+                pass
         self._publish_zero_twist()
         with self._lock:
             self._stick_target = None

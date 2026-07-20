@@ -133,11 +133,13 @@ neck0     # 回中
 
 | 指令       | 小程序操作  | 说明                           |
 | -------- | ------ | ---------------------------- |
-| `MP ON`  | **长按** | 接通电机供电（功率板 `power_switch=1`） |
-| `MP OFF` | **点击** | 断开电机供电（功率板 `power_switch=0`） |
+| `MP ON`  | **长按** | 接通电机供电（功率板 `power_switch=1`）；上电后约 2.5s 才允许起立 |
+| `MP OFF` | **点击** | 若仍在行走/站立执行态，**先自动卸力**再断电，避免带载断电打崩 `sim2real_master` |
 
 
 板端发布 ROS `/power_switch_control`（`livelybot_power/Power_switch`，`control_switch=1`）。收到后 FFE2 **原样回传** `MP ON` / `MP OFF` 确认（无 `ACK:` 前缀）。
+
+**断电后安全闸：** `MP OFF` 之后，板端会拒绝摇杆、`M_*` 切模式、起立/蹲下/卸力、`GAIT`、疾跑等指令，直到再次 `MP ON` 且等待约 2.5s；若检测到 `sim2real_master` 已挂（`/joy_msg` 无订阅），同样拒绝，避免继续打崩模式显示。
 
 ### 1.8 疾跑（LT）
 
@@ -167,6 +169,16 @@ neck0     # 回中
 - 未 `sound ON` 时音频包丢弃；`sound ON` 后终端 stderr 显示**实时电平条**
 - 可选：`--enable-voice` 额外注册 FFE3 备用通道
 
+### 1.9.1 固定语音（conversation_bag）
+
+小程序发送录音文案 **前 5 个汉字拼音首字母（大写）**，板端播放 `voice_remind/conversation_bag/` 下同名 WAV。
+
+示例：文案 `蓝牙就绪待连接` → 前5字 `蓝牙就绪待` → 发送 **`LYJXD`** → 播放 `LYJXD.wav`
+
+- 有 ACK：`ACK:LYJXD`
+- 上传：WAV 以大写首字母命名，并编辑 `manifest.json`（详见 `conversation_bag/README.md`）
+- 不足 5 字取全部汉字（如 `行走模式` → `XZMS`）
+
 ### 1.10 音量调节（V）
 
 
@@ -185,13 +197,24 @@ V 10
 - 板端通过 PulseAudio `amixer -D pulse sset Master {n}%` 生效
 - 有 ACK：`ACK:V 10`
 
+### 1.10.1 拉动 pull_move 控制（PULL ON/OFF）
+
+| 指令 | 说明 |
+| ---- | ---- |
+| `PULL ON` | 开启 `torque-cmd-vel.service`（肩/脖子力矩→`/cmd_vel` 拖拽映射），语音提示「拖拽模式已打开」 |
+| `PULL OFF` | 关闭 `torque-cmd-vel.service`（停止拖拽映射），语音提示「拖拽模式已关闭」 |
+
+**默认行为：** 开机时拖拽模式关闭；收到摇杆、模式、动作、步态、疾跑、脖子、电机电源等控制指令时，若拖拽已开启则**自动关闭**并播报「拖拽模式已关闭」。
+
+**语音打断：** 新对话语音（conversation_bag code）或系统提示音会打断当前正在播放的语音。
+
 ### 1.11 指令 ACK（FFE2 notify）
 
 ```text
 ACK:{原文}
 ```
 
-模式、动作、locate_face、LT 疾跑、V 有 `ACK:` 回执；步态、电机电源、**sound ON/OFF** 为**原文回显**；摇杆、脖子无回执。
+模式、动作、locate_face、LT 疾跑、V 有 `ACK:` 回执；步态、电机电源、`PULL ON/OFF`、**sound ON/OFF** 为**原文回显**；摇杆、脖子无回执。
 
 ---
 

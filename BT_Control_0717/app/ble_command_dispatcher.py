@@ -34,6 +34,7 @@ LOCATE_FACE_RE = re.compile(r"^locate_face\s+(ON|OFF)$", re.IGNORECASE)
 MP_RE = re.compile(r"^MP\s+(ON|OFF)$", re.IGNORECASE)
 GAIT_RE = re.compile(r"^GAIT\s+(ON|OFF)$", re.IGNORECASE)
 SPRINT_RE = re.compile(r"^LT\s+(ON|OFF)$", re.IGNORECASE)
+PULL_RE = re.compile(r"^PULL\s+(ON|OFF)$", re.IGNORECASE)
 SOUND_RE = re.compile(r"^sound\s+(ON|OFF)(?:\s+(\d+))?$", re.IGNORECASE)
 VOLUME_RE = re.compile(r"^V\s+(\d{1,3})$", re.IGNORECASE)
 
@@ -48,6 +49,11 @@ except ImportError:
     classify_gamepad_text = None  # type: ignore
     is_pulse_combo = None  # type: ignore
 
+try:
+    from voice_remind.conversation import conversation_code_exists
+except ImportError:
+    conversation_code_exists = None  # type: ignore
+
 
 class CommandKind(str, Enum):
     STICK = "stick"
@@ -58,8 +64,10 @@ class CommandKind(str, Enum):
     MOTOR_POWER = "motor_power"
     GAIT = "gait"
     SPRINT = "sprint"
+    PULL = "pull"
     SOUND = "sound"
     VOLUME = "volume"
+    CONVERSATION = "conversation"
     RENAME = "rename"
     UNKNOWN = "unknown"
 
@@ -97,6 +105,18 @@ def classify_payload(text: str) -> Tuple[CommandKind, str, str]:
         suffix = raw.split("_", 1)[1].lower()
         wire = f"M_{suffix}"
         return CommandKind.MODE, wire.lower(), wire
+
+    m_pull = PULL_RE.match(raw)
+    if m_pull:
+        action = m_pull.group(1).upper()
+        wire = f"PULL {action}"
+        return CommandKind.PULL, action, wire
+
+    # conversation_bag：前5字拼音首字母大写 code（须在 manifest/目录中存在）
+    if conversation_code_exists is not None:
+        code = raw.strip().upper()
+        if conversation_code_exists(code):
+            return CommandKind.CONVERSATION, code, code
 
     # 通用手柄组合键：模拟 /joy_msg 按键，不做文本话题转发
     if classify_gamepad_text is not None:
@@ -260,6 +280,17 @@ class CommandDispatcher:
                 self._echo_confirm(text)
             return
 
+        if kind == CommandKind.PULL:
+            self._log_rx(f"PULL: {wire}")
+            try:
+                self._handle(kind, payload)
+            except Exception as e:
+                self._log_warn(f"pull 处理失败: {e}")
+                return
+            if self._echo_confirm is not None:
+                self._echo_confirm(text)
+            return
+
         if kind == CommandKind.SPRINT:
             self._log_rx(f"LT: {wire}")
             try:
@@ -284,6 +315,16 @@ class CommandDispatcher:
                 self._handle(kind, payload)
             except Exception as e:
                 self._log_warn(f"音量处理失败: {e}")
+            if self._ack is not None:
+                self._ack(wire)
+            return
+
+        if kind == CommandKind.CONVERSATION:
+            self._log_rx(f"conv: {wire}")
+            try:
+                self._handle(kind, payload)
+            except Exception as e:
+                self._log_warn(f"固定语音播放失败: {e}")
             if self._ack is not None:
                 self._ack(wire)
             return
