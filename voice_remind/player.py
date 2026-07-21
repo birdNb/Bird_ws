@@ -44,6 +44,8 @@ class VoiceRemindPlayer:
         self._battery_announced: set[int] = set()
         self._play_cmd = self._detect_play_cmd()
         self._system_prompts_ok = False
+        # sound OFF 后关闭系统提示音；conversation / 小程序音频仍走 play_file
+        self._prompts_enabled = True
         self._play_lock = threading.Lock()
         self._current_proc: Optional[subprocess.Popen[bytes]] = None
 
@@ -70,11 +72,13 @@ class VoiceRemindPlayer:
             for name, (fname, _) in PROMPTS.items()
             if not os.path.isfile(os.path.join(self._assets_dir, fname))
         ]
-        self._system_prompts_ok = not missing
+        present = len(PROMPTS) - len(missing)
+        # 允许缺文件：只播已有 WAV，便于分批补录音
+        self._system_prompts_ok = present > 0
         if missing:
             self._log(
-                f"[voice] 系统提示音缺少 {missing}，自动事件语音跳过；"
-                f"conversation_bag 仍可用"
+                f"[voice] 系统提示音已就绪 {present}/{len(PROMPTS)} "
+                f"({self._play_cmd[0]})；缺少 {missing}"
             )
         else:
             self._log(f"[voice] 系统提示音已就绪 ({self._play_cmd[0]})")
@@ -107,7 +111,7 @@ class VoiceRemindPlayer:
         label: str = "",
         cooldown_key: Optional[str] = None,
     ) -> bool:
-        """播放任意 WAV（conversation_bag 等）；新指令会打断当前播放。"""
+        """播放任意 WAV（conversation_bag 等）；不受系统提示音开关影响。"""
         if self._play_cmd is None:
             return False
         if not os.path.isfile(path):
@@ -118,6 +122,15 @@ class VoiceRemindPlayer:
         self._last_play_ts[key] = time.monotonic()
         self._queue.put(("file", path, label or os.path.basename(path)))
         return True
+
+    def prompts_enabled(self) -> bool:
+        return self._prompts_enabled
+
+    def set_prompts_enabled(self, enabled: bool) -> None:
+        self._prompts_enabled = bool(enabled)
+        self._log(
+            f"[voice] 系统提示音已{'开启' if self._prompts_enabled else '关闭'}"
+        )
 
     def _ensure_worker(self) -> None:
         if self._thread is not None:
@@ -151,8 +164,17 @@ class VoiceRemindPlayer:
         self._last_play_ts[key] = now
         return True
 
-    def play(self, prompt_id: str, *, interrupt: bool = True) -> None:
+    def play(
+        self,
+        prompt_id: str,
+        *,
+        interrupt: bool = True,
+        force: bool = False,
+    ) -> None:
+        """播放系统提示音。force=True 时忽略提示音开关（用于播「关闭语音提示」本身）。"""
         if not self._enabled or not self._system_prompts_ok:
+            return
+        if not force and not self._prompts_enabled:
             return
         if not self._should_play(prompt_id):
             return
@@ -191,8 +213,60 @@ class VoiceRemindPlayer:
         """PULL OFF → 拖拽模式已关闭"""
         self.play("pull_off")
 
+    def on_sprint_on(self) -> None:
+        """LT ON → 启动疾跑"""
+        self.play("sprint_on")
+
+    def on_sprint_off(self) -> None:
+        """LT OFF → 关闭疾跑"""
+        self.play("sprint_off")
+
+    def on_mode(self, mode_key: str) -> None:
+        """M_* → 对应模式提示音。"""
+        key = (mode_key or "").strip().lower()
+        prompt_id = {
+            "m_default": "mode_default",
+            "m_init": "mode_init",
+            "m_protect": "mode_protect",
+            "m_resetzero": "mode_resetzero",
+            "m_tech": "mode_tech",
+        }.get(key)
+        if prompt_id:
+            self.play(prompt_id)
+
+    def on_squat(self) -> None:
+        """LT+RT+RB → 蹲下"""
+        self.play("squat")
+
+    def on_locate_face(self) -> None:
+        """locate_face ON → 人脸追踪"""
+        self.play("locate_face")
+
+    def on_sound_on(self) -> None:
+        """sound ON → 打开系统语音提示，并播报确认。"""
+        self._prompts_enabled = True
+        self._log("[voice] 系统提示音已开启")
+        self.play("sound_on", force=True)
+
+    def on_sound_off(self) -> None:
+        """sound OFF → 先播「关闭语音提示」，之后不再播系统提示音。"""
+        self._prompts_enabled = False
+        self._log("[voice] 系统提示音已关闭（conversation 等非提示音频仍可播）")
+        # 打断队列里未播的提示，仅保留本条确认音
+        self.play("sound_off", interrupt=True, force=True)
+
     def on_battery_pct(self, pct: int) -> None:
         if not self._enabled or not self._system_prompts_ok:
+            return
+        if not self._prompts_enabled:
+            # 仍跟踪电量，避免重新打开后漏报/连报
+            pct = max(0, min(100, int(pct)))
+            prev = self._last_battery_pct
+            self._last_battery_pct = pct
+            if prev is not None:
+                for threshold in BATTERY_VOICE_THRESHOLDS:
+                    if prev > threshold >= pct or (prev > threshold and pct <= threshold):
+                        self._battery_announced.add(threshold)
             return
         pct = max(0, min(100, int(pct)))
         prev = self._last_battery_pct

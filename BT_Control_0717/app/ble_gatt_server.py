@@ -722,7 +722,14 @@ class BleGattServer:
     def _handle_dispatched(self, kind, payload: str) -> None:
         if kind.value == "locate_face":
             if self._locate_face is not None:
-                if not self._locate_face.handle(payload):
+                action = (payload or "").strip().upper()
+                if self._locate_face.handle(payload):
+                    if (
+                        action == "ON"
+                        and self._voice_remind is not None
+                    ):
+                        self._voice_remind.on_locate_face()
+                else:
                     log_warn(f"locate_face {payload} 未成功，请先 M_default 或查看日志")
             return
         if kind.value == "volume":
@@ -730,12 +737,22 @@ class BleGattServer:
                 self._volume.handle(payload)
             return
         if kind.value == "sound":
+            action = (payload or "").strip().upper()
             if self._voice is not None:
                 wire = self._voice.on_sound_command(payload)
                 if wire:
                     self._send_command_echo(wire)
             else:
-                log_warn("语音模块未加载（检查 sound_demo）")
+                # 无 sound_demo 时仍回显，并仅控制本地系统提示音开关
+                if action in ("ON", "OFF"):
+                    self._send_command_echo(f"sound {action}")
+                else:
+                    log_warn("语音模块未加载（检查 sound_demo）")
+            if self._voice_remind is not None:
+                if action == "ON":
+                    self._voice_remind.on_sound_on()
+                elif action == "OFF":
+                    self._voice_remind.on_sound_off()
             return
         if kind.value == "rename":
             echo = f"rename {payload}"
@@ -1090,6 +1107,8 @@ class BleGattServer:
         if self._ros_bridge is not None:
             self._ros_bridge.set_action_listener(self._on_ros_action)
             self._ros_bridge.set_gait_listener(self._on_gait_state)
+            self._ros_bridge.set_mode_listener(self._on_ros_mode)
+            self._ros_bridge.set_sprint_listener(self._on_ros_sprint)
 
         wire = self._ros_bridge.get_motor_power_wire()
         if wire in ("ON", "OFF"):
@@ -1100,6 +1119,20 @@ class BleGattServer:
             return
         if action == "auto_stand":
             self._voice_remind.on_auto_stand()
+        elif action == "squat":
+            self._voice_remind.on_squat()
+
+    def _on_ros_mode(self, mode_key: str) -> None:
+        if self._voice_remind is not None:
+            self._voice_remind.on_mode(mode_key)
+
+    def _on_ros_sprint(self, enabled: bool) -> None:
+        if self._voice_remind is None:
+            return
+        if enabled:
+            self._voice_remind.on_sprint_on()
+        else:
+            self._voice_remind.on_sprint_off()
 
     def _on_gait_state(self, state: str) -> None:
         # 组合键实际生效后再原文回传 GAIT ON/OFF

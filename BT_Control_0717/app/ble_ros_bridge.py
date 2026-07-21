@@ -461,6 +461,8 @@ class BleRosBridge:
         self._sprint_enabled = False
         self._action_listener = None
         self._gait_listener = None
+        self._mode_listener = None
+        self._sprint_listener = None
         self._joy_lock = threading.Lock()
         self._power_ready_at = 0.0
         self._reviving_master = False
@@ -480,6 +482,12 @@ class BleRosBridge:
 
     def set_gait_listener(self, fn) -> None:
         self._gait_listener = fn
+
+    def set_mode_listener(self, fn) -> None:
+        self._mode_listener = fn
+
+    def set_sprint_listener(self, fn) -> None:
+        self._sprint_listener = fn
 
     def get_battery_pct(self) -> Optional[int]:
         pct = self._battery_pct
@@ -860,6 +868,11 @@ class BleRosBridge:
                     f"[ros] 疾跑{'开启' if enabled else '关闭'} → "
                     f"/joy_msg lt={'按下' if enabled else '松开'}"
                 )
+                if self._sprint_listener is not None:
+                    try:
+                        self._sprint_listener(enabled)
+                    except Exception:
+                        pass
         if not enabled:
             self._publish_sprint_lt(False)
 
@@ -1028,6 +1041,11 @@ class BleRosBridge:
             self._log(f"[ros] 模式 {label}: {mode_key} | 起始FSM=10(EXEC_CALIBRATING)")
             self._log("[ros]   已在调零执行中")
             self._log_mode_result(label)
+            if self._mode_listener is not None:
+                try:
+                    self._mode_listener(mode_key)
+                except Exception:
+                    pass
             return
 
         if self._last_fsm_state in CALIB_LOCK_STATES and mode_key != "m_resetzero":
@@ -1039,6 +1057,11 @@ class BleRosBridge:
         fsm = self._last_fsm_state
         fsm_name = FSM_STATE_NAMES.get(fsm, str(fsm)) if fsm is not None else "?"
         self._log(f"[ros] 模式 {label}: {mode_key} | 起始FSM={fsm}({fsm_name})")
+        if self._mode_listener is not None:
+            try:
+                self._mode_listener(mode_key)
+            except Exception:
+                pass
 
         self._publish_zero_twist()
         with self._lock:
@@ -1267,6 +1290,11 @@ class BleRosBridge:
         if combo == "lt+rt+start" and self._action_listener is not None:
             try:
                 self._action_listener("auto_stand")
+            except Exception:
+                pass
+        elif combo == "lt+rt+rb" and self._action_listener is not None:
+            try:
+                self._action_listener("squat")
             except Exception:
                 pass
 

@@ -4,15 +4,22 @@
 
 ## assets/ 系统提示音（英文文件名）
 
-| 文件 | 文本 |
-|------|------|
-| `ble_ready.wav` | 蓝牙就绪，待连接 |
-| `ble_connected.wav` | 蓝牙已连接 |
-| `auto_stand.wav` | 自动站立 |
-| `motor_on.wav` | 电机已上电 |
-| `walk_mode.wav` | 行走模式 |
-| `stand_mode.wav` | 站立模式 |
-| `battery_50.wav` … `battery_5.wav` | 低电量提醒 |
+| 文件 | 文本 | 指令 |
+|------|------|------|
+| `ble_ready.wav` | 蓝牙就绪，待连接 | 服务就绪 |
+| `ble_connected.wav` | 蓝牙已连接 | 已连接 |
+| `auto_stand.wav` | 自动站立 | `LT+RT+start` |
+| `motor_on.wav` | 电机已上电 | `MP ON` |
+| `walk_mode.wav` / `stand_mode.wav` | 行走/站立模式 | `GAIT ON/OFF` |
+| `pull_on.wav` / `pull_off.wav` | 拖拽开/关 | `PULL ON/OFF` |
+| `sprint_on.wav` / `sprint_off.wav` | 启动/关闭疾跑 | `LT ON/OFF` |
+| `mode_*.wav` | 默认/初始化/保护/调零/示教 | `M_*` |
+| `squat.wav` | 蹲下 | `LT+RT+RB` |
+| `locate_face.wav` | 人脸追踪 | `locate_face ON` |
+| `sound_on.wav` / `sound_off.wav` | 打开/关闭语音提示 | `sound ON/OFF`（OFF 后仅关系统提示，对话包等仍可播） |
+| `battery_50.wav` … `battery_5.wav` | 低电量提醒 | 电量下降穿越 |
+
+完整对照见 [`assets/README.md`](assets/README.md)。
 
 电量语音在**下降穿越** 50 / 25 / 10 / 5% 时各播报一次。
 
