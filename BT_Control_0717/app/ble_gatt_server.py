@@ -1205,7 +1205,7 @@ class BleGattServer:
             self._voice_remind.on_sprint_off()
 
     def _on_gait_state(self, state: str) -> None:
-        # 组合键实际生效后再原文回传 GAIT ON/OFF
+        # sim2real 实测步态后再回传 GAIT ON/OFF（可能与请求不一致）
         if state in ("ON", "OFF"):
             self._send_command_echo(f"GAIT {state}")
         if self._voice_remind is None:

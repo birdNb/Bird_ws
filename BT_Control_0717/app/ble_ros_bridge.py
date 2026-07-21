@@ -48,6 +48,10 @@ MODE_COOLDOWN_SEC = 0.8
 CHEER_PULSE_SEC = 0.35
 CHEER_COOLDOWN_SEC = 0.0
 CHEER_RELEASE_FRAMES = 20
+# sim2real StateInfo.state：行走=接收 cmd_vel；站立=不接收速度指令
+WALK_VELOCITY_STATES = frozenset({"running", "pre running"})
+STAND_VELOCITY_STATES = frozenset({"standby", "standing"})
+GAIT_VERIFY_TIMEOUT_SEC = 8.0
 
 JOY_AXES_COUNT = 8
 JOY_BUTTONS_COUNT = 11
@@ -458,6 +462,7 @@ class BleRosBridge:
         self._neck = NeckController(log=log)
         self._motor_power = MotorPowerController(log=log)
         self._battery_pct: Optional[int] = None
+        self._last_sim2real_state: Optional[str] = None
         self._sprint_enabled = False
         self._action_listener = None
         self._gait_listener = None
@@ -797,8 +802,26 @@ class BleRosBridge:
         def _on_battery(msg: UInt8) -> None:
             self._battery_pct = max(0, min(100, int(msg.data)))
 
+        def _on_sim2real_state(msg) -> None:
+            self._last_sim2real_state = str(msg.state)
+
         rospy.Subscriber("/fsm_state", Int32, _on_fsm, queue_size=1)
         rospy.Subscriber("/battery_level", UInt8, _on_battery, queue_size=1)
+        if self._has_joy:
+            try:
+                from sim2real_msg.msg import StateInfo
+
+                rospy.Subscriber(
+                    "/sim2real_state_info",
+                    StateInfo,
+                    _on_sim2real_state,
+                    queue_size=1,
+                )
+                self._log("[ros] 已订阅 /sim2real_state_info（步态实测校验）")
+            except ImportError:
+                self._log(
+                    "[ros][warn] 无 sim2real_msg.StateInfo，步态回传无法实测校验"
+                )
 
         # 等模式节点订阅 /joy_msg 后再对外接指令，避免启动竞态打崩主节点
         self._log("[ros] 等待 sim2real_master 订阅 /joy_msg…")
@@ -1308,8 +1331,49 @@ class BleRosBridge:
             daemon=True,
         ).start()
 
+    def _read_velocity_walk_enabled(self) -> Optional[bool]:
+        """True=行走(速度控制启用), False=站立, None=未知或非步态状态。"""
+        raw = self._last_sim2real_state
+        if not raw:
+            return None
+        s = raw.strip().lower()
+        if s in WALK_VELOCITY_STATES:
+            return True
+        if s in STAND_VELOCITY_STATES:
+            return False
+        return None
+
+    def _wait_velocity_walk_state(
+        self, want_walk: bool, timeout: float = GAIT_VERIFY_TIMEOUT_SEC
+    ) -> Optional[bool]:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline and not self._stop.is_set():
+            cur = self._read_velocity_walk_enabled()
+            if cur is not None and cur == want_walk:
+                return cur
+            time.sleep(0.1)
+        return self._read_velocity_walk_enabled()
+
+    def _confirm_gait_verified(self, verified_walk: bool, requested_walk: bool) -> None:
+        wire = "ON" if verified_walk else "OFF"
+        if verified_walk != requested_walk:
+            self._log(
+                f"[ros][warn] 步态未达预期：请求={'行走' if requested_walk else '站立'} "
+                f"实际={wire} (sim2real={self._last_sim2real_state!r})"
+            )
+        else:
+            self._log(
+                f"[ros] 步态已确认={'行走' if verified_walk else '站立'} "
+                f"(sim2real={self._last_sim2real_state!r})"
+            )
+        if self._gait_listener is not None:
+            try:
+                self._gait_listener(wire)
+            except Exception:
+                pass
+
     def _trigger_gait(self, state: str) -> None:
-        """GAIT ON/OFF → /joy 发送 lt+rt+lb（步态启停）；生效后再回调 listener。"""
+        """GAIT ON/OFF → /joy 发送 lt+rt+lb（步态切换）；以 sim2real 实测后再回调。"""
         if state not in ("ON", "OFF"):
             return
         if state == "OFF" and self._last_fsm_state in RECOVERY_FSM_STATES:
@@ -1329,6 +1393,20 @@ class BleRosBridge:
             return
         self._last_action_ts[GAIT_JOY_KEY] = now
 
+        want_walk = state == "ON"
+        current = self._read_velocity_walk_enabled()
+        if current is not None and current == want_walk:
+            self._log(
+                f"[ros] 步态已是{'行走' if want_walk else '站立'}，无需切换 "
+                f"(sim2real={self._last_sim2real_state!r})"
+            )
+            self._confirm_gait_verified(want_walk, want_walk)
+            return
+        if current is None:
+            self._log(
+                "[ros][warn] 未知 sim2real 步态状态，仍尝试 lt+rt+lb 切换"
+            )
+
         label = "步态开启" if state == "ON" else "步态关闭"
         combo = GAIT_JOY_KEY
         self._log(f"[ros] {label}: GAIT {state} → /joy ({COMBO_HOLD_SEC}s)")
@@ -1339,23 +1417,26 @@ class BleRosBridge:
 
         threading.Thread(
             target=self._run_gait_and_confirm,
-            args=(state, combo, label),
+            args=(want_walk, combo, label),
             daemon=True,
         ).start()
 
-    def _run_gait_and_confirm(self, state: str, combo: str, label: str) -> None:
-        """长按组合键完成后视为步态已切换，再通知上层回传/语音。"""
+    def _run_gait_and_confirm(
+        self, want_walk: bool, combo: str, label: str
+    ) -> None:
+        """长按组合键后等待 sim2real 进入对应步态，再回传实测结果。"""
         try:
             self._run_steps([combo], label, COMBO_HOLD_SEC)
             if self._stop.is_set():
                 return
-            # 松键后稍等固件侧切换完成
-            time.sleep(0.15)
-            if self._gait_listener is not None:
-                try:
-                    self._gait_listener(state)
-                except Exception:
-                    pass
+            verified = self._wait_velocity_walk_state(want_walk)
+            if verified is None:
+                self._log(
+                    "[ros][warn] 步态切换后状态未知，不回传 "
+                    f"(sim2real={self._last_sim2real_state!r})"
+                )
+                return
+            self._confirm_gait_verified(verified, want_walk)
         except Exception as e:
             self._log(f"[ros][warn] 步态执行失败: {e}")
 
