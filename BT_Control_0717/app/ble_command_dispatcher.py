@@ -26,8 +26,8 @@ STICK_RE = re.compile(
 )
 MODE_RE = re.compile(r"^M_(default|init|protect|resetzero|tech)$", re.IGNORECASE)
 
-# 手柄组合键冷却：短脉冲动作防连发（秒）
-PULSE_ACTION_COOLDOWN_SEC = 8.0
+# 手柄组合键冷却（秒）；0=关闭，便于启动后立刻发停止/反向动作
+PULSE_ACTION_COOLDOWN_SEC = 0.0
 NECK_OFFSET_RE = re.compile(r"^[Pp]([+-]?\d+)Y([+-]?\d+)$")
 NECK_CENTER_RE = re.compile(r"^neck0$", re.IGNORECASE)
 LOCATE_FACE_RE = re.compile(r"^locate_face\s+(ON|OFF)$", re.IGNORECASE)
@@ -348,16 +348,17 @@ class CommandDispatcher:
             return
 
         if kind == CommandKind.ACTION:
-            now = time.monotonic()
-            pulse = (
-                is_pulse_combo(payload)
-                if is_pulse_combo is not None
-                else payload in ("rt+a", "rt+x", "rt+y", "rt+b", "a", "x")
-            )
-            window = PULSE_ACTION_COOLDOWN_SEC if pulse else 1.5
-            if now - self._recent_action_ts.get(payload, 0.0) < window:
-                return
-            self._recent_action_ts[payload] = now
+            if PULSE_ACTION_COOLDOWN_SEC > 0:
+                now = time.monotonic()
+                pulse = (
+                    is_pulse_combo(payload)
+                    if is_pulse_combo is not None
+                    else payload in ("rt+a", "rt+x", "rt+y", "rt+b", "a", "x")
+                )
+                window = PULSE_ACTION_COOLDOWN_SEC if pulse else 0.0
+                if window > 0 and now - self._recent_action_ts.get(payload, 0.0) < window:
+                    return
+                self._recent_action_ts[payload] = now
 
         cmd = QueuedCommand(kind=kind, wire=wire, payload=payload)
         with self._lock:

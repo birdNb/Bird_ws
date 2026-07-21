@@ -42,11 +42,11 @@ STICK_FILTER_ALPHA = 0.45
 STICK_DEADBAND = 0.10
 STICK_XY_LIMIT = 1.8
 STICK_Z_LIMIT = 1.5
-ACTION_COOLDOWN_SEC = 1.0
+ACTION_COOLDOWN_SEC = 0.0
 MODE_COOLDOWN_SEC = 0.8
 # 挥双手：短脉冲触发（勿 1s 长按，松开会被固件当成第二次触发）
 CHEER_PULSE_SEC = 0.35
-CHEER_COOLDOWN_SEC = 8.0
+CHEER_COOLDOWN_SEC = 0.0
 CHEER_RELEASE_FRAMES = 20
 
 JOY_AXES_COUNT = 8
@@ -1256,7 +1256,10 @@ class BleRosBridge:
             return
 
         now = time.monotonic()
-        if now - self._last_action_ts.get(combo, 0.0) < ACTION_COOLDOWN_SEC:
+        if (
+            ACTION_COOLDOWN_SEC > 0
+            and now - self._last_action_ts.get(combo, 0.0) < ACTION_COOLDOWN_SEC
+        ):
             return
         self._last_action_ts[combo] = now
 
@@ -1319,7 +1322,10 @@ class BleRosBridge:
             )
             return
         now = time.monotonic()
-        if now - self._last_action_ts.get(GAIT_JOY_KEY, 0.0) < ACTION_COOLDOWN_SEC:
+        if (
+            ACTION_COOLDOWN_SEC > 0
+            and now - self._last_action_ts.get(GAIT_JOY_KEY, 0.0) < ACTION_COOLDOWN_SEC
+        ):
             return
         self._last_action_ts[GAIT_JOY_KEY] = now
 
@@ -1364,9 +1370,12 @@ class BleRosBridge:
             label = labels.get(combo) or PULSE_CUSTOM_ACTIONS.get(combo, combo)
         now = time.monotonic()
         if combo in self._pulse_action_running:
-            self._log(f"[ros] {label}执行中，忽略重复指令")
-            return
-        if now - self._last_action_ts.get(combo, 0.0) < CHEER_COOLDOWN_SEC:
+            self._log(f"[ros] {label}执行中，新指令打断")
+            self._pulse_action_running.discard(combo)
+        if (
+            CHEER_COOLDOWN_SEC > 0
+            and now - self._last_action_ts.get(combo, 0.0) < CHEER_COOLDOWN_SEC
+        ):
             self._log(f"[ros] {label}冷却中，忽略")
             return
         self._last_action_ts[combo] = now

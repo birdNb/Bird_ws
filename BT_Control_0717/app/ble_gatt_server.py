@@ -57,10 +57,18 @@ except ImportError:
 
 try:
     from platform_detect import detect_platform
-    from ble_legacy_adv import start_advertising as _start_ble_advertising
+    from ble_legacy_adv import (
+        start_advertising as _start_ble_advertising,
+        stop_advertising as _stop_ble_advertising,
+        stop_adv_keeper as _stop_adv_keeper,
+        btmgmt as _btmgmt_adv,
+    )
 except ImportError:
     detect_platform = None  # type: ignore
     _start_ble_advertising = None  # type: ignore
+    _stop_ble_advertising = None  # type: ignore
+    _stop_adv_keeper = None  # type: ignore
+    _btmgmt_adv = None  # type: ignore
 
 # 小程序也可按 MAC 连接（系统设置里看到的蓝牙地址）
 BOARD_BDADDR = "00:19:86:00:2E:AF"
@@ -308,6 +316,7 @@ class BleGattServer:
         self._adv_index = 0
         self._adv_reregister_pending = False
         self._adv_registered = False
+        self._adv_stop_pending = False
         self._notify_active = False
         self._pending_notifies: List[bytes] = []
 
@@ -361,6 +370,64 @@ class BleGattServer:
         if self._voice_remind is not None:
             self._voice_remind.on_ble_connected()
         self._schedule_connect_hint()
+        self._stop_advertising_while_connected()
+
+    def _stop_advertising_while_connected(self) -> None:
+        """连接后停止 BLE 广播，避免其他手机扫到并抢占连接。"""
+        if self._adv_stop_pending:
+            return
+        self._adv_stop_pending = True
+        self._adv_reregister_pending = False
+
+        hci_dev = self._adapter_path.split("/")[-1] if self._adapter_path else "hci0"
+        plat = detect_platform() if detect_platform else None
+        log_info("已连接：停止 BLE 广播（断连后自动恢复可扫描）")
+
+        def _stop_hw() -> None:
+            try:
+                if _stop_adv_keeper is not None:
+                    _stop_adv_keeper()
+                if _stop_ble_advertising is not None:
+                    _stop_ble_advertising(hci_dev)
+                if (
+                    plat is not None
+                    and plat.adv_mode != "legacy_hci"
+                    and _btmgmt_adv is not None
+                ):
+                    _btmgmt_adv(hci_dev, "advertising", "off")
+                    _btmgmt_adv(hci_dev, "rm-adv", "1")
+                    _btmgmt_adv(hci_dev, "rm-adv", "2")
+            except Exception as e:
+                log_warn(f"停止 BLE 广播失败: {e}")
+
+        threading.Thread(target=_stop_hw, daemon=True).start()
+
+        if not self._adv_registered or self._adv_manager is None or self._adv is None:
+            return
+
+        def _on_unregistered() -> None:
+            self._adv_registered = False
+            log_info("已连接：D-Bus 广播已注销")
+
+        def _on_unregister_failed(error: dbus.DBusException) -> None:
+            err = self._dbus_error_text(error)
+            if "DoesNotExist" in err or "NotFound" in err:
+                self._adv_registered = False
+                return
+            log_warn(f"注销 D-Bus 广播失败: {err}")
+
+        try:
+            self._adv_manager.UnregisterAdvertisement(
+                self._adv.get_path(),
+                reply_handler=_on_unregistered,
+                error_handler=_on_unregister_failed,
+            )
+        except dbus.exceptions.DBusException as e:
+            err = self._dbus_error_text(e)
+            if "DoesNotExist" in err or "NotFound" in err:
+                self._adv_registered = False
+            else:
+                log_warn(f"UnregisterAdvertisement 异常: {err}")
 
     def _on_phone_disconnected(self, path: str) -> None:
         if path not in self._connected_devices:
@@ -377,6 +444,7 @@ class BleGattServer:
         if not self._connected_devices:
             self._notify_active = False
             self._pending_notifies.clear()
+            self._adv_stop_pending = False
             self._schedule_restart_advertising()
 
     @staticmethod
@@ -1002,6 +1070,8 @@ class BleGattServer:
         self, hci_dev: str = "hci0", force: bool = False, initial_delay: float = 0.4
     ) -> None:
         """按平台外发广播：RK 板载 Legacy HCI，Orin USB btmgmt。"""
+        if self._connected_devices:
+            return
         if initial_delay > 0:
             time.sleep(initial_delay)
         if _start_ble_advertising is not None:

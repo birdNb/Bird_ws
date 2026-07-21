@@ -312,6 +312,8 @@ fsm:5
 
 ## 三、连接流程
 
+**广播策略：** 手机连接成功后，板端**立即停止 BLE 广播**，小程序/other 设备无法再扫到该机器人，避免连接被抢占；断连后自动恢复可扫描。
+
 ```text
 扫描 FFE0 → createBLEConnection → setBLEMTU(247)
 → 发现特征 → 订阅 FFE2
@@ -342,17 +344,17 @@ fsm:5
 | `LT+RT+start`     | 动作   | `lt+rt+start` 1s | `/joy_msg` 起立                       | `ACK:LT+RT+start`     | 保护态先 `lt+rt+lb` 开步态       |
 | `LT+RT+RB`        | 动作   | `lt+rt+rb` 1s    | `/joy_msg` 蹲下                       | `ACK:LT+RT+RB`        |                           |
 | `LT+RT+B`         | 动作   | `lt+rt+b` 1s     | `/joy_msg` 卸力                       | `ACK:LT+RT+B`         |                           |
-| `RT+A`            | 动作   | `rt+a` 短脉冲       | `/joy_msg` 挥双手                      | `ACK:RT+A`            | 冷却 8s                     |
-| `RT+X`            | 动作   | `rt+x` 短脉冲       | `/joy_msg` 挥单手                      | `ACK:RT+X`            | 冷却 8s                     |
-| `RT+Y`            | 动作   | `rt+y` 短脉冲       | `/joy_msg` 握手                        | `ACK:RT+Y`            | 冷却 8s                     |
-| `RT+B`            | 动作   | `rt+b` 短脉冲       | `/joy_msg` 摇手防守                      | `ACK:RT+B`            | 冷却 8s                     |
-| `A`               | 自定义  | `a` 短脉冲          | `/joy_msg` `byd_small_kick`         | `ACK:A`               | 冷却 8s                     |
-| `X`               | 自定义  | `x` 短脉冲          | `/joy_msg` `byd_power`              | `ACK:X`               | 冷却 8s                     |
-| `LT+RT+DPU`       | 自定义  | `lt+rt+dpu`      | `/joy_msg` `byd_bb`                 | `ACK:LT+RT+DPU`       | 冷却 8s                     |
-| `LT+RT+DPR`       | 自定义  | `lt+rt+dpr`      | `/joy_msg` `byd_zzx`                | `ACK:LT+RT+DPR`       | 冷却 8s                     |
-| `LT+DPR`          | 自定义  | `lt+dpr`         | `/joy_msg` `byd_zhidengtui`         | `ACK:LT+DPR`          | 冷却 8s                     |
-| `LT+DPD`          | 自定义  | `lt+dpd`         | `/joy_msg` `byd_zhongquan`          | `ACK:LT+DPD`          | 冷却 8s                     |
-| `LT+DPL`          | 自定义  | `lt+dpl`         | `/joy_msg` `byd_shanggouquan`       | `ACK:LT+DPL`          | 冷却 8s                     |
+| `RT+A`            | 动作   | `rt+a` 短脉冲       | `/joy_msg` 挥双手                      | `ACK:RT+A`            | 无冷却                       |
+| `RT+X`            | 动作   | `rt+x` 短脉冲       | `/joy_msg` 挥单手                      | `ACK:RT+X`            | 无冷却                       |
+| `RT+Y`            | 动作   | `rt+y` 短脉冲       | `/joy_msg` 握手                        | `ACK:RT+Y`            | 无冷却                       |
+| `RT+B`            | 动作   | `rt+b` 短脉冲       | `/joy_msg` 摇手防守                      | `ACK:RT+B`            | 无冷却                       |
+| `A`               | 自定义  | `a` 短脉冲          | `/joy_msg` `byd_small_kick`         | `ACK:A`               | 无冷却                       |
+| `X`               | 自定义  | `x` 短脉冲          | `/joy_msg` `byd_power`              | `ACK:X`               | 无冷却                       |
+| `LT+RT+DPU`       | 自定义  | `lt+rt+dpu`      | `/joy_msg` `byd_bb`                 | `ACK:LT+RT+DPU`       | 无冷却                       |
+| `LT+RT+DPR`       | 自定义  | `lt+rt+dpr`      | `/joy_msg` `byd_zzx`                | `ACK:LT+RT+DPR`       | 无冷却                       |
+| `LT+DPR`          | 自定义  | `lt+dpr`         | `/joy_msg` `byd_zhidengtui`         | `ACK:LT+DPR`          | 无冷却                       |
+| `LT+DPD`          | 自定义  | `lt+dpd`         | `/joy_msg` `byd_zhongquan`          | `ACK:LT+DPD`          | 无冷却                       |
+| `LT+DPL`          | 自定义  | `lt+dpl`         | `/joy_msg` `byd_shanggouquan`       | `ACK:LT+DPL`          | 无冷却                       |
 | `GAIT ON`         | 步态   | `lt+rt+lb` 1s    | `/joy_msg` 步态开                      | 原文 `GAIT ON`（生效后）    | 长按完成后回传                 |
 | `GAIT OFF`        | 步态   | `lt+rt+lb` 1s    | `/joy_msg` 步态关                      | 原文 `GAIT OFF`（生效后）   | FSM=8/1 拒绝时不回传           |
 | `LT ON`           | 疾跑   | `lt` 持续按住        | `/joy_msg` lt=-1                    | `ACK:LT ON`           | 与摇杆并行                     |
