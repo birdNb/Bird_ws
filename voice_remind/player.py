@@ -51,11 +51,9 @@ class VoiceRemindPlayer:
 
     @staticmethod
     def _detect_play_cmd() -> Optional[list[str]]:
-        pulse = os.environ.get("PULSE_SERVER", "")
-        if pulse and shutil.which("paplay"):
-            return ["paplay", "--property=media.role=phone"]
+        # 勿用 media.role=phone：Pulse 会单独记音量，常比音乐通道小
         if shutil.which("paplay"):
-            return ["paplay", "--property=media.role=phone"]
+            return ["paplay", "--volume=65536"]
         if shutil.which("aplay"):
             return ["aplay", "-q"]
         return None
