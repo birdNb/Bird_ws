@@ -16,7 +16,7 @@ NECK_STEP_DEG = 10.0
 YAW_LIMIT_DEG = 80.0
 PITCH_UP_DEG = -40.0
 PITCH_DOWN_DEG = 60.0
-HOME_RATE_DEG_PER_SEC = 45.0
+HOME_RATE_DEG_PER_SEC = 90.0
 TICK_HZ = 20.0
 
 NECK_OFFSET_RE = re.compile(r"^[Pp]([+-]?\d+)Y([+-]?\d+)$")
@@ -54,7 +54,7 @@ def _step_toward_zero(val: float, step: float) -> float:
 
 
 class NeckController:
-    """P+步=抬头/右转 10°，P-步=低头/左转 10°；neck0 / P0Y0 平滑回中。"""
+    """P+步=抬头/右转，P-步=低头/左转；neck0 / P0Y0 平滑回中。"""
 
     def __init__(self, log: LogFn = print) -> None:
         self._log = log

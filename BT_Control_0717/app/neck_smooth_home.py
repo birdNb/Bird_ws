@@ -10,7 +10,7 @@ import sys
 import time
 
 _RATE_HZ = 50
-_HOME_RATE_DEG = 45.0
+_HOME_RATE_DEG = 90.0
 _MAX_SEC = 8.0
 _TOPIC = "/pi_plus_absolute"
 _YAW_JOINT = "head_yaw_joint"
