@@ -7,6 +7,7 @@
 |--------|----------|-----------------|
 | `ble_ready.wav` | 蓝牙就绪，待连接 | BLE 服务就绪 |
 | `ble_connected.wav` | 蓝牙已连接 | 小程序连上 |
+| `ble_disconnected.wav` | 蓝牙已断开 | 小程序断开 |
 | `auto_stand.wav` | 自动站立 | `LT+RT+start` |
 | `motor_on.wav` | 电机已上电 | `MP ON` |
 | `walk_mode.wav` | 行走模式 | `GAIT ON` |

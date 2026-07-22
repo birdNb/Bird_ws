@@ -435,6 +435,8 @@ class BleGattServer:
         label = self._device_label(path)
         self._connected_devices.discard(path)
         log_info(f"--- 手机已断开: {label} ---")
+        if self._voice_remind is not None:
+            self._voice_remind.on_ble_disconnected()
         if self._dispatcher is not None:
             self._dispatcher.on_disconnect()
         if self._voice is not None:

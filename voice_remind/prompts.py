@@ -10,6 +10,7 @@ from typing import Dict, Tuple
 PROMPTS: Dict[str, Tuple[str, str]] = {
     "ble_ready": ("ble_ready.wav", "蓝牙就绪，待连接"),
     "ble_connected": ("ble_connected.wav", "蓝牙已连接"),
+    "ble_disconnected": ("ble_disconnected.wav", "蓝牙已断开"),
     "auto_stand": ("auto_stand.wav", "自动站立"),
     "motor_on": ("motor_on.wav", "电机已上电"),
     "walk_mode": ("walk_mode.wav", "行走模式"),

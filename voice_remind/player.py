@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""本地 WAV 语音提示播放器（队列阻塞播放；条目互不打断，按序播完）。"""
+"""本地 WAV 语音提示播放器。
+
+- assets 系统提示：入队阻塞播放，互不打断
+- conversation_bag / play_file：打断当前并立即播放
+"""
 
 from __future__ import annotations
 
@@ -111,7 +115,7 @@ class VoiceRemindPlayer:
         label: str = "",
         cooldown_key: Optional[str] = None,
     ) -> bool:
-        """播放任意 WAV（conversation_bag 等）；入队等待，不打断当前提示。"""
+        """播放对话/任意 WAV（conversation_bag）：打断当前播放并清空待播队列。"""
         if self._play_cmd is None:
             return False
         if not os.path.isfile(path):
@@ -119,6 +123,9 @@ class VoiceRemindPlayer:
         self._ensure_worker()
         key = cooldown_key or path
         self._last_play_ts[key] = time.monotonic()
+        # 对话优先：停掉当前（含系统提示），丢掉排队中的提示，立刻播本条
+        self._stop_current_proc()
+        self._drain_queue()
         self._queue.put(("file", path, label or os.path.basename(path)))
         return True
 
@@ -187,6 +194,9 @@ class VoiceRemindPlayer:
 
     def on_ble_connected(self) -> None:
         self.play("ble_connected")
+
+    def on_ble_disconnected(self) -> None:
+        self.play("ble_disconnected")
 
     def on_auto_stand(self) -> None:
         self.play("auto_stand")
@@ -304,7 +314,7 @@ class VoiceRemindPlayer:
                 )
                 with self._play_lock:
                     self._current_proc = proc
-                # 阻塞播完再取下一条，保证互不打断
+                # 正常播完；对话打断时由 _stop_current_proc 终止本进程
                 proc.wait(timeout=30.0)
                 self._log(f"[voice] 播放: {label}")
             except (OSError, subprocess.SubprocessError) as e:
