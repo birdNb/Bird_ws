@@ -794,11 +794,11 @@ class BleGattServer:
             if self._locate_face is not None:
                 action = (payload or "").strip().upper()
                 if self._locate_face.handle(payload):
-                    if (
-                        action == "ON"
-                        and self._voice_remind is not None
-                    ):
-                        self._voice_remind.on_locate_face()
+                    if self._voice_remind is not None:
+                        if action == "ON":
+                            self._voice_remind.on_locate_face()
+                        elif action == "OFF":
+                            self._voice_remind.on_locate_face_off()
                 else:
                     log_warn(f"locate_face {payload} 未成功，请先 M_default 或查看日志")
             return
@@ -1172,8 +1172,11 @@ class BleGattServer:
         def _on_mp_state(motor_on: bool) -> None:
             wire = "ON" if motor_on else "OFF"
             self._telemetry.push_mp_state(wire, force=True)
-            if motor_on and self._voice_remind is not None:
-                self._voice_remind.on_motor_on()
+            if self._voice_remind is not None:
+                if motor_on:
+                    self._voice_remind.on_motor_on()
+                else:
+                    self._voice_remind.on_motor_off()
 
         self._ros_bridge.set_motor_power_listener(_on_mp_state)
         if self._ros_bridge is not None:

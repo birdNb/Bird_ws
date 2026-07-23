@@ -204,6 +204,9 @@ class VoiceRemindPlayer:
     def on_motor_on(self) -> None:
         self.play("motor_on")
 
+    def on_motor_off(self) -> None:
+        self.play("motor_off")
+
     def on_walk_mode(self) -> None:
         """GAIT ON → 行走模式"""
         self.play("walk_mode")
@@ -246,8 +249,12 @@ class VoiceRemindPlayer:
         self.play("squat")
 
     def on_locate_face(self) -> None:
-        """locate_face ON → 人脸追踪"""
-        self.play("locate_face")
+        """locate_face ON → 人脸跟随已开启"""
+        self.play("face_on")
+
+    def on_locate_face_off(self) -> None:
+        """locate_face OFF → 人脸跟随已关闭"""
+        self.play("face_off")
 
     def on_sound_on(self) -> None:
         """sound ON → 打开系统语音提示，并播报确认。"""
