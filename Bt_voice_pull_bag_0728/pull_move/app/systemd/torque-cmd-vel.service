@@ -1,0 +1,24 @@
+[Unit]
+Description=Torque to cmd_vel bridge (shoulder/neck, FSM walk-only)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=@BIRD_USER@
+Group=@BIRD_GROUP@
+WorkingDirectory=@DEMO_DIR@
+Environment=ROS_DISTRO=noetic
+Environment=HOME=@BIRD_HOME@
+Environment=BIRD_HOME=@BIRD_HOME@
+Environment=DEMO_DIR=@DEMO_DIR@
+EnvironmentFile=-/etc/default/torque-cmd-vel
+ExecStartPre=/bin/sleep 5
+ExecStart=@DEMO_DIR@/systemd/torque-cmd-vel-boot.sh
+Restart=no
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=torque-cmd-vel
+
+[Install]
+WantedBy=multi-user.target

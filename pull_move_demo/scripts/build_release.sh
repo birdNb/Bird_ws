@@ -44,6 +44,11 @@ for sh in run_torque_bridge.sh run_monitor.sh run_neck_monitor.sh systemd/torque
   sed -i 's/\.py"/.pyc"/g; s/\.py /.pyc /g; s/\.py$/.pyc/' "${sh}" 2>/dev/null || true
 done
 sed -i 's/torque_cmd_vel_bridge\.py/torque_cmd_vel_bridge.pyc/g' install-autostart.sh
+# chmod 对缺失文件不失败（兼容 .py / .pyc）
+sed -i '/torque_cmd_vel_bridge\.pyc"/d' install-autostart.sh
+if ! grep -q 'torque_cmd_vel_bridge.pyc 2>/dev/null' install-autostart.sh; then
+  sed -i '/run_pitch_bridge\.sh"/a chmod +x "${DEMO_DIR}"/torque_cmd_vel_bridge.pyc 2>/dev/null || true\nchmod +x "${DEMO_DIR}"/torque_cmd_vel_bridge.py 2>/dev/null || true' install-autostart.sh
+fi
 
 chmod +x "${APP_DIR}"/*.sh "${APP_DIR}/systemd/"*.sh
 

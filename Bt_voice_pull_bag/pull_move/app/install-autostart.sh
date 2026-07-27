@@ -25,8 +25,9 @@ fi
 chmod +x \
   "${BOOT_SRC}" \
   "${DEMO_DIR}/run_torque_bridge.sh" \
-  "${DEMO_DIR}/run_pitch_bridge.sh" \
-  "${DEMO_DIR}/torque_cmd_vel_bridge.pyc"
+  "${DEMO_DIR}/run_pitch_bridge.sh"
+chmod +x "${DEMO_DIR}"/torque_cmd_vel_bridge.pycc 2>/dev/null || true
+chmod +x "${DEMO_DIR}"/torque_cmd_vel_bridge.pyc 2>/dev/null || true
 
 sed \
   -e "s|@DEMO_DIR@|${DEMO_DIR}|g" \
