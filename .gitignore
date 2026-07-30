@@ -10,6 +10,9 @@ dist/
 build/
 *.egg
 
+# BLE 发布包保留字节码（否则 git 拉下来无法运行）
+!BT_Control_*/app/*.pyc
+
 # 虚拟环境
 venv/
 .venv/
@@ -47,3 +50,6 @@ Qwen3-TTS-Openai-Fastapi.tar.gz
 
 # git 损坏修复时的本地备份（勿提交）
 .git.bak-corrupt-*/
+
+# 购物助手demo
+AI_shopping_assistant/
