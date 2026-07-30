@@ -23,12 +23,15 @@ Camera::Camera() {
     }
     frame_w_ = static_cast<int>(cap_.get(cv::CAP_PROP_FRAME_WIDTH));
     frame_h_ = static_cast<int>(cap_.get(cv::CAP_PROP_FRAME_HEIGHT));
-    const int eye_w = ZED_STEREO ? frame_w_ / 2 : frame_w_;
+    // ZED 等并排双目：宽约等于高的 2 倍以上，或编译期强制 ZED_STEREO
+    sbs_stereo_ = ZED_STEREO || (frame_w_ >= frame_h_ * 2);
+    const int eye_w = sbs_stereo_ ? frame_w_ / 2 : frame_w_;
     ROS_INFO(
-        "[cam] 使用 /dev/video%d, 原始 %dx%d  左眼 %dx%d  MediaPipe 最大宽 %d",
+        "[cam] 使用 /dev/video%d, 原始 %dx%d  %s %dx%d  检测最大宽 %d",
         camera_index_,
         frame_w_,
         frame_h_,
+        sbs_stereo_ ? "左眼" : "画面",
         eye_w,
         frame_h_,
         FACE_PROC_MAX_W);
@@ -84,7 +87,8 @@ bool Camera::tryOpenIndex(int index) {
 }
 
 bool Camera::openAnyCamera() {
-    std::vector<int> candidates = {CAMERA_INDEX, 4, 6, 2, 0, 8};
+    // Orin+ZED 常见 /dev/video0；RK+D435i 常见 /dev/video4
+    std::vector<int> candidates = {CAMERA_INDEX, 0, 4, 6, 2, 8};
     for (int i = 0; i <= 12; ++i) {
         if (std::find(candidates.begin(), candidates.end(), i) == candidates.end()) {
             candidates.push_back(i);
@@ -106,7 +110,9 @@ bool Camera::read(cv::Mat& frame) {
     if (!cap_.read(raw) || raw.empty()) {
         return false;
     }
-    if (ZED_STEREO && raw.cols >= 2) {
+    const bool sbs = sbs_stereo_ || (raw.cols >= raw.rows * 2);
+    if (sbs && raw.cols >= 2) {
+        sbs_stereo_ = true;
         frame = raw(cv::Rect(0, 0, raw.cols / 2, raw.rows)).clone();
     } else {
         frame = raw;

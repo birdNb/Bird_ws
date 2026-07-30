@@ -18,6 +18,7 @@ private:
 
     cv::VideoCapture cap_;
     bool is_opened_ = false;
+    bool sbs_stereo_ = false;  // 并排双目（ZED 等），取左半幅
     int camera_index_ = -1;
     int frame_w_ = 0;
     int frame_h_ = 0;

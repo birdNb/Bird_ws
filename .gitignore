@@ -48,6 +48,10 @@ Miniconda3-*.sh
 Qwen3-TTS-Openai-Fastapi/
 Qwen3-TTS-Openai-Fastapi.tar.gz
 
+# Qwen3-VL-2B 本地部署（模型权重/缓存体积大，勿提交）
+Qwen3-VL-2B/
+
+
 # git 损坏修复时的本地备份（勿提交）
 .git.bak-corrupt-*/
 

@@ -16,13 +16,9 @@ _BIRD_WS = os.environ.get("BIRD_WS") or os.path.abspath(os.path.join(_BT_DIR, ".
 _RUN_USER_HOME = os.environ.get("BIRD_HOME") or os.path.expanduser(
     f"~{os.environ.get('BIRD_USER', 'hightorque')}"
 )
-LOCATE_FACE_CPP_BIN = os.path.join(_BIRD_WS, "locate_face_cpp/build/locate_face")
-LOCATE_FACE_CPP_START = os.path.join(_BIRD_WS, "locate_face_cpp/start.sh")
-LOCATE_FACE_SCRIPT = os.path.join(_BIRD_WS, "locate_face/locate_face.py")
 NECK_HOME_SCRIPT = os.path.join(_BT_DIR, "neck_smooth_home.py")
 NECK_STATE_FILE = "/tmp/locate_face_neck.state"
 ROS_ENV_SH = os.path.join(_BT_DIR, "ros_env.sh")
-LOG_PATH = os.path.join(_BIRD_WS, "locate_face_cpp/locate_face_ble.log")
 START_VERIFY_SEC = 12.0
 PROC_EXIT_WAIT_SEC = 3.0
 HOMING_EXIT_SEC = 8.0
@@ -31,6 +27,52 @@ ORPHAN_KILL_WAIT_SEC = 2.5
 LogFn = Callable[[str], None]
 
 _READY_MARKERS = ("[FSM] OK", "进入视觉伺服", "[gui] 后台模式", "[gui] 全屏预览")
+
+
+def _candidate_roots() -> Tuple[str, ...]:
+    """装机包根、工作区根、显式环境变量，按优先级去重。"""
+    roots = []
+    env_root = os.environ.get("LOCATE_FACE_ROOT", "").strip()
+    if env_root:
+        roots.append(env_root)
+    # Bt_voice_pull_bag 本身
+    roots.append(_BIRD_WS)
+    # 包内路径：.../Bt_voice_pull_bag → 上一级 Bird_ws
+    parent = os.path.abspath(os.path.join(_BIRD_WS, ".."))
+    roots.append(parent)
+    roots.append(os.path.join(_RUN_USER_HOME, "Bird_ws"))
+    # 去重且保序
+    seen = set()
+    out = []
+    for r in roots:
+        if r and r not in seen and os.path.isdir(r):
+            seen.add(r)
+            out.append(r)
+    return tuple(out)
+
+
+def _resolve_locate_face_paths() -> Tuple[str, str, str, str, str]:
+    """返回 (cpp_bin, cpp_start, py_script, cpp_root, log_path)。"""
+    for root in _candidate_roots():
+        cpp_bin = os.path.join(root, "locate_face_cpp/build/locate_face")
+        cpp_start = os.path.join(root, "locate_face_cpp/start.sh")
+        py_script = os.path.join(root, "locate_face/locate_face.py")
+        cpp_root = os.path.join(root, "locate_face_cpp")
+        if os.path.isfile(cpp_bin) and os.access(cpp_bin, os.X_OK):
+            log_path = os.path.join(cpp_root, "locate_face_ble.log")
+            return cpp_bin, cpp_start, py_script, cpp_root, log_path
+        if os.path.isfile(cpp_start) or os.path.isfile(py_script):
+            log_path = os.path.join(cpp_root, "locate_face_ble.log")
+            return cpp_bin, cpp_start, py_script, cpp_root, log_path
+    # 回退到 BIRD_WS（便于错误信息）
+    cpp_root = os.path.join(_BIRD_WS, "locate_face_cpp")
+    return (
+        os.path.join(cpp_root, "build/locate_face"),
+        os.path.join(cpp_root, "start.sh"),
+        os.path.join(_BIRD_WS, "locate_face/locate_face.py"),
+        cpp_root,
+        os.path.join(cpp_root, "locate_face_ble.log"),
+    )
 
 
 class LocateFaceManager:
@@ -179,7 +221,8 @@ class LocateFaceManager:
         xauth = os.path.join(_RUN_USER_HOME, ".Xauthority")
         if os.path.exists(xauth):
             env.setdefault("XAUTHORITY", xauth)
-        env["LOCATE_FACE_CPP_ROOT"] = os.path.join(_BIRD_WS, "locate_face_cpp")
+        cpp_bin, cpp_start, py_script, cpp_root, log_path = _resolve_locate_face_paths()
+        env["LOCATE_FACE_CPP_ROOT"] = cpp_root
         env["BIRD_WS"] = _BIRD_WS
         env.pop("ROS_HOSTNAME", None)
         _py_site = os.path.join(_RUN_USER_HOME, ".local/lib/python3.8/site-packages")
@@ -187,32 +230,38 @@ class LocateFaceManager:
             _pp = env.get("PYTHONPATH", "")
             env["PYTHONPATH"] = f"{_py_site}:{_pp}" if _pp else _py_site
 
-        if os.path.isfile(LOCATE_FACE_CPP_BIN) and os.access(LOCATE_FACE_CPP_BIN, os.X_OK):
+        if os.path.isfile(cpp_bin) and os.access(cpp_bin, os.X_OK):
             shell_cmd = (
                 f'source "{ROS_ENV_SH}" && '
-                f'exec "{LOCATE_FACE_CPP_BIN}"'
+                f'exec "{cpp_bin}"'
             )
-            cwd = os.path.dirname(LOCATE_FACE_CPP_BIN)
+            cwd = os.path.dirname(cpp_bin)
             backend = "C++"
-        elif os.path.isfile(LOCATE_FACE_CPP_START):
-            shell_cmd = f'exec "{LOCATE_FACE_CPP_START}"'
-            cwd = os.path.dirname(LOCATE_FACE_CPP_START)
+        elif os.path.isfile(cpp_start):
+            shell_cmd = f'exec "{cpp_start}"'
+            cwd = os.path.dirname(cpp_start)
             backend = "C++(start.sh)"
-        elif os.path.isfile(LOCATE_FACE_SCRIPT):
+        elif os.path.isfile(py_script):
             shell_cmd = (
                 f'source "{ROS_ENV_SH}" && '
-                f'exec python3 "{LOCATE_FACE_SCRIPT}" --no-gui'
+                f'exec python3 "{py_script}" --no-gui'
             )
-            cwd = os.path.dirname(LOCATE_FACE_SCRIPT)
+            cwd = os.path.dirname(py_script)
             backend = "Python"
         else:
             self._log(
-                f"[locate_face] 未找到可执行文件: {LOCATE_FACE_CPP_BIN} 或 {LOCATE_FACE_SCRIPT}"
+                f"[locate_face] 未找到可执行文件: {cpp_bin} 或 {py_script}"
             )
-            self._log("[locate_face] 请先执行: cd ~/Bird_ws/locate_face_cpp && ./build.sh")
+            self._log(
+                "[locate_face] 请将 locate_face_cpp 放入装机包，"
+                "或: cd ~/Bird_ws/locate_face_cpp && ./build.sh"
+            )
             return False
 
-        log_path = LOG_PATH
+        try:
+            os.makedirs(os.path.dirname(log_path), exist_ok=True)
+        except OSError:
+            pass
         try:
             log_f = open(log_path, "ab", buffering=0)
         except OSError:

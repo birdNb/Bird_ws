@@ -41,11 +41,10 @@ done
 
 pkill -f 'ble_gatt_server\.pyc?' 2>/dev/null || true
 pkill -f 'torque_cmd_vel_bridge\.pyc?' 2>/dev/null || true
-pkill -f 'locate_face_cpp/build/locate_face' 2>/dev/null || true
 
 systemctl daemon-reload
 systemctl reset-failed 2>/dev/null || true
 
-echo "[ok] 已移除 bird-ble / torque-cmd-vel 开机服务，并停止头追进程"
+echo "[ok] 已移除 bird-ble / torque-cmd-vel 开机服务"
 echo "    正式目录默认保留: ~/Bird_ws/Bt_voice_pull_bag"
 echo "    若需删除: rm -rf ~/Bird_ws/Bt_voice_pull_bag"
