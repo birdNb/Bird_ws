@@ -1,7 +1,8 @@
 #!/bin/bash
-# 组装加密发布包 Bt_voice_pull_bag_0730（RK3588 + Jetson Orin / ZED Mini 通用）
-# - Python → 字节码（去掉 .py）
-# - 含 locate_face_cpp 运行时（ZED Mini 并排双目自适应 + RK D435i）
+# 从源码树 Bt_voice_pull_bag 组装加密发布包 Bt_voice_pull_bag_<VERSION>
+# 约定：
+#   Bt_voice_pull_bag/          → 源码（可含 .py）
+#   Bt_voice_pull_bag_XXXX/     → 加密发布包（仅 .pyc + 二进制）
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
