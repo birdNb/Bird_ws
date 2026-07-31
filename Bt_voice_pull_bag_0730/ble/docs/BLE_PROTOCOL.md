@@ -285,21 +285,21 @@ fsm:5
 ### 2.4.1 功能开关同步（订阅时 + 变化时，各连发 2 次）
 
 ```text
-locate_face ON
+locate_face OFF
 GAIT OFF
 PULL OFF
-sound OFF
+sound ON
 LT OFF
 ```
 
 
-| 报文 | 含义 |
-| --- | --- |
-| `locate_face ON/OFF` | 人脸追踪是否在跑 |
-| `GAIT ON/OFF` | 行走 / **站立**（`OFF`=站立模式） |
-| `PULL ON/OFF` | 拖拽模式 |
-| `sound ON/OFF` | 实时语音开关 |
-| `LT ON/OFF` | 疾跑开关 |
+| 报文 | 含义 | 开机默认 |
+| --- | --- | --- |
+| `locate_face ON/OFF` | 人脸追踪是否在跑 | **OFF** |
+| `GAIT ON/OFF` | 行走 / **站立**（`OFF`=站立模式） | 以实测为准 |
+| `PULL ON/OFF` | 拖拽模式 | **OFF** |
+| `sound ON/OFF` | 系统语音提示开关 | **ON** |
+| `LT ON/OFF` | 疾跑开关 | **OFF** |
 
 
 ### 2.5 FSM 状态对照（参考）

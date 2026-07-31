@@ -125,7 +125,7 @@ sync_to_install_root() {
 write_ota_version() {
   local ver_file="${SIM2REAL_WS}/version.json"
   local vernum date_tag raw
-  vernum="$(tr -d '[:space:]' < "${INSTALL_ROOT}/VERSION" 2>/dev/null || echo 0724)"
+  vernum="$(tr -d '[:space:]' < "${INSTALL_ROOT}/VERSION" 2>/dev/null || echo 0730)"
   date_tag="$(date +%Y%m%d)"
   # OTA 匹配规则：名称-平台 前两段；RK/Orin 共用 ble-all
   raw="ble-all-${vernum}-${date_tag}"

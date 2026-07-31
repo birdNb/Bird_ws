@@ -6,7 +6,6 @@ cd "$(dirname "$0")"
 # shellcheck disable=SC1091
 source "$(pwd)/platform_env.sh"
 
-# source setup.bash 会把当前 $@ 传给 _setup_util.py，必须先清空
 BLE_ARGS=("$@")
 set --
 # shellcheck disable=SC1091
@@ -26,7 +25,10 @@ else
   echo "[ros] 环境 OK: rospy + sim2real_msg"
 fi
 
-# 经 ble_gatt_boot 启动：先挂载功能状态遥测补丁，再进 GATT
+# 先挂载功能状态遥测补丁，再进 GATT
+if [ -f "$(pwd)/ble_gatt_boot.pyc" ]; then
+  exec python3 "$(pwd)/ble_gatt_boot.pyc" "$@"
+fi
 if [ -f "$(pwd)/ble_gatt_boot.py" ]; then
   exec python3 "$(pwd)/ble_gatt_boot.py" "$@"
 fi

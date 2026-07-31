@@ -9,16 +9,15 @@
 #include <opencv2/opencv.hpp>
 #include <ros/ros.h>
 
-// ----- 相机 (D435i RGB，V4L2 /dev/video4) -----
-// D435i 上经实测:
-//   - /dev/video2: 红外流 (有点阵), 不适合头追
-//   - /dev/video4: YUYV 彩色流
-// 框架默认使用 640x480@15fps，既有彩色又比较稳定。
+// ----- 相机 -----
+// RK + D435i：常用 /dev/video4 彩色流
+// Orin + ZED Mini：常用 /dev/video0 并排双目（运行时自动裁左眼）
+// 可用环境变量覆盖：LOCATE_FACE_CAMERA=0
 constexpr int CAMERA_INDEX = 4;
 constexpr int CAMERA_WIDTH = 640;
 constexpr int CAMERA_HEIGHT = 480;
 constexpr int CAMERA_TARGET_FPS = 15;
-constexpr bool ZED_STEREO = false;
+constexpr bool ZED_STEREO = false;  // 运行时对宽幅并排帧自动裁半
 constexpr int PROC_MAX_W = 640;
 
 // ----- 人脸检测 / 控制 (对齐 locate_face.py) -----

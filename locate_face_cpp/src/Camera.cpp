@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
+#include <string>
 #include <unistd.h>
 #include <vector>
 
@@ -12,18 +14,38 @@ void setupCapture(cv::VideoCapture& cap) {
     cap.set(cv::CAP_PROP_FPS, CAMERA_TARGET_FPS);
     cap.set(cv::CAP_PROP_BUFFERSIZE, 1);
 }
+
+int preferredCameraIndex() {
+    if (const char* env = std::getenv("LOCATE_FACE_CAMERA")) {
+        try {
+            return std::stoi(env);
+        } catch (...) {
+        }
+    }
+    // Jetson / Orin 优先 ZED Mini（video0）；RK 仍优先 D435i（video4）
+    if (const char* plat = std::getenv("BLE_PLATFORM")) {
+        const std::string p(plat);
+        if (p.find("orin") != std::string::npos || p.find("jetson") != std::string::npos) {
+            return 0;
+        }
+    }
+    if (access("/etc/nv_tegra_release", F_OK) == 0) {
+        return 0;
+    }
+    return CAMERA_INDEX;
+}
 }  // namespace
 
 Camera::Camera() {
     is_opened_ = openAnyCamera();
     if (!is_opened_) {
-        ROS_ERROR("[cam] 无法打开 D435i RGB 节点（尝试过 /dev/video%d 等）", CAMERA_INDEX);
-        ROS_ERROR("[cam] 请检查: D435i 是否接好、是否被其它进程占用、设备节点是否存在");
+        ROS_ERROR("[cam] 无法打开相机（已尝试 ZED Mini / D435i 等节点）");
+        ROS_ERROR("[cam] 请检查摄像头接线、占用，或设置 LOCATE_FACE_CAMERA");
         return;
     }
     frame_w_ = static_cast<int>(cap_.get(cv::CAP_PROP_FRAME_WIDTH));
     frame_h_ = static_cast<int>(cap_.get(cv::CAP_PROP_FRAME_HEIGHT));
-    // ZED 等并排双目：宽约等于高的 2 倍以上，或编译期强制 ZED_STEREO
+    // ZED Mini 等并排双目：宽约等于高的 2 倍以上，或编译期强制 ZED_STEREO
     sbs_stereo_ = ZED_STEREO || (frame_w_ >= frame_h_ * 2);
     const int eye_w = sbs_stereo_ ? frame_w_ / 2 : frame_w_;
     ROS_INFO(
@@ -31,7 +53,7 @@ Camera::Camera() {
         camera_index_,
         frame_w_,
         frame_h_,
-        sbs_stereo_ ? "左眼" : "画面",
+        sbs_stereo_ ? "左眼(ZED)" : "画面",
         eye_w,
         frame_h_,
         FACE_PROC_MAX_W);
@@ -87,8 +109,9 @@ bool Camera::tryOpenIndex(int index) {
 }
 
 bool Camera::openAnyCamera() {
-    // Orin+ZED 常见 /dev/video0；RK+D435i 常见 /dev/video4
-    std::vector<int> candidates = {CAMERA_INDEX, 0, 4, 6, 2, 8};
+    const int prefer = preferredCameraIndex();
+    // Orin+ZED Mini → video0；RK+D435i → video4；其余兜底扫描
+    std::vector<int> candidates = {prefer, 0, 4, 6, 2, 8};
     for (int i = 0; i <= 12; ++i) {
         if (std::find(candidates.begin(), candidates.end(), i) == candidates.end()) {
             candidates.push_back(i);

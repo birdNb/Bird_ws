@@ -7,26 +7,37 @@
 
 bool FaceTracker::initFaceBackend() {
     const std::string model_path = projectRoot() + "/model/face_detection_yunet_2023mar.onnx";
-    const std::string yunet_py = projectRoot() + "/scripts/face_yunet_worker.py";
-    const std::string mp_py = projectRoot() + "/scripts/face_mediapipe_worker.py";
+    const std::string root = projectRoot() + "/scripts/";
+    const std::string yunet_candidates[] = {
+        root + "face_yunet_worker.py",
+        root + "face_yunet_worker.pyc",
+    };
+    const std::string mp_candidates[] = {
+        root + "face_mediapipe_worker.py",
+        root + "face_mediapipe_worker.pyc",
+    };
 
     // Jetson 上 C++ FaceDetectorYN 易崩溃，优先 Python YuNet 子进程
-    if (access(yunet_py.c_str(), R_OK) == 0 && access(model_path.c_str(), R_OK) == 0) {
-        if (mp_bridge_.start(yunet_py)) {
-            backend_ = FaceDetectBackend::YuNetPython;
-            ROS_INFO("[face] backend YuNet (Python worker, Jetson 推荐)");
+    if (access(model_path.c_str(), R_OK) == 0) {
+        for (const auto& yunet_py : yunet_candidates) {
+            if (access(yunet_py.c_str(), R_OK) == 0 && mp_bridge_.start(yunet_py)) {
+                backend_ = FaceDetectBackend::YuNetPython;
+                ROS_INFO("[face] backend YuNet (Python worker, Jetson/RK 通用)");
+                return true;
+            }
+        }
+    }
+
+    for (const auto& mp_py : mp_candidates) {
+        if (access(mp_py.c_str(), R_OK) == 0 && mp_bridge_.start(mp_py)) {
+            backend_ = FaceDetectBackend::MediaPipe;
+            ROS_INFO("[face] backend MediaPipe worker");
             return true;
         }
     }
 
-    if (access(mp_py.c_str(), R_OK) == 0 && mp_bridge_.start(mp_py)) {
-        backend_ = FaceDetectBackend::MediaPipe;
-        ROS_INFO("[face] backend MediaPipe worker");
-        return true;
-    }
-
     backend_ = FaceDetectBackend::None;
-    ROS_ERROR("[face] 人脸后端初始化失败，请运行 ./build.sh");
+    ROS_ERROR("[face] 人脸后端初始化失败，请确认 scripts/ 下 worker 与 model/");
     return false;
 }
 
