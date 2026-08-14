@@ -208,13 +208,31 @@ V 10
 
 **语音打断：** 新对话语音（conversation_bag code）或系统提示音会打断当前正在播放的语音。
 
+### 1.10.2 WiFi 配网（WIFI）
+
+小程序经 FFE1 下发：
+
+```text
+WIFI <SSID> <PASSWORD>
+```
+
+| 规则 | 说明 |
+| ---- | ---- |
+| SSID | 最长 32；含空格时用引号：`WIFI "My SSID" pass` |
+| PASSWORD | 最长 63；无引号时第一个 token 为 SSID，其余为密码 |
+| 板端流程 | 解析 → `nmcli` 保存并连接 → FFE2 回最终结果 |
+| 成功 | `WIFI OK`，并再推 `IP:x.x.x.x` |
+| 失败 | `WIFI FAIL <reason>`（如 `busy` / `auth` / `not_found` / `timeout` / `no_device`） |
+| 超时 | 约 45s |
+| 并发 | 同时仅允许一路配网；忙时立即 `WIFI FAIL busy` |
+
 ### 1.11 指令 ACK（FFE2 notify）
 
 ```text
 ACK:{原文}
 ```
 
-模式、动作、locate_face、LT 疾跑、V 有 `ACK:` 回执；步态（生效后）、电机电源、`PULL ON/OFF`、**sound ON/OFF** 为**原文回显**；摇杆、脖子无回执。
+模式、动作、locate_face、LT 疾跑、V 有 `ACK:` 回执；步态（生效后）、电机电源、`PULL ON/OFF`、**sound ON/OFF**、**WIFI 最终结果** 为**原文回显**；摇杆、脖子无回执。
 
 ---
 
@@ -393,6 +411,7 @@ LT OFF
 | `sound OFF`       | 语音   | 停播放              | 停止音频                                | 原文 `sound OFF`        |                           |
 | `V {0-100}`       | 音量   | `amixer`         | 系统 Master 音量                        | `ACK:V {n}`           |                           |
 | `rename HT_{8位}`  | 广播名  | HCI 刷新           | BLE 广播名 + 存盘                        | `rename HT_…`         | 需重扫连接                     |
+| `WIFI <SSID> <PWD>` | WiFi 配网 | nmcli connect    | 保存配置并连接 wlan                       | `WIFI OK` / `WIFI FAIL …` | 成功后再推 `IP:…`；约 45s 超时 |
 
 
 ### 4.2 模式指令 → 手柄序列（依当前 FSM 动态生成）
@@ -431,6 +450,7 @@ LT OFF
 | 脖子        | `ble_neck_bridge.py`         | `P{n}Y{m}` / `neck0`  |
 | 电机电源      | `ble_motor_power_manager.py` | `MP ON/OFF`           |
 | 头追        | `ble_locate_face_manager.py` | `locate_face ON/OFF`  |
+| WiFi 配网     | `ble_wifi_manager.py`        | `WIFI <SSID> <PASSWORD>` |
 | 状态下行      | `ble_status_telemetry.py`    | IP / pwr / mp / fsm   |
 
 

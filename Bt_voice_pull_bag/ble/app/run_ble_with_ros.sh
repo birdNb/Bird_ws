@@ -23,7 +23,7 @@ else
   echo "[ros] 环境 OK: rospy + sim2real_msg"
 fi
 
-# 源码树优先 .py；发布包仅有 .pyc
+# 源码树优先 .py；兼容仅有 .pyc 的编译版
 if [ -f "$(pwd)/ble_gatt_boot.py" ]; then
   exec python3 "$(pwd)/ble_gatt_boot.py" "$@"
 fi
@@ -33,4 +33,8 @@ fi
 if [ -f "$(pwd)/ble_gatt_server.py" ]; then
   exec python3 "$(pwd)/ble_gatt_server.py" "$@"
 fi
-exec python3 "$(pwd)/ble_gatt_server.pyc" "$@"
+if [ -f "$(pwd)/ble_gatt_server.pyc" ]; then
+  exec python3 "$(pwd)/ble_gatt_server.pyc" "$@"
+fi
+echo "[error] 未找到 ble_gatt_boot / ble_gatt_server 入口" >&2
+exit 1

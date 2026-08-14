@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-运行时补丁：在装机包 ble_gatt_server.pyc 上挂接功能状态遥测。
+运行时补丁：在 ble_gatt_server 上挂接功能状态遥测。
 
-不改二进制主体；由 ble_gatt_boot 在 main() 前 apply。
+由 ble_gatt_boot 在 main() 前 apply。
 """
 
 from __future__ import annotations

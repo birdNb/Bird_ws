@@ -26,7 +26,6 @@ chmod +x \
   "${BOOT_SRC}" \
   "${DEMO_DIR}/run_torque_bridge.sh" \
   "${DEMO_DIR}/run_pitch_bridge.sh"
-chmod +x "${DEMO_DIR}"/torque_cmd_vel_bridge.pyc 2>/dev/null || true
 chmod +x "${DEMO_DIR}"/torque_cmd_vel_bridge.py 2>/dev/null || true
 
 sed \
@@ -38,7 +37,7 @@ sed \
 
 if [ ! -f "${DEFAULT_ENV}" ]; then
   cat >"${DEFAULT_ENV}" <<'EOF'
-# torque-cmd-vel 额外启动参数（传给 torque_cmd_vel_bridge.pyc）
+# torque-cmd-vel 额外启动参数（传给 torque_cmd_vel_bridge）
 # 示例：仅用脖子 / 仅用右手
 # EXTRA_ARGS=(--no-arms)
 # EXTRA_ARGS=(--side right)

@@ -1,0 +1,1575 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+BLE 文本指令 → ROS 话题桥接（对齐小程序遥控协议）。
+
+摇杆:  X:0.00,Y:0.00,Z:0.00  → /cmd_vel
+模式:  M_default / M_init / M_protect / M_resetzero / M_tech
+动作:  LT+RT+start(起立) / LT+RT+RB(蹲下) / LT+RT+B(卸力)
+       经 /joy → joy_teleop → /joy_msg（与实体手柄一致）
+"""
+
+from __future__ import annotations
+
+import os
+import re
+import subprocess
+import sys
+import threading
+import time
+from dataclasses import dataclass
+from typing import Callable, Dict, List, Optional, Set, Tuple, Union
+
+# joy.yaml walk 缩放
+SCALE_LINEAR_X = 1.5
+SCALE_LINEAR_Y = 0.7
+SCALE_ANGULAR_Z = 1.57
+# 疾跑开启时 /cmd_vel 额外倍率（/joy_msg lt 按下为策略主通道，此为辅助）
+SPRINT_SCALE_LINEAR = 1.5
+SPRINT_SCALE_ANGULAR = 1.2
+
+JOY_PUBLISH_HZ = 50
+COMBO_HOLD_SEC = 1.0
+MODE_PULSE_SEC = 0.45
+STEP_GAP_SEC = 0.12
+MENU_STEP_GAP_SEC = 0.35  # master joyMsgCallback 每步后 sleep 200ms
+MENU_PULSE_FRAMES = 3      # 菜单键须短脉冲，长按会连跳多项
+MENU_RELEASE_FRAMES = 10
+CMD_VEL_HZ = 20
+CMD_VEL_TIMEOUT_SEC = 0.20
+STICK_FILTER_ALPHA = 0.45
+# 与小程序死区 10（-100~100 刻度）对齐 → |v| < 0.10 归零
+STICK_DEADBAND = 0.10
+STICK_XY_LIMIT = 1.8
+STICK_Z_LIMIT = 1.5
+ACTION_COOLDOWN_SEC = 0.0
+MODE_COOLDOWN_SEC = 0.8
+# 挥双手：短脉冲触发（勿 1s 长按，松开会被固件当成第二次触发）
+CHEER_PULSE_SEC = 0.35
+CHEER_COOLDOWN_SEC = 0.0
+CHEER_RELEASE_FRAMES = 20
+# sim2real StateInfo.state：行走=接收 cmd_vel；站立=不接收速度指令
+WALK_VELOCITY_STATES = frozenset({"running", "pre running"})
+STAND_VELOCITY_STATES = frozenset({"standby", "standing"})
+GAIT_VERIFY_TIMEOUT_SEC = 8.0
+
+JOY_AXES_COUNT = 8
+JOY_BUTTONS_COUNT = 11
+AXIS_LT = 2
+AXIS_RT = 5
+AXIS_DPAD_X = 6
+AXIS_DPAD_Y = 7
+BTN_A = 0
+BTN_B = 1
+BTN_X = 2
+BTN_Y = 3
+BTN_LB = 4
+BTN_RB = 5
+BTN_BACK = 6
+BTN_START = 7
+BTN_CENTER = 8
+
+STICK_RE = re.compile(
+    r"X:\s*([+-]?\d+(?:\.\d+)?)\s*,\s*Y:\s*([+-]?\d+(?:\.\d+)?)\s*,\s*Z:\s*([+-]?\d+(?:\.\d+)?)"
+    r"(?:\s*,\s*N:\s*\d+)?",
+    re.IGNORECASE,
+)
+
+# 小程序模式指令标签（具体按键序列见 _build_mode_steps，依 FSM 状态生成）
+MODE_LABELS: Dict[str, str] = {
+    "m_default": "默认模式",
+    "m_init": "初始化",
+    "m_protect": "保护模式",
+    "m_resetzero": "调零模式",
+    "m_tech": "示教模式",
+}
+
+# sim2real_master joyMsgCallback 实测（反汇编）:
+# - center==1 → DefaultModeEvt（无需按 LT/RT）
+# - dpad/a/b 仅在 LT+RT 同时按下时有效；back 字段被忽略
+# - dpad_h==1 → LastOption, ==-1 → NextOption, a==1 → Confirm
+FSM_INIT = 0
+FSM_ERROR = 1
+FSM_PROTECTION = 8
+
+# 倒地/保护态：禁止关步态；起立前先开步态
+RECOVERY_FSM_STATES = frozenset({FSM_PROTECTION, FSM_ERROR})
+# 执行态：仍有力矩闭环，直接断电会导致 sim2real_master 崩溃(SIGSEGV)
+EXEC_FSM_STATES = frozenset({5, 6, 7, 10, 11, 14, 16})
+# 相对安全可断电的状态
+SAFE_POWER_OFF_FSM = frozenset({0, 1, 2, 3, 4, 8, 9, 12, 13, 15})
+# MP ON 后等待电机/驱动就绪再允许起立
+POWER_ON_SETTLE_SEC = 2.5
+POWER_OFF_UNLOAD_TIMEOUT_SEC = 3.5
+POWER_OFF_SETTLE_SEC = 1.5  # 卸力后再等一会再断电，降低主节点被带崩概率
+
+# 断电后禁止这些指令（会打 /joy_msg，易崩 sim2real_master / 模式显示）
+_POWER_GATED_KINDS = frozenset({"stick", "mode", "action", "gait", "sprint"})
+FSM_CANDIDATE_DEFAULT = 2
+FSM_CANDIDATE_CUSTOM = 3
+FSM_CANDIDATE_REMOTE = 4
+FSM_CANDIDATE_CALIBRATION = 9
+FSM_CANDIDATE_TEACHING = 13
+FSM_EXEC_TEACHING = 14
+FSM_EXEC_CALIBRATING = 10
+FSM_EXEC_CALIB_OK = 11
+FSM_EXEC_CALIB_FAILED = 12
+FSM_CANDIDATE_DEVELOP = 15
+
+# 调零执行中 joy 不响应，须等 FSM 10→11→2 后再切模式
+CALIB_LOCK_STATES = frozenset({FSM_EXEC_CALIBRATING, FSM_EXEC_CALIB_OK})
+
+CANDIDATE_TO_EXEC: Dict[int, int] = {
+    FSM_CANDIDATE_DEFAULT: 5,
+    FSM_CANDIDATE_TEACHING: FSM_EXEC_TEACHING,
+    FSM_CANDIDATE_CALIBRATION: FSM_EXEC_CALIBRATING,
+}
+MENU_CANDIDATES = (
+    FSM_CANDIDATE_DEFAULT,
+    FSM_CANDIDATE_CUSTOM,
+    FSM_CANDIDATE_REMOTE,
+    FSM_CANDIDATE_CALIBRATION,
+    FSM_CANDIDATE_TEACHING,
+    FSM_CANDIDATE_DEVELOP,
+)
+
+# 预选动作（长按 1s）；其余合法手柄组合键由 ble_gamepad 动态识别
+ACTION_COMMANDS: Dict[str, Tuple[str, str]] = {
+    "lt+rt+start": ("起立", "lt+rt+start"),
+    "lt+rt+rb": ("蹲下", "lt+rt+rb"),
+    "lt+rt+b": ("卸力", "lt+rt+b"),
+}
+
+# 步态 GAIT ON/OFF → 底层仍发 lt+rt+lb 组合键
+GAIT_JOY_KEY = "lt+rt+lb"
+
+# 短脉冲动作（multi_waypoint + policy_change）；完整列表见 ble_gamepad.PULSE_COMBOS
+PULSE_CUSTOM_ACTIONS = {
+    "rt+a": "挥双手",
+    "rt+x": "挥单手",
+    "rt+y": "握手",
+    "rt+b": "摇手防守",
+    "a": "小脚踢球",
+    "x": "秀肌肉",
+    "lt+rt+dpu": "byd_bb",
+    "lt+rt+dpr": "猪猪侠",
+    "lt+dpr": "踢腿",
+    "lt+dpd": "重拳",
+    "lt+dpl": "上勾拳",
+}
+
+BUTTON_PRESS = 1.0
+BUTTON_RELEASE = 0.0
+TRIGGER_PRESS = -1.0
+TRIGGER_RELEASE = 1.0
+
+from ble_neck_bridge import NeckController
+from ble_motor_power_manager import MotorPowerController, POWER_TOPIC
+
+try:
+    from ble_gamepad import (
+        is_hold_combo,
+        is_pulse_combo,
+        label_for_combo,
+        load_combo_labels,
+        parse_gamepad_combo,
+    )
+except ImportError:
+    is_hold_combo = None  # type: ignore
+    is_pulse_combo = None  # type: ignore
+    label_for_combo = lambda c: c  # type: ignore
+    load_combo_labels = lambda: {}  # type: ignore
+    parse_gamepad_combo = None  # type: ignore
+
+LogFn = Callable[[str], None]
+
+FSM_STATE_NAMES = {
+    0: "INIT",
+    1: "ERROR",
+    2: "CANDIDATE_DEFAULT",
+    3: "CANDIDATE_CUSTOM",
+    4: "CANDIDATE_REMOTE",
+    5: "EXEC_DEFAULT",
+    6: "EXEC_CUSTOM",
+    7: "EXEC_REMOTE",
+    8: "PROTECTION_SHUTDOWN",
+    9: "CANDIDATE_CALIBRATION",
+    10: "EXEC_CALIBRATING",
+    11: "EXEC_CALIB_OK",
+    12: "EXEC_CALIB_FAILED",
+    13: "CANDIDATE_TEACHING",
+    14: "EXEC_TEACHING",
+    15: "CANDIDATE_DEVELOP",
+    16: "EXEC_DEVELOP",
+}
+
+
+def _bootstrap_ros_python_path() -> None:
+    """sudo 下 PYTHONPATH 可能丢失，补全 ROS / sim2real_msg 路径。"""
+    home = os.environ.get("BIRD_HOME") or os.path.expanduser("~")
+    ws = os.environ.get("SIM2REAL_WS") or os.path.join(home, "sim2real")
+    extra = [
+        "/opt/ros/noetic/lib/python3/dist-packages",
+        os.path.join(ws, "devel/lib/python3/dist-packages"),
+        os.path.join(ws, "install/lib/python3/dist-packages"),
+    ]
+    for p in extra:
+        if os.path.isdir(p) and p not in sys.path:
+            sys.path.insert(0, p)
+
+
+def _norm_token(text: str) -> str:
+    return re.sub(r"\s+", "", text.strip().lower())
+
+
+def _joy_key_value(key: str, pressed: bool) -> float:
+    if key in ("lt", "rt"):
+        return TRIGGER_PRESS if pressed else TRIGGER_RELEASE
+    return BUTTON_PRESS if pressed else BUTTON_RELEASE
+
+
+def _parse_key_combo(combo: str) -> Set[str]:
+    return {p.strip().lower() for p in combo.split("+") if p.strip()}
+
+
+def _is_menu_nav_step(token: str) -> bool:
+    """方向/A/center 为边沿触发；长按会连跳菜单项。"""
+    if token in ("center", "lt+rt+a"):
+        return True
+    return "→" in token or "←" in token
+
+
+@dataclass
+class StickCommand:
+    x: float
+    y: float
+    z: float
+
+
+@dataclass
+class ParsedCommand:
+    stick: Optional[StickCommand] = None
+    mode: Optional[str] = None
+    action: Optional[str] = None
+
+
+class BleCommandParser:
+    """解析小程序 BLE 文本。"""
+
+    def parse(self, text: str) -> ParsedCommand:
+        text = text.strip()
+        if not text:
+            return ParsedCommand()
+
+        result = ParsedCommand()
+        m = STICK_RE.search(text)
+        if m:
+            z_raw = m.group(3)
+            result.stick = StickCommand(
+                x=_clamp_axis(float(m.group(1)), STICK_XY_LIMIT),
+                y=_clamp_axis(float(m.group(2)), STICK_XY_LIMIT),
+                z=_clamp_axis(float(z_raw), STICK_Z_LIMIT) if z_raw is not None else 0.0,
+            )
+
+        token = _norm_token(text)
+        if token in MODE_LABELS:
+            result.mode = token
+            return result
+
+        action = self._extract_action(text)
+        if action is not None:
+            result.action = action
+        return result
+
+    def _extract_action(self, text: str) -> Optional[str]:
+        if parse_gamepad_combo is not None:
+            combo = parse_gamepad_combo(text)
+            if combo is not None:
+                return combo
+        norm = _norm_token(text)
+        if norm in ACTION_COMMANDS:
+            return norm
+        rest = STICK_RE.sub("", text)
+        rest = re.sub(r"[,;|]", " ", rest)
+        norm2 = _norm_token(rest)
+        if parse_gamepad_combo is not None:
+            combo2 = parse_gamepad_combo(norm2)
+            if combo2 is not None:
+                return combo2
+        if norm2 in ACTION_COMMANDS:
+            return norm2
+        return None
+
+
+def _clamp_axis(v: float, limit: float = STICK_XY_LIMIT) -> float:
+    v = max(-limit, min(limit, v))
+    if abs(v) < STICK_DEADBAND:
+        return 0.0
+    return v
+
+
+def _stick_to_twist(stick: StickCommand, sprint: bool = False):
+    """BLE 摇杆 → /cmd_vel，与 joy.yaml 实体手柄一致。
+
+    协议约定（小程序写入）:
+      X 前后（前 +）  Y 左右（右 +）  Z 右转 +
+    joy.yaml:
+      axis1→linear.x  axis0→linear.y  axis3→angular.z
+    Linux js0 前推 axis1 为负，故 linear.x 取反；右转 axis3 为正，Z 取反与现场一致。
+    """
+    from geometry_msgs.msg import Twist
+
+    lin_x = SCALE_LINEAR_X
+    lin_y = SCALE_LINEAR_Y
+    ang_z = SCALE_ANGULAR_Z
+    if sprint:
+        lin_x *= SPRINT_SCALE_LINEAR
+        lin_y *= SPRINT_SCALE_LINEAR
+        ang_z *= SPRINT_SCALE_ANGULAR
+
+    msg = Twist()
+    msg.linear.x = -stick.x * lin_x
+    msg.linear.y = stick.y * lin_y
+    msg.angular.z = -stick.z * ang_z
+    return msg
+
+
+def _fill_joy_neutral(msg) -> None:
+    msg.lt = TRIGGER_RELEASE
+    msg.rt = TRIGGER_RELEASE
+
+
+def _joy_from_keys(keys: Set[str], pressed: bool):
+    from sim2real_msg.msg import Joy
+
+    msg = Joy()
+    _fill_joy_neutral(msg)
+    field_map = {
+        "a": "a",
+        "b": "b",
+        "x": "x",
+        "y": "y",
+        "lb": "lb",
+        "rb": "rb",
+        "back": "back",
+        "start": "start",
+        "lt": "lt",
+        "rt": "rt",
+        "l": "L",
+        "r": "R",
+        "center": "center",
+        "→": "dpad_horizontal",
+        "←": "dpad_horizontal",
+        "↑": "dpad_vertical",
+        "↓": "dpad_vertical",
+    }
+    for key in keys:
+        if key == "dpu":
+            msg.dpad_vertical = 1.0 if pressed else 0.0
+        elif key == "dpd":
+            msg.dpad_vertical = -1.0 if pressed else 0.0
+        elif key == "dpl":
+            msg.dpad_horizontal = 1.0 if pressed else 0.0
+        elif key == "dpr":
+            msg.dpad_horizontal = -1.0 if pressed else 0.0
+        elif key == "→":
+            msg.dpad_horizontal = -1.0 if pressed else 0.0
+        elif key == "←":
+            msg.dpad_horizontal = 1.0 if pressed else 0.0
+        elif key == "↑":
+            msg.dpad_vertical = 1.0 if pressed else 0.0
+        elif key == "↓":
+            msg.dpad_vertical = -1.0 if pressed else 0.0
+        else:
+            attr = field_map.get(key)
+            if attr is None:
+                continue
+            setattr(msg, attr, _joy_key_value(key, pressed))
+    return msg
+
+
+def _sensor_joy_from_token(token: str, pressed: bool):
+    """单键或组合键 → sensor_msgs/Joy。"""
+    if "+" in token:
+        return _sensor_joy_from_keys(_parse_key_combo(token), pressed)
+    return _sensor_joy_from_keys({token}, pressed)
+
+
+def _sensor_joy_from_keys(keys: Set[str], pressed: bool):
+    from sensor_msgs.msg import Joy
+
+    msg = Joy()
+    msg.axes = [0.0] * JOY_AXES_COUNT
+    msg.buttons = [0] * JOY_BUTTONS_COUNT
+    msg.axes[AXIS_LT] = TRIGGER_RELEASE
+    msg.axes[AXIS_RT] = TRIGGER_RELEASE
+    if not pressed:
+        return msg
+
+    for key in keys:
+        if key == "lt":
+            msg.axes[AXIS_LT] = TRIGGER_PRESS
+        elif key == "rt":
+            msg.axes[AXIS_RT] = TRIGGER_PRESS
+        elif key == "start":
+            msg.buttons[BTN_START] = 1
+        elif key == "rb":
+            msg.buttons[BTN_RB] = 1
+        elif key == "b":
+            msg.buttons[BTN_B] = 1
+        elif key == "a":
+            msg.buttons[BTN_A] = 1
+        elif key == "x":
+            msg.buttons[BTN_X] = 1
+        elif key == "y":
+            msg.buttons[BTN_Y] = 1
+        elif key == "lb":
+            msg.buttons[BTN_LB] = 1
+        elif key == "back":
+            msg.buttons[BTN_BACK] = 1
+        elif key == "center":
+            msg.buttons[BTN_CENTER] = 1
+        elif key in ("↑", "up", "dpu"):
+            msg.axes[AXIS_DPAD_Y] = 1.0
+        elif key in ("↓", "down", "dpd"):
+            msg.axes[AXIS_DPAD_Y] = -1.0
+        elif key in ("←", "left", "dpl"):
+            msg.axes[AXIS_DPAD_X] = 1.0
+        elif key in ("→", "right", "dpr"):
+            msg.axes[AXIS_DPAD_X] = -1.0
+    return msg
+
+
+class BleRosBridge:
+    def __init__(self, log: LogFn = print) -> None:
+        self._log = log
+        self._parser = BleCommandParser()
+        self._lock = threading.Lock()
+        self._stick_target: Optional[StickCommand] = None
+        self._stick_filtered: Optional[StickCommand] = None
+        self._last_stick_ts = 0.0
+        self._last_action_ts: Dict[str, float] = {}
+        self._last_mode_ts: Dict[str, float] = {}
+        self._stop = threading.Event()
+        self._ready = threading.Event()
+        self._ros_thread: Optional[threading.Thread] = None
+        self._cmd_pub = None
+        self._sensor_joy_pub = None
+        self._joy_msg_pub = None
+        self._has_joy = False
+        self._Twist = None
+        self._pulse_action_running: Set[str] = set()
+        self._neck = NeckController(log=log)
+        self._motor_power = MotorPowerController(log=log)
+        self._battery_pct: Optional[int] = None
+        self._last_sim2real_state: Optional[str] = None
+        self._sprint_enabled = False
+        self._action_listener = None
+        self._gait_listener = None
+        self._mode_listener = None
+        self._sprint_listener = None
+        self._joy_lock = threading.Lock()
+        self._power_ready_at = 0.0
+        self._reviving_master = False
+
+    @property
+    def ready(self) -> bool:
+        return self._ready.is_set()
+
+    def get_motor_power_wire(self) -> Optional[str]:
+        return self._motor_power.get_state_wire()
+
+    def set_motor_power_listener(self, fn) -> None:
+        self._motor_power.set_state_listener(fn)
+
+    def set_action_listener(self, fn) -> None:
+        self._action_listener = fn
+
+    def set_gait_listener(self, fn) -> None:
+        self._gait_listener = fn
+
+    def set_mode_listener(self, fn) -> None:
+        self._mode_listener = fn
+
+    def set_sprint_listener(self, fn) -> None:
+        self._sprint_listener = fn
+
+    def get_battery_pct(self) -> Optional[int]:
+        pct = self._battery_pct
+        if pct is None:
+            return None
+        return max(0, min(100, int(pct)))
+
+    def start(self) -> bool:
+        if self._ros_thread is not None:
+            return self.ready
+        self._ros_thread = threading.Thread(target=self._ros_main, daemon=True)
+        self._ros_thread.start()
+        # 开机 roscore 可能晚于 bird-ble，最长等待 120s
+        if self._ready.wait(timeout=120.0):
+            return True
+        self._log("[ros][warn] roscore 未在 120s 内就绪，后台继续等待…")
+        return False
+
+    def stop(self) -> None:
+        self._stop.set()
+        self._publish_zero_twist()
+        if self._ros_thread is not None:
+            self._ros_thread.join(timeout=2.0)
+
+    def on_disconnect(self) -> None:
+        with self._lock:
+            self._stick_target = None
+            self._stick_filtered = None
+            self._last_stick_ts = 0.0
+        self._pulse_action_running.clear()
+        self._set_sprint(False, log=False)
+        self._publish_zero_twist()
+        flush_keys = set(PULSE_CUSTOM_ACTIONS)
+        try:
+            from ble_gamepad import is_pulse_combo, known_gamepad_combos
+
+            flush_keys |= {c for c in known_gamepad_combos() if is_pulse_combo(c)}
+        except ImportError:
+            pass
+        for key in flush_keys:
+            self._flush_joy_release(key)
+        self._log("[ros] 断连急停：零速")
+
+    def handle_command(self, kind: str, text: str) -> None:
+        if kind in _POWER_GATED_KINDS:
+            ok, reason = self._check_motion_allowed(kind)
+            if not ok:
+                self._log(f"[ros] 拒绝 {kind}: {reason}")
+                return
+        if kind == "stick":
+            self.handle_text(text)
+        elif kind == "mode":
+            self.handle_text(text)
+        elif kind == "action":
+            self._trigger_action(text)
+        elif kind == "neck":
+            self._neck.enqueue(text)
+        elif kind == "motor_power":
+            self._handle_motor_power(text.strip().upper())
+        elif kind == "gait":
+            self._trigger_gait(text.strip().upper())
+        elif kind == "sprint":
+            self._set_sprint(text.strip().upper() == "ON")
+
+    def _joy_path_alive(self) -> bool:
+        """sim2real_master 是否仍在订阅 /joy_msg（或 /joy）。"""
+        try:
+            if self._has_joy and self._joy_msg_pub is not None:
+                return int(self._joy_msg_pub.get_num_connections()) > 0
+            if self._sensor_joy_pub is not None:
+                return int(self._sensor_joy_pub.get_num_connections()) > 0
+        except Exception:
+            pass
+        return False
+
+    def _check_motion_allowed(self, kind: str) -> Tuple[bool, str]:
+        """未上电 / 上电未就绪 / 主节点已挂 → 拒绝模式与站立相关指令。"""
+        wire = self._motor_power.get_state_wire()
+        if wire != "ON":
+            return (
+                False,
+                f"电机电源未开启(mp={wire})，请先 MP ON；断电后勿发站立/切模式",
+            )
+        if not self._motor_power_ready_for_motion():
+            left = max(0.0, self._power_ready_at - time.monotonic())
+            return False, f"上电未就绪，请再等 {left:.1f}s"
+        # 模式/起立依赖主节点；断电后主节点常被打崩，先尝试拉起再拒绝
+        if kind in ("mode", "action", "gait") and not self._joy_path_alive():
+            if self._ensure_sim2real_master(timeout=15.0):
+                return True, ""
+            return (
+                False,
+                "sim2real_master 未运行且自动拉起失败，请在终端重新 roslaunch",
+            )
+        return True, ""
+
+    def _ensure_sim2real_master(self, timeout: float = 20.0) -> bool:
+        """断电后主节点常 SIGSEGV 退出；在参数仍在时尝试单独拉起。"""
+        if self._joy_path_alive():
+            return True
+        # 避免并发多次拉起
+        if getattr(self, "_reviving_master", False):
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline and not self._stop.is_set():
+                if self._joy_path_alive():
+                    return True
+                time.sleep(0.3)
+            return self._joy_path_alive()
+
+        self._reviving_master = True
+        try:
+            self._log("[ros] sim2real_master 已退出，尝试自动拉起…")
+            bird_user = os.environ.get("BIRD_USER") or "hightorque"
+            bird_home = os.environ.get("BIRD_HOME") or f"/home/{bird_user}"
+            script = (
+                "source /opt/ros/noetic/setup.bash && "
+                "source \"$HOME/sim2real/install/setup.bash\" && "
+                "exec rosrun sim2real_master sim2real_master_node "
+                "__name:=sim2real_master_node"
+            )
+            # bird-ble 以 root 运行，需切回业务用户
+            cmd = [
+                "sudo",
+                "-u",
+                bird_user,
+                "-H",
+                "env",
+                f"HOME={bird_home}",
+                "ROS_MASTER_URI=http://127.0.0.1:11311",
+                "ROS_IP=127.0.0.1",
+                "bash",
+                "-lc",
+                script,
+            ]
+            try:
+                subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    start_new_session=True,
+                )
+            except OSError as e:
+                self._log(f"[ros] 拉起主节点失败: {e}")
+                return False
+
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline and not self._stop.is_set():
+                if self._joy_path_alive():
+                    self._log("[ros] sim2real_master 已恢复（/joy_msg 有订阅）")
+                    return True
+                time.sleep(0.4)
+            self._log("[ros][warn] 自动拉起 sim2real_master 超时")
+            return False
+        finally:
+            self._reviving_master = False
+
+    def _handle_motor_power(self, action: str) -> None:
+        if action == "OFF":
+            self._safe_power_off()
+        elif action == "ON":
+            self._motor_power.apply_immediate("ON")
+            # 断电常把主节点打崩：上电后先恢复主节点，再开放切模式/起立
+            alive = self._ensure_sim2real_master(timeout=25.0)
+            self._power_ready_at = time.monotonic() + POWER_ON_SETTLE_SEC
+            if alive:
+                self._log(
+                    f"[MP] 上电完成，主节点就绪，再等 {POWER_ON_SETTLE_SEC:.1f}s "
+                    "后允许起立/模式切换"
+                )
+            else:
+                self._log(
+                    "[MP][warn] 上电完成但主节点未恢复；切模式前会再试一次拉起"
+                )
+
+    def _motor_power_ready_for_motion(self) -> bool:
+        wire = self._motor_power.get_state_wire()
+        if wire != "ON":
+            return False
+        return time.monotonic() >= self._power_ready_at
+
+    def _safe_power_off(self) -> None:
+        """断电前先卸力并等待，降低带载断电打崩主节点概率。"""
+        self._publish_zero_twist()
+        with self._lock:
+            self._stick_target = None
+            self._stick_filtered = None
+        self._set_sprint(False, log=False)
+
+        fsm = self._last_fsm_state
+        need_unload = fsm is None or fsm not in SAFE_POWER_OFF_FSM
+        if need_unload:
+            name = (
+                FSM_STATE_NAMES.get(fsm, str(fsm)) if fsm is not None else "?"
+            )
+            self._log(f"[MP] 当前 FSM={fsm}({name})，断电前先卸力…")
+            if self._joy_path_alive():
+                with self._joy_lock:
+                    self._run_steps_locked(
+                        ["lt+rt+b"], "断电前卸力", COMBO_HOLD_SEC, STEP_GAP_SEC
+                    )
+                deadline = time.monotonic() + POWER_OFF_UNLOAD_TIMEOUT_SEC
+                while time.monotonic() < deadline and not self._stop.is_set():
+                    cur = self._last_fsm_state
+                    if cur is not None and cur in SAFE_POWER_OFF_FSM:
+                        break
+                    time.sleep(0.05)
+            cur = self._last_fsm_state
+            cname = (
+                FSM_STATE_NAMES.get(cur, str(cur)) if cur is not None else "?"
+            )
+            self._log(
+                f"[MP] 卸力后 FSM={cur}({cname})，再等 {POWER_OFF_SETTLE_SEC:.1f}s 后断电"
+            )
+            time.sleep(POWER_OFF_SETTLE_SEC)
+
+        # OFF 只用主通道、少发几次，减轻功率板/主节点冲击
+        self._motor_power.apply_immediate("OFF", soft=True)
+        self._power_ready_at = 0.0
+
+    def handle_text(self, text: str) -> None:
+        if not self.ready:
+            self._log("[ros] 桥接未就绪（等待 roscore），忽略指令")
+            return
+
+        cmd = self._parser.parse(text)
+        if cmd.stick is not None:
+            with self._lock:
+                self._stick_target = cmd.stick
+                self._last_stick_ts = time.monotonic()
+        if cmd.mode is not None:
+            self._trigger_mode(cmd.mode)
+        if cmd.action is not None:
+            self._trigger_action(cmd.action)
+
+    def _ros_main(self) -> None:
+        _bootstrap_ros_python_path()
+        try:
+            import rospy
+            from geometry_msgs.msg import Twist
+            from sensor_msgs.msg import JointState, Joy as SensorJoy
+            from std_msgs.msg import Int32, UInt8
+        except ImportError as e:
+            self._log(f"[ros] 未找到 rospy/sim2real_msg: {e}")
+            self._log("[ros] 请用 ./start.sh 启动（内部 run_ble_with_ros.sh 会 source ROS）")
+            return
+
+        self._Twist = Twist
+        init_deadline = time.monotonic() + 180.0
+        while not self._stop.is_set():
+            try:
+                rospy.init_node(
+                    "ble_command_bridge", anonymous=True, disable_signals=True
+                )
+                break
+            except Exception as e:
+                if time.monotonic() >= init_deadline:
+                    self._log(f"[ros] 初始化失败（roscore 超时）: {e}")
+                    return
+                self._log("[ros] 等待 roscore…")
+                time.sleep(2.0)
+
+        self._cmd_pub = rospy.Publisher("/cmd_vel", Twist, queue_size=1)
+        self._sensor_joy_pub = rospy.Publisher("/joy", SensorJoy, queue_size=1)
+        self._neck.attach_publisher(
+            rospy.Publisher("/pi_plus_absolute", JointState, queue_size=1)
+        )
+        try:
+            from livelybot_power.msg import Power_switch
+            from std_msgs.msg import UInt8
+
+            # 禁止 latch：否则断电/上电残留会在主节点重启时重放，干扰模式节点
+            mp_pub = rospy.Publisher(
+                POWER_TOPIC, Power_switch, queue_size=10, latch=False
+            )
+            com_pub = rospy.Publisher(
+                "/com_power_control", UInt8, queue_size=10, latch=False
+            )
+            self._motor_power.attach_publisher(mp_pub, com_pub)
+
+            def _on_power_state(msg: Power_switch) -> None:
+                self._motor_power.update_state_from_hardware(bool(msg.power_switch))
+
+            rospy.Subscriber(
+                "/power_switch_state", Power_switch, _on_power_state, queue_size=1
+            )
+        except ImportError:
+            self._log("[MP] livelybot_power 不可用，电机电源控制已禁用")
+        try:
+            from sim2real_msg.msg import Joy  # noqa: F401
+
+            self._joy_msg_pub = rospy.Publisher("/joy_msg", Joy, queue_size=1)
+            self._has_joy = True
+            self._log("[ros] 已启用 /cmd_vel + /joy + /joy_msg")
+            self._log("[ros] 模式: M_default/M_init/M_protect/M_resetzero/M_tech")
+            self._log("[ros] 手柄: 任意组合键文本 → 模拟 /joy_msg（见 ble_gamepad）")
+            self._log("[ros] 动作: LT+RT+start/RB/B | 步态: GAIT ON/OFF")
+            self._log("[ros] 疾跑: LT ON/OFF → /joy_msg lt 按住（AMP 加速）")
+        except ImportError:
+            self._has_joy = False
+            self._log("[ros] 已启用 /cmd_vel + /joy（无 sim2real_msg）")
+
+        self._last_fsm_state: Optional[int] = None
+
+        def _on_fsm(msg: Int32) -> None:
+            self._last_fsm_state = int(msg.data)
+
+        def _on_battery(msg: UInt8) -> None:
+            self._battery_pct = max(0, min(100, int(msg.data)))
+
+        def _on_sim2real_state(msg) -> None:
+            self._last_sim2real_state = str(msg.state)
+
+        rospy.Subscriber("/fsm_state", Int32, _on_fsm, queue_size=1)
+        rospy.Subscriber("/battery_level", UInt8, _on_battery, queue_size=1)
+        if self._has_joy:
+            try:
+                from sim2real_msg.msg import StateInfo
+
+                rospy.Subscriber(
+                    "/sim2real_state_info",
+                    StateInfo,
+                    _on_sim2real_state,
+                    queue_size=1,
+                )
+                self._log("[ros] 已订阅 /sim2real_state_info（步态实测校验）")
+            except ImportError:
+                self._log(
+                    "[ros][warn] 无 sim2real_msg.StateInfo，步态回传无法实测校验"
+                )
+
+        # 等模式节点订阅 /joy_msg 后再对外接指令，避免启动竞态打崩主节点
+        self._log("[ros] 等待 sim2real_master 订阅 /joy_msg…")
+        joy_wait_deadline = time.monotonic() + 120.0
+        while not self._stop.is_set() and time.monotonic() < joy_wait_deadline:
+            if self._joy_path_alive():
+                self._log("[ros] 已检测到 /joy_msg 订阅者（模式节点就绪）")
+                break
+            time.sleep(0.5)
+        else:
+            if not self._stop.is_set():
+                self._log(
+                    "[ros][warn] 等待 /joy_msg 订阅超时；"
+                    "切模式/起立将被拒绝直到主节点起来"
+                )
+
+        self._ready.set()
+        self._log(f"[ros] /cmd_vel {CMD_VEL_HZ}Hz | 超时 {CMD_VEL_TIMEOUT_SEC}s | EMA={STICK_FILTER_ALPHA}")
+        interval = 1.0 / CMD_VEL_HZ
+        while not self._stop.is_set() and not rospy.is_shutdown():
+            self._neck.tick()
+            self._motor_power.tick()
+            self._tick_cmd_vel()
+            self._tick_sprint_lt()
+            rospy.sleep(interval)
+
+    def _ema_stick(
+        self, target: StickCommand, prev: Optional[StickCommand]
+    ) -> StickCommand:
+        if prev is None:
+            return target
+        a = STICK_FILTER_ALPHA
+        b = 1.0 - a
+        return StickCommand(
+            x=a * target.x + b * prev.x,
+            y=a * target.y + b * prev.y,
+            z=a * target.z + b * prev.z,
+        )
+
+    def _tick_cmd_vel(self) -> None:
+        if self._cmd_pub is None:
+            return
+        now = time.monotonic()
+        with self._lock:
+            target = self._stick_target
+            age = now - self._last_stick_ts
+        if target is None or age > CMD_VEL_TIMEOUT_SEC:
+            with self._lock:
+                self._stick_filtered = None
+            # 无摇杆输入时不发 /cmd_vel，避免零速抢占 sim2real 倒地起立
+            return
+        with self._lock:
+            filtered = self._ema_stick(target, self._stick_filtered)
+            self._stick_filtered = filtered
+            sprint = self._sprint_enabled
+        self._cmd_pub.publish(_stick_to_twist(filtered, sprint=sprint))
+
+    def _set_sprint(self, enabled: bool, log: bool = True) -> None:
+        with self._lock:
+            prev = self._sprint_enabled
+            self._sprint_enabled = enabled
+        if log:
+            if enabled == prev:
+                self._log(f"[ros] 疾跑已{'开启' if enabled else '关闭'}（重复指令）")
+            else:
+                self._log(
+                    f"[ros] 疾跑{'开启' if enabled else '关闭'} → "
+                    f"/joy_msg lt={'按下' if enabled else '松开'}"
+                )
+                if self._sprint_listener is not None:
+                    try:
+                        self._sprint_listener(enabled)
+                    except Exception:
+                        pass
+        if not enabled:
+            self._publish_sprint_lt(False)
+
+    def _tick_sprint_lt(self) -> None:
+        with self._lock:
+            enabled = self._sprint_enabled
+        if not enabled or self._pulse_action_running:
+            return
+        self._publish_sprint_lt(True)
+
+    def _publish_sprint_lt(self, pressed: bool) -> None:
+        if not self._has_joy or self._joy_msg_pub is None:
+            return
+        joy = _joy_from_keys({"lt"}, pressed)
+        self._joy_msg_pub.publish(joy)
+
+    def _publish_zero_twist(self) -> None:
+        if self._cmd_pub is None or self._Twist is None:
+            return
+        self._cmd_pub.publish(self._Twist())
+
+    def _steps_enter_init_menu(self, fsm: Optional[int]) -> List[str]:
+        """进入 FSM Init 菜单（候选模式选择界面）。"""
+        if fsm == FSM_INIT:
+            return []
+        if fsm == FSM_PROTECTION:
+            return ["lt+rt+b"]
+        if fsm in MENU_CANDIDATES:
+            return []
+        return ["lt+rt+b", "lt+rt+b"]
+
+    def _steps_navigate_to_candidate(
+        self, fsm: Optional[int], target: int
+    ) -> List[str]:
+        """在 Init/候选菜单中导航到目标项并 A 确认（须 LT+RT+方向/A）。"""
+        steps: List[str] = []
+        cur = fsm
+
+        if cur == FSM_INIT or cur is None or cur == FSM_PROTECTION:
+            steps.append("lt+rt+→")
+            cur = FSM_CANDIDATE_DEFAULT
+        elif cur not in MENU_CANDIDATES:
+            steps.append("lt+rt+→")
+            cur = FSM_CANDIDATE_DEFAULT
+
+        idx_cur = MENU_CANDIDATES.index(cur)
+        idx_tgt = MENU_CANDIDATES.index(target)
+        if idx_tgt > idx_cur:
+            steps.extend(["lt+rt+→"] * (idx_tgt - idx_cur))
+        elif idx_tgt < idx_cur:
+            steps.extend(["lt+rt+←"] * (idx_cur - idx_tgt))
+        steps.append("lt+rt+a")
+        return steps
+
+    def _build_mode_steps(self, mode_key: str) -> Tuple[str, List[str]]:
+        label = MODE_LABELS[mode_key]
+        fsm = self._last_fsm_state
+
+        if mode_key == "m_default":
+            return label, ["center"]
+        if mode_key == "m_protect":
+            return label, ["lt+rt+b"]
+        if mode_key == "m_init":
+            return label, self._steps_enter_init_menu(fsm)
+        if mode_key == "m_resetzero":
+            prefix = self._steps_enter_init_menu(fsm)
+            start = FSM_INIT if prefix else fsm
+            return label, prefix + self._steps_navigate_to_candidate(
+                start, FSM_CANDIDATE_CALIBRATION
+            )
+        if mode_key == "m_tech":
+            if fsm == FSM_EXEC_TEACHING:
+                return label, []
+            prefix = self._steps_enter_init_menu(fsm)
+            start = FSM_INIT if prefix else fsm
+            return label, prefix + self._steps_navigate_to_candidate(
+                start, FSM_CANDIDATE_TEACHING
+            )
+        return label, []
+
+    def _wait_fsm_leave(self, state: int, timeout: float = 6.0) -> bool:
+        if self._last_fsm_state != state:
+            return True
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline and not self._stop.is_set():
+            if self._last_fsm_state != state:
+                return True
+            time.sleep(0.05)
+        return self._last_fsm_state != state
+
+    def _wait_calibration_finish(self, timeout: float = 60.0) -> bool:
+        """调零执行中无法切模式；须等 10→11→候选菜单。"""
+        if self._last_fsm_state not in CALIB_LOCK_STATES:
+            return True
+
+        if self._last_fsm_state == FSM_EXEC_CALIBRATING:
+            self._log("[ros]   调零进行中 (FSM=10)，等待完成后再切换…")
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline and not self._stop.is_set():
+                if self._last_fsm_state != FSM_EXEC_CALIBRATING:
+                    break
+                time.sleep(0.05)
+            if self._last_fsm_state == FSM_EXEC_CALIBRATING:
+                self._log("[ros][warn] 调零等待超时，仍停留在 EXEC_CALIBRATING")
+                return False
+
+        if self._last_fsm_state == FSM_EXEC_CALIB_FAILED:
+            self._log("[ros][warn] 调零失败 (FSM=12)，等待恢复…")
+            if not self._wait_fsm_leave(FSM_EXEC_CALIB_FAILED, timeout=8.0):
+                return False
+
+        if self._last_fsm_state == FSM_EXEC_CALIB_OK:
+            self._log("[ros]   调零成功 (FSM=11)，等待返回菜单 (~3s)…")
+            if not self._wait_fsm_leave(FSM_EXEC_CALIB_OK, timeout=6.0):
+                self._log("[ros][warn] 未能离开 EXEC_CALIB_OK")
+                return False
+
+        cur = self._last_fsm_state
+        name = FSM_STATE_NAMES.get(cur, str(cur)) if cur is not None else "?"
+        self._log(f"[ros]   调零流程结束，当前 FSM={cur}({name})")
+        return True
+
+    def _switch_to_exec_default(self, label: str) -> None:
+        cur = self._last_fsm_state
+        if cur == 5:
+            self._log("[ros]   已在 EXEC_DEFAULT")
+            self._log_mode_result(label)
+            return
+        if cur in MENU_CANDIDATES:
+            self._log("[ros]   序列(1步): ['center']")
+            self._pulse_menu_key("center")
+            self._wait_fsm(5, timeout=3.0)
+            self._log_mode_result(label)
+            return
+        if self._enter_init_menu():
+            if self._last_fsm_state == FSM_INIT:
+                self._pulse_menu_key("lt+rt+→")
+                self._wait_fsm(FSM_CANDIDATE_DEFAULT, timeout=1.5)
+            if self._last_fsm_state in MENU_CANDIDATES:
+                self._pulse_menu_key("center")
+                self._wait_fsm(5, timeout=3.0)
+        self._log_mode_result(label)
+
+    def _trigger_mode(self, mode_key: str) -> None:
+        if mode_key not in MODE_LABELS:
+            return
+        now = time.monotonic()
+        if now - self._last_mode_ts.get(mode_key, 0.0) < MODE_COOLDOWN_SEC:
+            return
+        self._last_mode_ts[mode_key] = now
+
+        if self._last_fsm_state == FSM_ERROR:
+            self._log("[ros][warn] FSM=ERROR(电机异常)，等待恢复…")
+            if not self._wait_fsm_leave(FSM_ERROR, timeout=6.0):
+                self._log("[ros][warn] 仍处于 ERROR，无法切换模式（请检查电机状态）")
+                return
+            fsm_name = FSM_STATE_NAMES.get(self._last_fsm_state, str(self._last_fsm_state))
+            self._log(f"[ros]   FSM 已恢复为 {self._last_fsm_state}({fsm_name})")
+
+        label = MODE_LABELS[mode_key]
+
+        if (
+            mode_key == "m_resetzero"
+            and self._last_fsm_state == FSM_EXEC_CALIBRATING
+        ):
+            self._log(f"[ros] 模式 {label}: {mode_key} | 起始FSM=10(EXEC_CALIBRATING)")
+            self._log("[ros]   已在调零执行中")
+            self._log_mode_result(label)
+            if self._mode_listener is not None:
+                try:
+                    self._mode_listener(mode_key)
+                except Exception:
+                    pass
+            return
+
+        if self._last_fsm_state in CALIB_LOCK_STATES and mode_key != "m_resetzero":
+            if not self._wait_calibration_finish():
+                self._log("[ros][warn] 调零未完成，无法切换模式")
+                return
+
+        steps = self._build_mode_steps(mode_key)[1]
+        fsm = self._last_fsm_state
+        fsm_name = FSM_STATE_NAMES.get(fsm, str(fsm)) if fsm is not None else "?"
+        self._log(f"[ros] 模式 {label}: {mode_key} | 起始FSM={fsm}({fsm_name})")
+        if self._mode_listener is not None:
+            try:
+                self._mode_listener(mode_key)
+            except Exception:
+                pass
+
+        self._publish_zero_twist()
+        with self._lock:
+            self._stick_target = None
+            self._stick_filtered = None
+
+        with self._joy_lock:
+            with self._lock:
+                was_sprint = self._sprint_enabled
+            self._set_sprint(False, log=False)
+            try:
+                if mode_key == "m_tech":
+                    self._switch_to_candidate(FSM_CANDIDATE_TEACHING, label)
+                    return
+                if mode_key == "m_resetzero":
+                    self._switch_to_candidate(FSM_CANDIDATE_CALIBRATION, label)
+                    return
+                if mode_key == "m_default":
+                    self._switch_to_exec_default(label)
+                    return
+
+                self._log(f"[ros]   序列({len(steps)}步): {steps}")
+                if not steps:
+                    self._log(f"[ros]   已在目标菜单状态，无需操作")
+                    return
+                gap = MENU_STEP_GAP_SEC if len(steps) > 1 else STEP_GAP_SEC
+                self._run_steps_locked(steps, label, MODE_PULSE_SEC, gap)
+            finally:
+                if was_sprint:
+                    self._set_sprint(True, log=False)
+
+    def _log_mode_result(self, label: str) -> None:
+        fsm = self._last_fsm_state
+        if fsm is not None:
+            name = FSM_STATE_NAMES.get(fsm, str(fsm))
+            self._log(f"[ros] 完成: {label} | 当前 FSM={fsm} ({name})")
+        else:
+            self._log(f"[ros] 完成: {label}")
+
+    def _pulse_menu_key(self, token: str) -> None:
+        interval = 1.0 / JOY_PUBLISH_HZ
+        for _ in range(MENU_PULSE_FRAMES):
+            if self._stop.is_set():
+                return
+            self._publish_token(token, True)
+            time.sleep(interval)
+        for _ in range(MENU_RELEASE_FRAMES):
+            if self._stop.is_set():
+                return
+            self._publish_token(token, False)
+            time.sleep(interval)
+        time.sleep(MENU_STEP_GAP_SEC)
+
+    def _wait_fsm(self, target: int, timeout: float = 2.0) -> bool:
+        if self._last_fsm_state == target:
+            return True
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline and not self._stop.is_set():
+            if self._last_fsm_state == target:
+                return True
+            time.sleep(0.02)
+        return self._last_fsm_state == target
+
+    def _wait_fsm_change(self, prev: int, timeout: float = 1.2) -> bool:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline and not self._stop.is_set():
+            cur = self._last_fsm_state
+            if cur is not None and cur != prev:
+                return True
+            time.sleep(0.02)
+        return self._last_fsm_state != prev
+
+    def _enter_init_menu(self) -> bool:
+        cur = self._last_fsm_state
+        if cur == FSM_INIT:
+            return True
+        if cur in MENU_CANDIDATES:
+            return True
+        if cur == FSM_PROTECTION:
+            self._run_steps_locked(["lt+rt+b"], "回INIT", COMBO_HOLD_SEC, STEP_GAP_SEC)
+            return self._wait_fsm(FSM_INIT, timeout=3.0)
+        # 执行态：先卸力到 PROTECTION，再回到 INIT（每步等待 FSM）
+        self._run_steps_locked(["lt+rt+b"], "→PROTECTION", COMBO_HOLD_SEC, STEP_GAP_SEC)
+        if self._wait_fsm(FSM_PROTECTION, timeout=2.5):
+            self._run_steps_locked(["lt+rt+b"], "→INIT", COMBO_HOLD_SEC, STEP_GAP_SEC)
+            return self._wait_fsm(FSM_INIT, timeout=3.0)
+        return self._last_fsm_state in (FSM_INIT, *MENU_CANDIDATES)
+
+    def _switch_to_candidate(self, target: int, label: str) -> None:
+        """按实时 FSM 短脉冲导航到候选菜单并 A 确认（避免长按连跳）。"""
+        if self._last_fsm_state in CALIB_LOCK_STATES:
+            if not self._wait_calibration_finish():
+                self._log_mode_result(label)
+                return
+
+        exec_tgt = CANDIDATE_TO_EXEC.get(target)
+        cur = self._last_fsm_state
+
+        if exec_tgt is not None and cur == exec_tgt:
+            name = FSM_STATE_NAMES.get(cur, str(cur))
+            self._log(f"[ros]   已在目标执行态 {name}")
+            self._log_mode_result(label)
+            return
+
+        if cur == target:
+            self._log(f"[ros]   已在候选 {FSM_STATE_NAMES.get(target, target)}，确认进入…")
+            self._pulse_menu_key("lt+rt+a")
+            if exec_tgt:
+                self._wait_fsm(exec_tgt, timeout=3.0)
+            self._log_mode_result(label)
+            return
+
+        if not self._enter_init_menu():
+            self._log(
+                f"[ros][warn] 未能回到 INIT/菜单，当前 FSM={self._last_fsm_state}"
+            )
+            self._log_mode_result(label)
+            return
+
+        if self._last_fsm_state == FSM_INIT:
+            self._pulse_menu_key("lt+rt+→")
+            if not self._wait_fsm(FSM_CANDIDATE_DEFAULT, timeout=1.5):
+                self._log("[ros][warn] 未能进入候选菜单 (CANDIDATE_DEFAULT)")
+
+        deadline = time.monotonic() + 15.0
+        while time.monotonic() < deadline and not self._stop.is_set():
+            cur = self._last_fsm_state
+            if cur == target:
+                break
+            if cur not in MENU_CANDIDATES:
+                time.sleep(0.05)
+                continue
+            idx_cur = MENU_CANDIDATES.index(cur)
+            idx_tgt = MENU_CANDIDATES.index(target)
+            if idx_cur < idx_tgt:
+                self._pulse_menu_key("lt+rt+→")
+            elif idx_cur > idx_tgt:
+                self._pulse_menu_key("lt+rt+←")
+            else:
+                break
+            self._wait_fsm_change(cur, timeout=1.2)
+
+        if self._last_fsm_state != target:
+            self._log(
+                f"[ros][warn] 未能导航到 {FSM_STATE_NAMES.get(target, target)}，"
+                f"当前 FSM={self._last_fsm_state}"
+            )
+            self._log_mode_result(label)
+            return
+
+        self._log(
+            f"[ros]   已选中 {FSM_STATE_NAMES.get(target, target)}，确认进入…"
+        )
+        self._pulse_menu_key("lt+rt+a")
+        if exec_tgt and not self._wait_fsm(exec_tgt, timeout=3.0):
+            self._log(
+                f"[ros][warn] 确认后未进入执行态，期望 FSM={exec_tgt}，"
+                f"当前 FSM={self._last_fsm_state}"
+            )
+        self._log_mode_result(label)
+
+    def _trigger_action(self, action_key: str) -> None:
+        combo = action_key
+        if parse_gamepad_combo is not None:
+            parsed = parse_gamepad_combo(action_key)
+            if parsed is None:
+                self._log(f"[ros] 非手柄组合键，忽略: {action_key}")
+                return
+            combo = parsed
+
+        labels = load_combo_labels()
+        label = labels.get(combo) or PULSE_CUSTOM_ACTIONS.get(combo) or label_for_combo(combo)
+
+        pulse = (
+            is_pulse_combo(combo)
+            if is_pulse_combo is not None
+            else combo in PULSE_CUSTOM_ACTIONS
+        )
+        if pulse:
+            self._trigger_pulse_action(combo, label=label)
+            return
+
+        hold = (
+            is_hold_combo(combo)
+            if is_hold_combo is not None
+            else combo in ACTION_COMMANDS
+        )
+        if not hold:
+            # 未知组合：默认短脉冲，仍走 /joy_msg 模拟
+            self._log(f"[ros] 未分类手柄键 {combo}，按短脉冲模拟")
+            self._trigger_pulse_action(combo, label=label)
+            return
+
+        now = time.monotonic()
+        if (
+            ACTION_COOLDOWN_SEC > 0
+            and now - self._last_action_ts.get(combo, 0.0) < ACTION_COOLDOWN_SEC
+        ):
+            return
+        self._last_action_ts[combo] = now
+
+        # 起立/蹲下/卸力：二次校验（handle_command 已闸，此处防直接调用）
+        if combo in ("lt+rt+start", "lt+rt+rb", "lt+rt+b"):
+            ok, reason = self._check_motion_allowed("action")
+            if not ok:
+                self._log(f"[ros] 拒绝{label}：{reason}")
+                return
+
+        steps = [combo]
+        step_gap = STEP_GAP_SEC
+        # ERROR/保护态下勿再先开步态猛打组合键（易崩主节点）；等 FSM 恢复后再起立
+        if combo == "lt+rt+start" and self._last_fsm_state in RECOVERY_FSM_STATES:
+            fsm = self._last_fsm_state
+            name = FSM_STATE_NAMES.get(fsm, str(fsm)) if fsm is not None else "?"
+            self._log(
+                f"[ros] 拒绝起立：当前 FSM={fsm}({name})，"
+                "请先 MP ON 并等电机恢复后再试"
+            )
+            return
+
+        self._log(
+            f"[ros] 动作 {label}: {' → '.join(steps)} → /joy_msg ({COMBO_HOLD_SEC}s)"
+        )
+        self._publish_zero_twist()
+        with self._lock:
+            self._stick_target = None
+            self._stick_filtered = None
+
+        if combo == "lt+rt+start" and self._action_listener is not None:
+            try:
+                self._action_listener("auto_stand")
+            except Exception:
+                pass
+        elif combo == "lt+rt+rb" and self._action_listener is not None:
+            try:
+                self._action_listener("squat")
+            except Exception:
+                pass
+
+        threading.Thread(
+            target=self._run_steps,
+            args=(steps, label, COMBO_HOLD_SEC),
+            kwargs={"step_gap": step_gap},
+            daemon=True,
+        ).start()
+
+    def _read_velocity_walk_enabled(self) -> Optional[bool]:
+        """True=行走(速度控制启用), False=站立, None=未知或非步态状态。"""
+        raw = self._last_sim2real_state
+        if not raw:
+            return None
+        s = raw.strip().lower()
+        if s in WALK_VELOCITY_STATES:
+            return True
+        if s in STAND_VELOCITY_STATES:
+            return False
+        return None
+
+    def _wait_velocity_walk_state(
+        self, want_walk: bool, timeout: float = GAIT_VERIFY_TIMEOUT_SEC
+    ) -> Optional[bool]:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline and not self._stop.is_set():
+            cur = self._read_velocity_walk_enabled()
+            if cur is not None and cur == want_walk:
+                return cur
+            time.sleep(0.1)
+        return self._read_velocity_walk_enabled()
+
+    def _confirm_gait_verified(self, verified_walk: bool, requested_walk: bool) -> None:
+        wire = "ON" if verified_walk else "OFF"
+        if verified_walk != requested_walk:
+            self._log(
+                f"[ros][warn] 步态未达预期：请求={'行走' if requested_walk else '站立'} "
+                f"实际={wire} (sim2real={self._last_sim2real_state!r})"
+            )
+        else:
+            self._log(
+                f"[ros] 步态已确认={'行走' if verified_walk else '站立'} "
+                f"(sim2real={self._last_sim2real_state!r})"
+            )
+        if self._gait_listener is not None:
+            try:
+                self._gait_listener(wire)
+            except Exception:
+                pass
+
+    def _trigger_gait(self, state: str) -> None:
+        """GAIT ON/OFF → /joy 发送 lt+rt+lb（步态切换）；以 sim2real 实测后再回调。"""
+        if state not in ("ON", "OFF"):
+            return
+        if state == "OFF" and self._last_fsm_state in RECOVERY_FSM_STATES:
+            fsm_name = FSM_STATE_NAMES.get(
+                self._last_fsm_state, str(self._last_fsm_state)
+            )
+            self._log(
+                f"[ros] 拒绝 GAIT OFF：FSM={self._last_fsm_state}({fsm_name})，"
+                "倒地/保护态需保持步态以便起立"
+            )
+            return
+        now = time.monotonic()
+        if (
+            ACTION_COOLDOWN_SEC > 0
+            and now - self._last_action_ts.get(GAIT_JOY_KEY, 0.0) < ACTION_COOLDOWN_SEC
+        ):
+            return
+        self._last_action_ts[GAIT_JOY_KEY] = now
+
+        want_walk = state == "ON"
+        current = self._read_velocity_walk_enabled()
+        if current is not None and current == want_walk:
+            self._log(
+                f"[ros] 步态已是{'行走' if want_walk else '站立'}，无需切换 "
+                f"(sim2real={self._last_sim2real_state!r})"
+            )
+            self._confirm_gait_verified(want_walk, want_walk)
+            return
+        if current is None:
+            self._log(
+                "[ros][warn] 未知 sim2real 步态状态，仍尝试 lt+rt+lb 切换"
+            )
+
+        label = "步态开启" if state == "ON" else "步态关闭"
+        combo = GAIT_JOY_KEY
+        self._log(f"[ros] {label}: GAIT {state} → /joy ({COMBO_HOLD_SEC}s)")
+        self._publish_zero_twist()
+        with self._lock:
+            self._stick_target = None
+            self._stick_filtered = None
+
+        threading.Thread(
+            target=self._run_gait_and_confirm,
+            args=(want_walk, combo, label),
+            daemon=True,
+        ).start()
+
+    def _run_gait_and_confirm(
+        self, want_walk: bool, combo: str, label: str
+    ) -> None:
+        """长按组合键后等待 sim2real 进入对应步态，再回传实测结果。"""
+        try:
+            self._run_steps([combo], label, COMBO_HOLD_SEC)
+            if self._stop.is_set():
+                return
+            verified = self._wait_velocity_walk_state(want_walk)
+            if verified is None:
+                self._log(
+                    "[ros][warn] 步态切换后状态未知，不回传 "
+                    f"(sim2real={self._last_sim2real_state!r})"
+                )
+                return
+            self._confirm_gait_verified(verified, want_walk)
+        except Exception as e:
+            self._log(f"[ros][warn] 步态执行失败: {e}")
+
+    def _trigger_pulse_action(self, action_key: str, label: Optional[str] = None) -> None:
+        combo = action_key
+        if parse_gamepad_combo is not None:
+            parsed = parse_gamepad_combo(action_key)
+            if parsed is not None:
+                combo = parsed
+        if label is None:
+            labels = load_combo_labels()
+            label = labels.get(combo) or PULSE_CUSTOM_ACTIONS.get(combo, combo)
+        now = time.monotonic()
+        if combo in self._pulse_action_running:
+            self._log(f"[ros] {label}执行中，新指令打断")
+            self._pulse_action_running.discard(combo)
+        if (
+            CHEER_COOLDOWN_SEC > 0
+            and now - self._last_action_ts.get(combo, 0.0) < CHEER_COOLDOWN_SEC
+        ):
+            self._log(f"[ros] {label}冷却中，忽略")
+            return
+        self._last_action_ts[combo] = now
+        self._pulse_action_running.add(combo)
+        self._log(
+            f"[ros] {label}: {combo} 短脉冲 {CHEER_PULSE_SEC}s → /joy_msg（模拟手柄）"
+        )
+        self._publish_zero_twist()
+        with self._lock:
+            self._stick_target = None
+            self._stick_filtered = None
+        threading.Thread(
+            target=self._run_pulse_action_once,
+            args=(combo, label),
+            daemon=True,
+        ).start()
+
+    def _run_pulse_action_once(self, action_key: str, label: str) -> None:
+        try:
+            self._run_steps([action_key], label, CHEER_PULSE_SEC, step_gap=0.0)
+            self._flush_joy_release(action_key, CHEER_RELEASE_FRAMES)
+        finally:
+            self._pulse_action_running.discard(action_key)
+
+    def _trigger_cheer(self) -> None:
+        """兼容旧调用。"""
+        self._trigger_pulse_action("rt+a")
+
+    def _wait_joy_path(self) -> None:
+        import rospy
+
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline and not self._stop.is_set():
+            if self._has_joy and self._joy_msg_pub:
+                if self._joy_msg_pub.get_num_connections() > 0:
+                    return
+            elif self._sensor_joy_pub and self._sensor_joy_pub.get_num_connections() > 0:
+                return
+            rospy.sleep(0.05)
+        topic = "/joy_msg" if self._has_joy else "/joy"
+        self._log(f"[ros][warn] {topic} 无订阅者(sim2real_master)，指令可能无效")
+
+    def _flush_joy_release(self, combo: str, frames: int = 10) -> None:
+        """连发松开帧，避免释放沿被固件当成第二次触发。"""
+        interval = 1.0 / JOY_PUBLISH_HZ
+        for _ in range(frames):
+            if self._stop.is_set():
+                break
+            self._publish_token(combo, False)
+            time.sleep(interval)
+
+    def _publish_token(self, token: str, pressed: bool) -> None:
+        """模式/动作优先直发 /joy_msg，避免与 joy_node 抢占 /joy。"""
+        keys = _parse_key_combo(token) if "+" in token else {token}
+        joy = _joy_from_keys(keys, pressed)
+        if self._has_joy and self._joy_msg_pub is not None:
+            self._joy_msg_pub.publish(joy)
+        elif self._sensor_joy_pub is not None:
+            sensor = _sensor_joy_from_token(token, pressed)
+            self._sensor_joy_pub.publish(sensor)
+
+    def _run_steps(
+        self,
+        steps: List[str],
+        label: str,
+        hold_sec: float,
+        step_gap: float = STEP_GAP_SEC,
+    ) -> None:
+        with self._joy_lock:
+            with self._lock:
+                was_sprint = self._sprint_enabled
+            self._set_sprint(False, log=False)
+            try:
+                self._run_steps_locked(steps, label, hold_sec, step_gap)
+            finally:
+                if was_sprint:
+                    self._set_sprint(True, log=False)
+
+    def _run_steps_locked(
+        self,
+        steps: List[str],
+        label: str,
+        hold_sec: float,
+        step_gap: float = STEP_GAP_SEC,
+    ) -> None:
+        self._wait_joy_path()
+        interval = 1.0 / JOY_PUBLISH_HZ
+        for step in steps:
+            if self._stop.is_set():
+                break
+            if _is_menu_nav_step(step):
+                for _ in range(MENU_PULSE_FRAMES):
+                    if self._stop.is_set():
+                        break
+                    self._publish_token(step, True)
+                    time.sleep(interval)
+                for _ in range(MENU_RELEASE_FRAMES):
+                    if self._stop.is_set():
+                        break
+                    self._publish_token(step, False)
+                    time.sleep(interval)
+                time.sleep(MENU_STEP_GAP_SEC)
+            else:
+                n_hold = max(1, int(hold_sec * JOY_PUBLISH_HZ))
+                for _ in range(n_hold):
+                    if self._stop.is_set():
+                        break
+                    self._publish_token(step, True)
+                    time.sleep(interval)
+                for _ in range(3):
+                    if self._stop.is_set():
+                        break
+                    self._publish_token(step, False)
+                    time.sleep(interval)
+                time.sleep(step_gap)
+        self._log_mode_result(label)

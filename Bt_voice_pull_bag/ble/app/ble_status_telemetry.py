@@ -529,6 +529,13 @@ class BleStatusTelemetry:
             self._last_mp_sent = wire
         self._tx(f"mp:{wire}", repeat=FSM_REPEAT)
 
+    def push_ip(self, force: bool = True) -> Optional[str]:
+        """主动推送当前局域网 IP（配网成功后调用）。"""
+        ip = read_lan_ip()
+        if ip:
+            self._send_ip(ip, force=force)
+        return ip
+
     def push_mp_state(self, wire: str, force: bool = True) -> None:
         """MP 指令后立即推送 mp:ON/OFF，供小程序自动站立判断。"""
         self._send_mp_wire(wire, force=force)

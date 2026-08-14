@@ -14,4 +14,7 @@ elif [[ -f "${HOME}/sim2real/devel/setup.bash" ]]; then
   source "${HOME}/sim2real/devel/setup.bash"
 fi
 
+if [ -f "${ROOT}/torque_cmd_vel_bridge.py" ]; then
+  exec python3 "${ROOT}/torque_cmd_vel_bridge.py" "$@"
+fi
 exec python3 "${ROOT}/torque_cmd_vel_bridge.pyc" "$@"

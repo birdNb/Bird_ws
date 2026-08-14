@@ -25,10 +25,13 @@ MAC=$(bluetoothctl show 2>/dev/null | awk '/Controller/ {print $2}' | head -1)
 echo ""
 
 echo "========== BLE 服务 =========="
-if pgrep -f 'ble_gatt_server' >/dev/null; then
-  echo "[OK] ble_gatt_server 运行中"
+# 自启入口为 ble_gatt_boot；手工 start.sh 也可能直接跑 ble_gatt_server
+if pgrep -f 'ble_gatt_boot\.py[c]?|ble_gatt_server\.py[c]?' >/dev/null; then
+  echo "[OK] BLE GATT 进程运行中"
+elif systemctl is-active --quiet bird-ble.service 2>/dev/null; then
+  echo "[OK] bird-ble.service active"
 else
-  echo "[!!] 未运行 — cd ${BT_DIR} && ./start.sh"
+  echo "[!!] 未运行 — sudo systemctl start bird-ble  或  cd ${BT_DIR} && ./start.sh"
 fi
 echo ""
 echo "板子 MAC: ${MAC:-见 bluetoothctl show}"

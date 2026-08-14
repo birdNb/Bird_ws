@@ -12,11 +12,17 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Callable, Deque, Optional, Tuple
 
-MAX_PACKET_BYTES = 64
+# MTU 247 下可承载 WIFI 凭据；摇杆等短指令不受影响
+MAX_PACKET_BYTES = 200
 QUEUE_MAX = 32
 TICK_INTERVAL_SEC = 0.05
 STICK_XY_LIMIT = 1.8
 STICK_Z_LIMIT = 1.5
+# payload 内 SSID/密码分隔（不出现在明文日志 wire 中）
+try:
+    from ble_wifi_manager import WIFI_PAYLOAD_SEP
+except ImportError:
+    WIFI_PAYLOAD_SEP = "\x1e"
 
 # 摇杆：XYZ 必填；可选 ,N:序号 供小程序 20Hz 保活（板端忽略 N 仅解析 XYZ）
 STICK_RE = re.compile(
@@ -82,6 +88,7 @@ class CommandKind(str, Enum):
     SOUND = "sound"
     VOLUME = "volume"
     RENAME = "rename"
+    WIFI = "wifi"
     UNKNOWN = "unknown"
 
 
@@ -172,6 +179,18 @@ def classify_payload(text: str) -> Tuple[CommandKind, str, str]:
         digits = m_rename.group(1)
         name = f"HT_{digits}"
         return CommandKind.RENAME, name, f"rename {name}"
+
+    if re.match(r"^WIFI\s+", raw, re.IGNORECASE):
+        try:
+            from ble_wifi_manager import parse_wifi_command
+        except ImportError:
+            parse_wifi_command = None  # type: ignore
+        parsed = parse_wifi_command(raw) if parse_wifi_command else None
+        if parsed is None:
+            return CommandKind.UNKNOWN, raw, raw
+        ssid, password = parsed
+        payload = f"{ssid}{WIFI_PAYLOAD_SEP}{password}"
+        return CommandKind.WIFI, payload, f"WIFI {ssid}"
 
     return CommandKind.UNKNOWN, raw, raw
 
@@ -312,6 +331,14 @@ class CommandDispatcher:
                 self._handle(kind, payload)
             except Exception as e:
                 self._log_warn(f"rename 处理失败: {e}")
+            return
+
+        if kind == CommandKind.WIFI:
+            self._log_rx(f"wifi: {wire}")
+            try:
+                self._handle(kind, payload)
+            except Exception as e:
+                self._log_warn(f"WIFI 处理失败: {e}")
             return
 
         # 模式指令同步处理并立即 ACK，避免握手 M_default 排队卡住

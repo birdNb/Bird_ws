@@ -1,25 +1,28 @@
 # Bt_voice_pull_bag（源码树）
 
-蓝牙遥控 + 语音提醒 + 拖拽控制 + 头追 **四合一**开发目录。  
-**本目录放源码**；带日期后缀的目录（如 `Bt_voice_pull_bag_0730`）才是加密发布包。
+蓝牙遥控 + 语音提醒 + 拖拽控制 + 头追 **四合一**源码目录。
 
-| 路径 | 用途 |
-|------|------|
-| `Bt_voice_pull_bag/` | 源码 / 联调（可含 `.py`） |
-| `Bt_voice_pull_bag_XXXX/` | 发布包（仅 `.pyc` + 二进制，无业务源码） |
+## 版本
 
-## 出加密包
+当前版本见 `VERSION`：
 
-```bash
-bash scripts/build_release_0730.sh
-# → ../Bt_voice_pull_bag_0730/
-# → ../Bt_voice_pull_bag_0730.tar.gz
+```
+Bt-source-1.0.0-260730
 ```
 
-## 一键安装（请用日期包，不要直接装本源码树）
+命名约定：
+
+| 版本名 | 含义 |
+|--------|------|
+| `Bt-source-1.0.0-260730` | 源码版（本目录，可含 `.py`） |
+| `Bt-build-1.0.0-260730` | 编译版（仅 `.pyc` + 二进制，隐藏源码） |
+
+后缀 `260730` 表示功能基线日期（2026-07-30）。
+
+## 一键安装
 
 ```bash
-cd ../Bt_voice_pull_bag_0730
+cd ~/Bird_ws/Bt_voice_pull_bag
 sudo ./install.sh
 ```
 
@@ -30,8 +33,17 @@ sudo ./install.sh
 | 语音提示 `sound` | 开 | `sound OFF` 可关 |
 | 人脸追踪 | 关 | `locate_face ON` |
 | 拖拽 | 关 | `PULL ON` |
+| 蓝牙 GATT | 开机自启 | `sudo systemctl status bird-ble` |
 
 ## 平台
 
 - **RK3588**：板载蓝牙 + 头追优先 D435i `/dev/video4`
 - **Jetson Orin**：USB 蓝牙 + 头追优先 ZED Mini `/dev/video0`（并排裁左眼）
+
+## 常用命令
+
+```bash
+sudo systemctl status bird-ble
+journalctl -u bird-ble -f
+cd ble/app && ./scripts/check.sh
+```

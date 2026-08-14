@@ -88,4 +88,7 @@ for a in "${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}"; do
 done
 
 echo "[torque-cmd-vel] 启动 torque_cmd_vel_bridge（仅 FSM=EXEC_DEFAULT/行走模式发 /cmd_vel）"
+if [ -f "${DEMO_DIR}/torque_cmd_vel_bridge.py" ]; then
+  exec python3 "${DEMO_DIR}/torque_cmd_vel_bridge.py" "${FILTERED_ARGS[@]}"
+fi
 exec python3 "${DEMO_DIR}/torque_cmd_vel_bridge.pyc" "${FILTERED_ARGS[@]}"

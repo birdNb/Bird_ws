@@ -1,13 +1,12 @@
 #!/bin/bash
-# Bt_voice_pull_bag — 蓝牙 + 语音提醒 + 拖拽控制 一键安装（兼容 OTA / 手工）
+# Bt_voice_pull_bag — 蓝牙 + 语音提醒 + 拖拽控制 一键安装
 # - RK / Orin 通用
-# - OTA 以普通用户调用时，按平台自动 sudo 提权（RK: ht / Orin: nvidia）
-# - 先同步到固定目录，再安装（OTA 删临时包后服务仍可用）
+# - 非 root 时按平台自动 sudo 提权（RK: ht / Orin: nvidia）
 set -euo pipefail
 
 SRC_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-# ---------- 平台检测与提权（OTA 客户端非 root 调用）----------
+# ---------- 平台检测与提权 ----------
 _detect_board_kind() {
   local model=""
   if [ -r /proc/device-tree/model ]; then
@@ -46,7 +45,7 @@ _elevate_if_needed() {
   else
     pass="ht"
   fi
-  echo "[info] 检测到平台=${kind}，使用默认密码提权安装（OTA 兼容）..."
+  echo "[info] 检测到平台=${kind}，使用默认密码提权安装..."
   # shellcheck disable=SC2024
   printf '%s\n' "${pass}" | sudo -S -E bash "$0" "$@"
   exit $?
@@ -55,7 +54,6 @@ _elevate_if_needed() {
 _elevate_if_needed "$@"
 
 # ---------- root 以下 ----------
-# 安装用户：优先 sudo 调用者
 INSTALL_USER="${SUDO_USER:-${BIRD_USER:-hightorque}}"
 if [ "${INSTALL_USER}" = "root" ]; then
   INSTALL_USER="hightorque"
@@ -65,14 +63,13 @@ INSTALL_UID="$(id -u "${INSTALL_USER}" 2>/dev/null || echo 1000)"
 INSTALL_GID="$(id -g "${INSTALL_USER}" 2>/dev/null || echo 1000)"
 SIM2REAL_WS="${SIM2REAL_WS:-${INSTALL_HOME}/sim2real}"
 
-# 固定安装根目录（OTA 解包目录会被删除，必须拷到这里）
 INSTALL_ROOT="${BIRD_INSTALL_ROOT:-${INSTALL_HOME}/Bird_ws/Bt_voice_pull_bag}"
 BOARD_KIND="$(_detect_board_kind)"
+PKG_VERSION="$(tr -d '[:space:]' < "${SRC_DIR}/VERSION" 2>/dev/null || echo Bt-source-1.0.0-260730)"
 
 sync_to_install_root() {
   echo "[sync] ${SRC_DIR} → ${INSTALL_ROOT}"
   mkdir -p "${INSTALL_ROOT}"
-  # 不跟随把自身装进自己时的死循环：若已在目标目录则跳过 rsync 源=目标
   if [ "${SRC_DIR}" = "${INSTALL_ROOT}" ]; then
     echo "[sync] 已在正式目录，跳过拷贝"
     return 0
@@ -86,16 +83,14 @@ sync_to_install_root() {
     find "${INSTALL_ROOT}" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
     cp -a "${SRC_DIR}/." "${INSTALL_ROOT}/"
   fi
-  # 校验关键运行文件（防止同步丢 .pyc）
-  if [ ! -f "${INSTALL_ROOT}/ble/app/ble_gatt_server.pyc" ] && [ ! -f "${INSTALL_ROOT}/ble/app/ble_gatt_server.py" ]; then
+  if [ ! -f "${INSTALL_ROOT}/ble/app/ble_gatt_server.py" ] && [ ! -f "${INSTALL_ROOT}/ble/app/ble_gatt_server.pyc" ]; then
     echo "[error] 同步后缺少 ble_gatt_server，安装中止"
     exit 1
   fi
-  if [ ! -f "${INSTALL_ROOT}/pull_move/app/torque_cmd_vel_bridge.pyc" ] && [ ! -f "${INSTALL_ROOT}/pull_move/app/torque_cmd_vel_bridge.py" ]; then
+  if [ ! -f "${INSTALL_ROOT}/pull_move/app/torque_cmd_vel_bridge.py" ] && [ ! -f "${INSTALL_ROOT}/pull_move/app/torque_cmd_vel_bridge.pyc" ]; then
     echo "[error] 同步后缺少 torque_cmd_vel_bridge，安装中止"
     exit 1
   fi
-  # 若包内缺头追运行时，从同级工作区 locate_face_cpp 补齐（避免仅有语音 ACK）
   if [ ! -x "${INSTALL_ROOT}/locate_face_cpp/build/locate_face" ]; then
     local ws_lf="${INSTALL_HOME}/Bird_ws/locate_face_cpp"
     if [ -x "${ws_lf}/build/locate_face" ]; then
@@ -122,42 +117,8 @@ sync_to_install_root() {
   echo "[ok] 已同步到正式目录"
 }
 
-write_ota_version() {
-  local ver_file="${SIM2REAL_WS}/version.json"
-  local vernum date_tag raw
-  vernum="$(tr -d '[:space:]' < "${INSTALL_ROOT}/VERSION" 2>/dev/null || echo 0724)"
-  date_tag="$(date +%Y%m%d)"
-  # OTA 匹配规则：名称-平台 前两段；RK/Orin 共用 ble-all
-  raw="ble-all-${vernum}-${date_tag}"
-  mkdir -p "$(dirname "${ver_file}")"
-  python3 - "${ver_file}" "${raw}" <<'PY'
-import json, sys
-from pathlib import Path
-
-path = Path(sys.argv[1])
-raw = sys.argv[2]
-items = []
-if path.exists():
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        if isinstance(data, list):
-            items = data
-    except Exception:
-        items = []
-out = []
-for x in items:
-    if isinstance(x, str) and x.startswith("ble-all-"):
-        continue
-    out.append(x)
-out.append(raw)
-path.write_text(json.dumps(out, ensure_ascii=False) + "\n", encoding="utf-8")
-print(f"[ok] OTA 本地版本: {path} -> {raw}")
-PY
-  chown "${INSTALL_USER}:${INSTALL_GID}" "${ver_file}" 2>/dev/null || true
-}
-
 cleanup_residuals() {
-  echo "[0/5] 清理旧服务与残留..."
+  echo "[0/4] 清理旧服务与残留..."
   local units=(
     bird-ble.service
     torque-cmd-vel.service
@@ -175,6 +136,7 @@ cleanup_residuals() {
   done
 
   pkill -f 'ble_gatt_server\.pyc?' 2>/dev/null || true
+  pkill -f 'ble_gatt_boot\.pyc?' 2>/dev/null || true
   pkill -f 'torque_cmd_vel_bridge\.pyc?' 2>/dev/null || true
 
   rm -f /etc/default/bird-ble /etc/default/torque-cmd-vel
@@ -186,7 +148,6 @@ cleanup_residuals() {
 
 sync_to_install_root
 
-# 后续全部基于正式目录
 PKG_DIR="${INSTALL_ROOT}"
 BLE_DIR="${PKG_DIR}/ble"
 PULL_DIR="${PKG_DIR}/pull_move"
@@ -194,8 +155,9 @@ VOICE_DIR="${PKG_DIR}/voice_remind"
 BIRD_WS="${PKG_DIR}"
 
 echo "=========================================="
-echo " Bt_voice_pull_bag 一键安装（OTA 兼容）"
-echo " 平台:     ${BOARD_KIND} (RK/Orin 通用包)"
+echo " Bt_voice_pull_bag 一键安装"
+echo " 版本:     ${PKG_VERSION}"
+echo " 平台:     ${BOARD_KIND} (RK/Orin 通用)"
 echo " 安装目录: ${PKG_DIR}"
 echo " 运行用户: ${INSTALL_USER}"
 echo " BIRD_WS:  ${BIRD_WS}"
@@ -208,14 +170,14 @@ for d in "${BLE_DIR}" "${PULL_DIR}" "${VOICE_DIR}"; do
     exit 1
   fi
 done
-if [ ! -f "${VOICE_DIR}/__init__.py" ] && [ ! -f "${VOICE_DIR}/__init__.pyc" ]; then
+if [ ! -f "${VOICE_DIR}/__init__.py" ]; then
   echo "[error] voice_remind 不完整: ${VOICE_DIR}"
   exit 1
 fi
 
 cleanup_residuals
 
-echo "[1/5] 安装系统依赖..."
+echo "[1/4] 安装系统依赖..."
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 apt-get install -y --no-install-recommends \
@@ -239,7 +201,7 @@ if [ -f "${CONF}" ] && ! grep -qE '^[[:space:]]*Experimental[[:space:]]*=[[:spac
   echo "[ok] BlueZ Experimental=true（备份: ${BACKUP}）"
 fi
 
-echo "[2/5] 安装蓝牙 BLE（含语音提醒加载路径）..."
+echo "[2/4] 安装蓝牙 BLE（含语音提醒加载路径）..."
 export BIRD_USER="${INSTALL_USER}"
 export BIRD_HOME="${INSTALL_HOME}"
 export BIRD_BLE_UID="${INSTALL_UID}"
@@ -260,7 +222,6 @@ EOF
 
 mkdir -p /var/lib/bird-ble
 chmod 755 /var/lib/bird-ble
-# 优先包根 ble_device_name.conf（默认 HT_88888888），兼容旧路径 ble/
 _NAME_SRC=""
 if [ -f "${PKG_DIR}/ble_device_name.conf" ]; then
   _NAME_SRC="${PKG_DIR}/ble_device_name.conf"
@@ -283,10 +244,9 @@ chown "${INSTALL_USER}:${INSTALL_GID}" "${BLE_DIR}/ble_device_name.conf" 2>/dev/
 chmod 664 "${BLE_DIR}/ble_device_name.conf" 2>/dev/null || true
 chmod +x "${BLE_DIR}/app"/*.sh "${BLE_DIR}/app/scripts/"*.sh "${BLE_DIR}/app/systemd/"*.sh
 
-# install-autostart 用环境变量 BIRD_WS / PKG_DIR(ble)
 "${BLE_DIR}/app/install-autostart.sh"
 
-echo "[3/5] 安装拖拽控制（默认不开机自启，由小程序 PULL ON 启动）..."
+echo "[3/4] 安装拖拽控制（默认不开机自启，由小程序 PULL ON 启动）..."
 chmod +x "${PULL_DIR}/app"/*.sh "${PULL_DIR}/app/systemd/"*.sh
 export BIRD_USER="${INSTALL_USER}"
 export BIRD_HOME="${INSTALL_HOME}"
@@ -294,10 +254,7 @@ export BIRD_HOME="${INSTALL_HOME}"
 systemctl disable torque-cmd-vel.service 2>/dev/null || true
 systemctl stop torque-cmd-vel.service 2>/dev/null || true
 
-echo "[4/5] 写入 OTA 本地版本（~/sim2real/version.json）..."
-write_ota_version
-
-echo "[5/5] 启动蓝牙服务并自检..."
+echo "[4/4] 启动蓝牙服务并自检..."
 systemctl daemon-reload
 systemctl restart bird-ble.service || systemctl start bird-ble.service || true
 sleep 5
@@ -317,10 +274,10 @@ echo ""
 echo "=========================================="
 echo " 安装完成"
 echo "=========================================="
+echo " 版本:     ${PKG_VERSION}"
 echo " 正式目录: ${INSTALL_ROOT}"
 echo " 蓝牙:     sudo systemctl status bird-ble"
 echo " 拖拽:     sudo systemctl status torque-cmd-vel  # PULL ON 后运行"
 echo " 语音:     ${VOICE_DIR}"
-echo " OTA 组件: ble-all（RK/Orin 共用）"
 echo " 日志:     journalctl -u bird-ble -f"
 "${BLE_DIR}/app/scripts/check.sh" || true

@@ -14,4 +14,7 @@ elif [[ -f "${HOME}/sim2real/devel/setup.bash" ]]; then
   source "${HOME}/sim2real/devel/setup.bash"
 fi
 
+if [ -f "${ROOT}/monitor_r_shoulder_torque.py" ]; then
+  exec python3 "${ROOT}/monitor_r_shoulder_torque.py" "$@"
+fi
 exec python3 "${ROOT}/monitor_r_shoulder_torque.pyc" "$@"
