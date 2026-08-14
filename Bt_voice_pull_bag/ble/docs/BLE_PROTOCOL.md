@@ -221,10 +221,11 @@ WIFI <SSID> <PASSWORD>
 | SSID | 最长 32；含空格时用引号：`WIFI "My SSID" pass` |
 | PASSWORD | 最长 63；无引号时第一个 token 为 SSID，其余为密码 |
 | 板端流程 | 解析 → `nmcli` 保存并连接 → FFE2 回最终结果 |
-| 成功 | `WIFI OK`，并再推 `IP:x.x.x.x` |
-| 失败 | `WIFI FAIL <reason>`（如 `busy` / `auth` / `not_found` / `timeout` / `no_device`） |
+| 成功 | `WIFI OK`，并再推 `IP:x.x.x.x`；播报 `wifi_connected` |
+| 失败 | `WIFI FAIL <reason>`（如 `busy` / `auth` / `not_found` / `timeout` / `no_device`）；播报 `wifi_disconnected` |
 | 超时 | 约 45s |
 | 并发 | 同时仅允许一路配网；忙时立即 `WIFI FAIL busy` |
+| 语音 | 开始配网播 `wifi_changed`；链路事后断开也播 `wifi_disconnected` |
 
 ### 1.11 指令 ACK（FFE2 notify）
 

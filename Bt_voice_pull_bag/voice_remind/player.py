@@ -269,6 +269,18 @@ class VoiceRemindPlayer:
         # 入队播报，不打断当前；后续系统提示因开关关闭不再入队
         self.play("sound_off", force=True)
 
+    def on_wifi_changed(self) -> None:
+        """WIFI 配置修改 / 开始配网。"""
+        self.play("wifi_changed")
+
+    def on_wifi_connected(self) -> None:
+        """WiFi 连接成功。"""
+        self.play("wifi_connected")
+
+    def on_wifi_disconnected(self) -> None:
+        """WiFi 连接断开或配网失败。"""
+        self.play("wifi_disconnected")
+
     def on_battery_pct(self, pct: int) -> None:
         if not self._enabled or not self._system_prompts_ok:
             return

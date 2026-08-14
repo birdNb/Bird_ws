@@ -26,6 +26,9 @@
 | `face_off.wav` | 人脸跟随已关闭 | `locate_face OFF` |
 | `sound_on.wav` | 提示音已开启 | `sound ON` |
 | `sound_off.wav` | 提示音已关闭 | `sound OFF`（播完本条后不再播系统提示；conversation 仍可播） |
+| `wifi_changed.wav` | WiFi 配置已修改 | 收到 `WIFI <SSID> <PASSWORD>` 开始配网 |
+| `wifi_connected.wav` | WiFi 已连接 | 配网成功 `WIFI OK` |
+| `wifi_disconnected.wav` | WiFi 已断开 | 配网失败 / 链路断开 |
 | `battery_50.wav` | 当前电量百分之五十 | 电量下降穿越 50% |
 | `battery_25.wav` | 当前电量百分之二十五 | 电量下降穿越 25% |
 | `battery_10.wav` | 当前电量百分之十 | 电量下降穿越 10% |

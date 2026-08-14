@@ -13,11 +13,13 @@ from typing import Callable, Optional, Tuple
 
 LogFn = Callable[[str], None]
 ResultFn = Callable[[bool, str], None]
+VoidFn = Callable[[], None]
 
 # 与 ble_command_dispatcher 载荷分隔一致
 WIFI_PAYLOAD_SEP = "\x1e"
 WIFI_IFACE_CANDIDATES = ("wlan0", "wlan1", "wlp1s0")
 CONNECT_TIMEOUT_SEC = 45.0
+LINK_POLL_SEC = 3.0
 RESULT_OK = "WIFI OK"
 RESULT_FAIL_PREFIX = "WIFI FAIL"
 
@@ -115,6 +117,28 @@ def _classify_nmcli_error(stderr: str, stdout: str) -> str:
     return brief or "error"
 
 
+def _wifi_link_connected(iface: Optional[str] = None) -> bool:
+    """当前 WiFi 网卡是否处于 connected。"""
+    rc, out, _ = _run(
+        ["nmcli", "-t", "-f", "DEVICE,TYPE,STATE", "device", "status"],
+        timeout=5.0,
+    )
+    if rc != 0:
+        return False
+    for line in out.splitlines():
+        parts = line.split(":")
+        if len(parts) < 3:
+            continue
+        dev, typ, state = parts[0], parts[1], parts[2]
+        if typ != "wifi":
+            continue
+        if iface and dev != iface:
+            continue
+        if state == "connected":
+            return True
+    return False
+
+
 class WifiManager:
     """异步配网：保存配置并尝试连接，完成后回调结果文案。"""
 
@@ -122,11 +146,50 @@ class WifiManager:
         self._log = log
         self._lock = threading.Lock()
         self._busy = False
+        self._stop = threading.Event()
+        self._monitor_thread: Optional[threading.Thread] = None
+        self._on_link_down: Optional[VoidFn] = None
+        self._was_connected = False
+        self._suppress_link_events = False
 
     @property
     def busy(self) -> bool:
         with self._lock:
             return self._busy
+
+    def start_link_monitor(self, on_disconnected: Optional[VoidFn] = None) -> None:
+        """轮询 WiFi 链路：曾连接后断开时回调（配网过程中抑制）。"""
+        self._on_link_down = on_disconnected
+        self._was_connected = _wifi_link_connected()
+        if self._monitor_thread is not None:
+            return
+        self._stop.clear()
+        self._monitor_thread = threading.Thread(
+            target=self._link_monitor_loop, name="ble-wifi-link", daemon=True
+        )
+        self._monitor_thread.start()
+
+    def stop_link_monitor(self) -> None:
+        self._stop.set()
+        t = self._monitor_thread
+        if t is not None:
+            t.join(timeout=2.0)
+        self._monitor_thread = None
+
+    def _link_monitor_loop(self) -> None:
+        while not self._stop.wait(LINK_POLL_SEC):
+            if self._suppress_link_events:
+                continue
+            connected = _wifi_link_connected()
+            if self._was_connected and not connected:
+                self._log("[wifi] 链路断开")
+                cb = self._on_link_down
+                if cb is not None:
+                    try:
+                        cb()
+                    except Exception as e:
+                        self._log(f"[wifi] 断连回调失败: {e}")
+            self._was_connected = connected
 
     def connect_async(
         self,
@@ -139,6 +202,7 @@ class WifiManager:
             if self._busy:
                 return False
             self._busy = True
+            self._suppress_link_events = True
 
         def _job() -> None:
             ok = False
@@ -151,6 +215,9 @@ class WifiManager:
             finally:
                 with self._lock:
                     self._busy = False
+                    self._suppress_link_events = False
+                # 同步链路状态，避免配网刚结束误报断连
+                self._was_connected = _wifi_link_connected()
             if on_result is not None:
                 try:
                     on_result(ok, detail)

@@ -801,9 +801,18 @@ class BleGattServer:
             self._send_command_echo(format_wifi_result(False, "bad_format"))
             return
 
+        # 配置修改开始 → 语音
+        if self._voice_remind is not None:
+            self._voice_remind.on_wifi_changed()
+
         def _on_result(ok: bool, detail: str) -> None:
             wire = format_wifi_result(ok, detail)
             self._send_command_echo(wire)
+            if self._voice_remind is not None:
+                if ok:
+                    self._voice_remind.on_wifi_connected()
+                else:
+                    self._voice_remind.on_wifi_disconnected()
             if ok and self._telemetry is not None:
                 try:
                     self._telemetry.push_ip(force=True)
@@ -813,6 +822,8 @@ class BleGattServer:
         if not self._wifi.connect_async(ssid, password, on_result=_on_result):
             log_warn("[wifi] 已有配网任务进行中")
             self._send_command_echo(format_wifi_result(False, "busy"))
+            if self._voice_remind is not None:
+                self._voice_remind.on_wifi_disconnected()
 
     def _maybe_disable_pull_on_control(self, kind: str) -> None:
         if kind not in _PULL_AUTO_OFF_KINDS:
@@ -1140,6 +1151,12 @@ class BleGattServer:
             log_warn(f"无法加载 ble_wifi_manager: {e}")
             return
         self._wifi = WifiManager(log=log_info)
+
+        def _on_wifi_link_down() -> None:
+            if self._voice_remind is not None:
+                self._voice_remind.on_wifi_disconnected()
+
+        self._wifi.start_link_monitor(on_disconnected=_on_wifi_link_down)
         log_info("WiFi 配网已就绪（WIFI <SSID> <PASSWORD>）")
 
     def _start_locate_face_manager(self) -> None:
@@ -1451,6 +1468,11 @@ class BleGattServer:
                 self._ros_bridge.stop()
             if self._locate_face is not None:
                 self._locate_face.stop()
+            if self._wifi is not None:
+                try:
+                    self._wifi.stop_link_monitor()
+                except Exception:
+                    pass
             if self._voice is not None:
                 self._voice.on_disconnect()
             if self._voice_remind is not None:
