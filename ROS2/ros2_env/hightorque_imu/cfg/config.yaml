@@ -1,0 +1,8 @@
+# IMU Configuration
+imu:
+  pid: 0x5543  # Product ID
+  vid: 0x5953  # Vendor ID
+  device: "/dev/S7"  # Device number (serial port)
+  baud_rate: 460800  # Serial port baud rate
+  lcm_enabled: false
+

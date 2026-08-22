@@ -12,12 +12,11 @@ set --
 source "$(pwd)/ros_env.sh"
 set -- "${BLE_ARGS[@]}"
 
-if ! python3 -c "import rospy" 2>/dev/null; then
-  echo "[error] 无法 import rospy"
-  exit 1
-fi
-
-if ! python3 -c "import sim2real_msg" 2>/dev/null; then
+if ! python3 -c "import rospy, sim2real_msg" 2>/dev/null; then
+  if ! python3 -c "import rospy" 2>/dev/null; then
+    echo "[error] 无法 import rospy"
+    exit 1
+  fi
   echo "[warn] 无法 import sim2real_msg — FSM 模式(M_*) 需要此包"
 else
   echo "[ros] 环境 OK: rospy + sim2real_msg"

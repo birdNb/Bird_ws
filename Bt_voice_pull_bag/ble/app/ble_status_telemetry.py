@@ -5,8 +5,8 @@
 
   IP:192.168.19.11   局域网 IPv4 四段完整地址
   pwr:83             电量 0~100；握手后立即发送，下降时再推
-  mp:ON/OFF          电机电源；订阅后 5s 连发 2 次，变化时再推 2 次
-  fsm:5              FSM；订阅/变化时连发 2 次
+  mp:ON/OFF          电机电源；订阅后推送 1 次，变化时再推 1 次
+  mode:M_default     模式文本；订阅/变化时推送 1 次
   locate_face ON/OFF 人脸追踪
   GAIT ON/OFF        行走/站立（OFF=站立模式）
   PULL ON/OFF        拖拽模式
@@ -34,12 +34,9 @@ from ble_log import log_info, log_tx, log_warn
 
 IP_POLL_SEC = 15.0
 PWR_POLL_SEC = 5.0
-FSM_REPEAT = 2
+FSM_REPEAT = 1
 FSM_REPEAT_GAP_SEC = 0.05
-MP_BURST_DELAY_SEC = 5.0
-MP_BURST_COUNT = 2
-MP_BURST_GAP_SEC = 1.0
-FEATURE_REPEAT = 2
+FEATURE_REPEAT = 1
 PWR_RETRY_INTERVAL_SEC = 0.2
 PWR_RETRY_MAX_SEC = 8.0
 # 机器人实际发布电量的话题（优先 /battery_level UInt8）
@@ -55,10 +52,26 @@ FEATURE_WIRES = {
     "sprint": "LT",
 }
 
+FSM_TO_MODE_WIRE = {
+    0: "M_init",
+    2: "M_default",
+    5: "M_default",
+    8: "M_protect",
+    9: "M_resetzero",
+    10: "M_resetzero",
+    11: "M_resetzero",
+    12: "M_resetzero",
+    13: "M_tech",
+    14: "M_tech",
+}
+
 NotifyFn = Callable[[bytes], None]
 
 
 def _bootstrap_ros_python_path() -> None:
+    os.environ.setdefault("ROS_MASTER_URI", "http://127.0.0.1:11311")
+    os.environ.setdefault("ROS_IP", "127.0.0.1")
+    os.environ.pop("ROS_HOSTNAME", None)
     extra = [
         "/opt/ros/noetic/lib/python3/dist-packages",
         os.path.expanduser("~/sim2real/install/lib/python3/dist-packages"),
@@ -186,6 +199,7 @@ class BleStatusTelemetry:
         self._last_pwr_sent: Optional[int] = None
         self._last_mp_sent: Optional[str] = None
         self._last_fsm: Optional[int] = None
+        self._last_mode_sent: Optional[str] = None
         self._last_features: Dict[str, str] = {}
         self._feature_readers: Dict[str, FeatureFn] = {
             "locate_face": detect_locate_face_on,
@@ -193,7 +207,6 @@ class BleStatusTelemetry:
         }
         self._ros_thread: Optional[threading.Thread] = None
         self._poll_thread: Optional[threading.Thread] = None
-        self._mp_burst_gen = 0
         self._pwr_retry_gen = 0
         self._ros_battery_pct: Optional[int] = None
         self._ros_gait: Optional[str] = None
@@ -206,7 +219,7 @@ class BleStatusTelemetry:
         self._ros_thread = threading.Thread(target=self._ros_loop, daemon=True)
         self._ros_thread.start()
         log_info(
-            "状态遥测已启动（IP / pwr / mp / fsm / locate_face / GAIT / PULL / sound / LT → FFE2）"
+            "状态遥测已启动（IP / pwr / mp / mode / locate_face / GAIT / PULL / sound / LT → FFE2）"
         )
 
     def stop(self) -> None:
@@ -218,40 +231,26 @@ class BleStatusTelemetry:
             return
         self._feature_readers[name] = fn
 
-    def on_subscribed(self) -> None:
-        """FFE2 订阅成功 → 立即推 IP/pwr/fsm/功能开关；5 秒后连发 2 次 mp。"""
+    def on_subscribed(self, emit_snapshot: bool = True) -> None:
+        """FFE2 订阅成功；可选择是否立即推送快照。"""
         self._subscribed.set()
         with self._lock:
             self._last_pwr_sent = None
+            self._last_mode_sent = None
             self._pwr_retry_gen += 1
             pwr_gen = self._pwr_retry_gen
-            self._mp_burst_gen += 1
-            mp_gen = self._mp_burst_gen
-        self._push_snapshot()
-        self._send_mp_state(force=True)
-        self._push_all_features(force=True)
-        threading.Thread(
-            target=self._pwr_retry_loop, args=(pwr_gen,), daemon=True
-        ).start()
-        threading.Thread(target=self._mp_burst_loop, args=(mp_gen,), daemon=True).start()
+        if emit_snapshot:
+            self._push_snapshot()
+            self._send_mp_state(force=True)
+            self._push_all_features(force=True)
+            threading.Thread(
+                target=self._pwr_retry_loop, args=(pwr_gen,), daemon=True
+            ).start()
 
     def on_unsubscribed(self) -> None:
         self._subscribed.clear()
         with self._lock:
-            self._mp_burst_gen += 1
             self._pwr_retry_gen += 1
-
-    def _mp_burst_loop(self, gen: int) -> None:
-        time.sleep(MP_BURST_DELAY_SEC)
-        for i in range(MP_BURST_COUNT):
-            if self._stop.is_set() or not self._subscribed.is_set():
-                return
-            with self._lock:
-                if gen != self._mp_burst_gen:
-                    return
-            self._send_mp_state(force=True)
-            if i + 1 < MP_BURST_COUNT:
-                time.sleep(MP_BURST_GAP_SEC)
 
     def _pwr_retry_loop(self, gen: int) -> None:
         """ROS /pwr 可能晚于 FFE2 订阅到达，短时重试直到发出 pwr。"""
@@ -284,8 +283,11 @@ class BleStatusTelemetry:
         if not rospy.core.is_initialized():
             try:
                 rospy.init_node("ble_status_telemetry_poll", anonymous=True, disable_signals=True)
-            except Exception:
-                return None
+            except Exception as e:
+                if "already been called" not in str(e).lower():
+                    return None
+                if not rospy.core.is_initialized():
+                    return None
         try:
             msg = rospy.wait_for_message("/battery_level", UInt8, timeout=0.5)
             return _normalize_pwr(int(msg.data))
@@ -312,7 +314,7 @@ class BleStatusTelemetry:
         with self._lock:
             fsm = self._last_fsm
         if fsm is not None:
-            self._send_fsm(fsm, force=True)
+            self._send_mode_by_fsm(fsm, force=True)
 
     def _push_all_features(self, force: bool = False) -> None:
         for name in FEATURE_WIRES:
@@ -395,8 +397,11 @@ class BleStatusTelemetry:
         try:
             if not rospy.core.is_initialized():
                 rospy.init_node("ble_status_telemetry", anonymous=True, disable_signals=True)
-        except Exception:
-            return
+        except Exception as e:
+            if "already been called" not in str(e).lower():
+                return
+            if not rospy.core.is_initialized():
+                return
 
         def on_fsm(msg: Int32) -> None:
             state = int(msg.data)
@@ -404,7 +409,7 @@ class BleStatusTelemetry:
                 prev = self._last_fsm
                 self._last_fsm = state
             if prev != state:
-                self._send_fsm(state)
+                self._send_mode_by_fsm(state)
 
         def on_float_battery(msg: Float32) -> None:
             self._on_battery_pct(int(msg.data))
@@ -540,9 +545,20 @@ class BleStatusTelemetry:
         """MP 指令后立即推送 mp:ON/OFF，供小程序自动站立判断。"""
         self._send_mp_wire(wire, force=force)
 
-    def _send_fsm(self, state: int, force: bool = False) -> None:
-        # 订阅与变化统一连发 2 次
-        self._tx(f"fsm:{state}", repeat=FSM_REPEAT)
+    def _send_mode_wire(self, mode_wire: str, force: bool = False) -> None:
+        if not mode_wire:
+            return
+        with self._lock:
+            if not force and mode_wire == self._last_mode_sent:
+                return
+            self._last_mode_sent = mode_wire
+        self._tx(f"mode:{mode_wire}", repeat=FSM_REPEAT)
+
+    def _send_mode_by_fsm(self, state: int, force: bool = False) -> None:
+        mode_wire = FSM_TO_MODE_WIRE.get(state)
+        if mode_wire is None:
+            return
+        self._send_mode_wire(mode_wire, force=force)
 
     def push_feature(self, name: str, wire: str, force: bool = True) -> None:
         """推送功能开关；name=locate_face|gait|pull|sound|sprint。"""

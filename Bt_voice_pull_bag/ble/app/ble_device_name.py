@@ -14,12 +14,26 @@ BLE_NAME_PREFIX = "HT_"
 
 def _name_file_path() -> str:
     env_file = os.environ.get("BLE_DEVICE_NAME_FILE")
-    if env_file:
+    if env_file and os.path.isfile(env_file):
         return env_file
     pkg = os.environ.get("PKG_DIR")
     if pkg:
+        pkg_file = os.path.join(pkg, "ble_device_name.conf")
+        if os.path.isfile(pkg_file):
+            return pkg_file
+    app_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ble_device_name.conf")
+    if os.path.isfile(app_file):
+        return app_file
+    if env_file:
+        return env_file
+    if pkg:
         return os.path.join(pkg, "ble_device_name.conf")
-    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "ble_device_name.conf")
+    return app_file
+
+
+def persistent_name_file() -> str:
+    """返回当前名称持久化文件路径（优先存在文件）。"""
+    return _name_file_path()
 
 RENAME_RE = re.compile(r"^rename\s+HT_(\d{8})$", re.IGNORECASE)
 BLE_NAME_RE = re.compile(r"^HT_(\d{8})$", re.IGNORECASE)
@@ -68,6 +82,9 @@ def save_ble_name(name: str) -> None:
     if not parsed:
         return
     name_file = _name_file_path()
+    parent = os.path.dirname(name_file)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
     tmp = f"{name_file}.tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         f.write(parsed + "\n")

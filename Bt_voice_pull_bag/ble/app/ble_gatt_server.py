@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -25,7 +26,6 @@ SERVICE_UUID = "0000ffe0-0000-1000-8000-00805f9b34fb"
 WRITE_CHAR_UUID = "0000ffe1-0000-1000-8000-00805f9b34fb"
 NOTIFY_CHAR_UUID = "0000ffe2-0000-1000-8000-00805f9b34fb"
 
-# 语音 FFE3（sound_demo）；仅 --enable-voice 时注册
 _APP_DIR = os.path.dirname(os.path.abspath(__file__))
 if _APP_DIR not in sys.path:
     sys.path.insert(0, _APP_DIR)
@@ -89,6 +89,14 @@ _PULL_SERVICE = "torque-cmd-vel.service"
 # 收到以下控制类指令时，若拖拽模式已开则自动关闭
 _PULL_AUTO_OFF_KINDS = frozenset(
     {"stick", "mode", "action", "gait", "sprint", "neck", "motor_power"}
+)
+LINK_IDLE_TIMEOUT_SEC = 7.0
+LINK_WATCHDOG_TICK_MS = 1000
+CONNECT_ATTEMPT_LOG_INTERVAL_SEC = 5.0
+STICK_LOG_RE = re.compile(
+    r"^X:\s*[+-]?\d+(?:\.\d+)?\s*,\s*Y:\s*[+-]?\d+(?:\.\d+)?\s*,\s*Z:\s*[+-]?\d+(?:\.\d+)?"
+    r"(?:\s*,\s*N:\s*\d+)?$",
+    re.IGNORECASE,
 )
 
 
@@ -286,16 +294,13 @@ class BleGattServer:
         name: str,
         echo: bool,
         ros_control: bool,
-        enable_voice: bool = False,
     ):
         self.adapter = adapter
         self.name = name
         self.echo = echo
         self.ros_control = ros_control
-        self.enable_voice = enable_voice
         self._notify_chrc: Optional[Characteristic] = None
         self._write_chrc: Optional[Characteristic] = None
-        self._audio_chrc: Optional[Characteristic] = None
         self._msg_count = 0
         self._connected_devices: set = set()
         self._adapter_path = ""
@@ -303,7 +308,6 @@ class BleGattServer:
         self._locate_face = None
         self._volume = None
         self._wifi = None
-        self._voice = None
         self._voice_remind = None
         self._conversation = None
         self._dispatcher = None
@@ -320,6 +324,15 @@ class BleGattServer:
         self._adv_stop_pending = False
         self._notify_active = False
         self._pending_notifies: List[bytes] = []
+        self._link_last_downlink_ts = 0.0
+        self._link_watchdog_source_id: Optional[int] = None
+        self._link_watchdog_disconnect_pending = False
+        self._last_connect_attempt_log_ts: dict[str, float] = {}
+        self._mp_echo_lock = threading.Lock()
+        self._pending_mp_echo: Optional[str] = None
+        self._notify_enabled = False
+        self._default_mode_received = False
+        self._ready_reported = False
 
         dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
         self.bus = dbus.SystemBus()
@@ -337,6 +350,15 @@ class BleGattServer:
         except dbus.exceptions.DBusException:
             return path
 
+    def _note_connect_attempt(self, path: str, trigger: str) -> None:
+        now = time.monotonic()
+        last = self._last_connect_attempt_log_ts.get(path, 0.0)
+        if now - last < CONNECT_ATTEMPT_LOG_INTERVAL_SEC:
+            return
+        self._last_connect_attempt_log_ts[path] = now
+        label = self._device_label(path)
+        log_info(f"[conn] 发现连接尝试({trigger}): {label}")
+
     def _schedule_connect_hint(self) -> None:
         self._msg_count_at_connect = self._msg_count
         hint_id = GLib.timeout_add(5000, self._connect_no_data_hint)
@@ -348,6 +370,59 @@ class BleGattServer:
             log_info("      进入遥控页须 write: M_default")
             log_info(f"      写入 UUID: {WRITE_CHAR_UUID}")
         return False
+
+    def _start_link_watchdog(self) -> None:
+        self._touch_link_watchdog()
+        if self._link_watchdog_source_id is not None:
+            return
+        self._link_watchdog_source_id = GLib.timeout_add(
+            LINK_WATCHDOG_TICK_MS, self._link_watchdog_cb
+        )
+
+    def _stop_link_watchdog(self) -> None:
+        source_id = self._link_watchdog_source_id
+        if source_id is not None:
+            try:
+                GLib.source_remove(source_id)
+            except Exception:
+                pass
+        self._link_watchdog_source_id = None
+        self._link_watchdog_disconnect_pending = False
+        self._link_last_downlink_ts = 0.0
+
+    def _touch_link_watchdog(self) -> None:
+        self._link_last_downlink_ts = time.monotonic()
+
+    def _disconnect_device(self, path: str, reason: str) -> None:
+        try:
+            dev = dbus.Interface(self.bus.get_object(BLUEZ_SERVICE, path), DEVICE_IFACE)
+            dev.Disconnect()
+            log_warn(f"[link] 主动断开 BLE 连接: {self._device_label(path)} | {reason}")
+        except dbus.exceptions.DBusException as e:
+            log_warn(f"[link] 主动断开失败: {self._device_label(path)} | {e}")
+
+    def _disconnect_connected_devices(self, reason: str) -> None:
+        for path in list(self._connected_devices):
+            self._disconnect_device(path, reason)
+
+    def _link_watchdog_cb(self) -> bool:
+        if not self._connected_devices:
+            self._link_watchdog_source_id = None
+            self._link_watchdog_disconnect_pending = False
+            return False
+        if self._link_watchdog_disconnect_pending:
+            return True
+        last = self._link_last_downlink_ts
+        if last <= 0.0:
+            return True
+        idle = time.monotonic() - last
+        if idle < LINK_IDLE_TIMEOUT_SEC:
+            return True
+        self._link_watchdog_disconnect_pending = True
+        self._disconnect_connected_devices(
+            f"{idle:.1f}s 未收到下行指令/心跳 1（阈值 {LINK_IDLE_TIMEOUT_SEC:.1f}s）"
+        )
+        return True
 
     def _trust_device(self, path: str) -> None:
         """部分手机（尤其 Android）未 Trusted 时 GATT 写入/订阅会失败。"""
@@ -363,6 +438,11 @@ class BleGattServer:
         if path in self._connected_devices:
             return
         self._connected_devices.add(path)
+        self._last_connect_attempt_log_ts.pop(path, None)
+        self._link_watchdog_disconnect_pending = False
+        self._notify_enabled = False
+        self._default_mode_received = False
+        self._ready_reported = False
         self._trust_device(path)
         label = self._device_label(path)
         log_info(f"*** 手机已连接: {label} ***")
@@ -371,6 +451,7 @@ class BleGattServer:
         if self._voice_remind is not None:
             self._voice_remind.on_ble_connected()
         self._schedule_connect_hint()
+        self._start_link_watchdog()
         self._stop_advertising_while_connected()
 
     def _stop_advertising_while_connected(self) -> None:
@@ -435,16 +516,21 @@ class BleGattServer:
             return
         label = self._device_label(path)
         self._connected_devices.discard(path)
+        self._last_connect_attempt_log_ts.pop(path, None)
         log_info(f"--- 手机已断开: {label} ---")
         if self._voice_remind is not None:
             self._voice_remind.on_ble_disconnected()
         if self._dispatcher is not None:
             self._dispatcher.on_disconnect()
-        if self._voice is not None:
-            self._voice.on_disconnect()
         if self._ros_bridge is not None:
             self._ros_bridge.on_disconnect()
         if not self._connected_devices:
+            with self._mp_echo_lock:
+                self._pending_mp_echo = None
+            self._notify_enabled = False
+            self._default_mode_received = False
+            self._ready_reported = False
+            self._stop_link_watchdog()
             self._notify_active = False
             self._pending_notifies.clear()
             self._adv_stop_pending = False
@@ -590,14 +676,18 @@ class BleGattServer:
     def _on_device_props_changed(
         self, interface: str, changed, invalidated, path: str = ""
     ) -> None:
-        if interface != DEVICE_IFACE or "Connected" not in changed:
+        if interface != DEVICE_IFACE:
             return
         if not str(path).startswith(self._adapter_path):
             return
-        if bool(changed["Connected"]):
-            self._on_phone_connected(path)
-        else:
-            self._on_phone_disconnected(path)
+        if "Connected" in changed:
+            if bool(changed["Connected"]):
+                self._on_phone_connected(path)
+            else:
+                self._on_phone_disconnected(path)
+            return
+        if any(k in changed for k in ("ServicesResolved", "RSSI", "UUIDs", "Name", "Alias")):
+            self._note_connect_attempt(path, "props")
 
     def _on_interfaces_added(self, path, interfaces) -> None:
         if DEVICE_IFACE not in interfaces:
@@ -605,6 +695,7 @@ class BleGattServer:
         if not str(path).startswith(self._adapter_path):
             return
         dev = interfaces[DEVICE_IFACE]
+        self._note_connect_attempt(path, "added")
         if dev.get("Connected", False):
             self._on_phone_connected(path)
 
@@ -631,13 +722,6 @@ class BleGattServer:
             path_keyword="path",
         )
 
-    def _on_audio_write(self, data: bytes, options) -> None:
-        opt = dict(options) if options else {}
-        if opt.get("event") == "read":
-            return
-        if self._voice is not None:
-            self._voice.on_audio_write(data)
-
     def _on_write(self, data: bytes, options) -> None:
         opt = dict(options) if options else {}
         if opt.get("event") == "read":
@@ -645,20 +729,20 @@ class BleGattServer:
             return
 
         self._msg_count += 1
+        self._touch_link_watchdog()
+        self._link_watchdog_disconnect_pending = False
 
         try:
             preview = data.decode("utf-8", errors="replace").strip()[:80]
         except Exception:
             preview = data[:24].hex()
-        if preview and not (len(data) >= 3 and data[0] == 0x0B):
+        # 摇杆速度包频率高，日志刷屏，默认不打印。
+        is_stick = bool(preview and STICK_LOG_RE.match(preview))
+        if preview and not is_stick and not (len(data) >= 3 and data[0] == 0x0B):
             log_rx(f"FFE1 ← {preview}")
 
-        # 小程序语音：FFE1 二进制 [0x0B, seq_hi, seq_lo, pcm...]
+        # 兼容历史语音包：首字节 0x0B 的二进制数据直接忽略，不参与控制。
         if len(data) >= 3 and data[0] == 0x0B:
-            if self._voice is not None:
-                self._voice.on_audio_write(data)
-            else:
-                log_warn(f"[sound] 音频包 {len(data)}B 但语音模块未加载")
             return
 
         if self._dispatcher is not None:
@@ -706,6 +790,51 @@ class BleGattServer:
         payload = plain.encode("utf-8", errors="replace")[:180]
         self._notify_on_main_thread(payload)
         log_tx(plain)
+
+    def _send_plain_notify(self, text: str) -> None:
+        if self._notify_chrc is None:
+            return
+        body = text.strip()
+        payload = f"{body}\n".encode("utf-8", errors="replace")[:180]
+        self._notify_on_main_thread(payload)
+        log_tx(body)
+
+    def _try_report_ready(self) -> None:
+        if not self._connected_devices:
+            return
+        if self._ready_reported:
+            return
+        if not self._notify_enabled or not self._default_mode_received:
+            log_info(
+                f"[ready] 等待条件 notify={self._notify_enabled} "
+                f"default={self._default_mode_received}"
+            )
+            return
+        # 按小程序握手约定：两条件满足后上报默认模式与状态。
+        self._send_plain_notify("mode:M_default")
+        self._send_plain_notify("fsm:2")
+        pct = self._read_battery_pct()
+        if pct is not None:
+            self._send_plain_notify(f"pwr:{max(0, min(100, int(pct)))}")
+        self._ready_reported = True
+        log_info("[ready] 握手完成：已上报 mode/fsm/pwr")
+
+    def _mark_mp_echo_pending(self, action: str) -> None:
+        upper = (action or "").strip().upper()
+        if upper not in ("ON", "OFF"):
+            return
+        with self._mp_echo_lock:
+            self._pending_mp_echo = upper
+
+    def _maybe_echo_mp_confirmed(self, wire: str) -> None:
+        state = (wire or "").strip().upper()
+        if state not in ("ON", "OFF"):
+            return
+        with self._mp_echo_lock:
+            if self._pending_mp_echo != state:
+                return
+            self._pending_mp_echo = None
+        self._send_command_echo(f"MP {state}")
 
     def _sync_pull_state(self) -> None:
         with self._pull_lock:
@@ -801,29 +930,58 @@ class BleGattServer:
             self._send_command_echo(format_wifi_result(False, "bad_format"))
             return
 
-        # 配置修改开始 → 语音
         if self._voice_remind is not None:
             self._voice_remind.on_wifi_changed()
 
         def _on_result(ok: bool, detail: str) -> None:
-            wire = format_wifi_result(ok, detail)
-            self._send_command_echo(wire)
-            if self._voice_remind is not None:
-                if ok:
-                    self._voice_remind.on_wifi_connected()
-                else:
-                    self._voice_remind.on_wifi_disconnected()
-            if ok and self._telemetry is not None:
-                try:
-                    self._telemetry.push_ip(force=True)
-                except Exception as e:
-                    log_warn(f"[wifi] 刷新 IP 遥测失败: {e}")
+            if ok:
+                self._notify_wifi_reconnected()
+            else:
+                self._send_command_echo(format_wifi_result(False, detail))
+                log_warn(f"[wifi] 配网失败: {detail}")
 
         if not self._wifi.connect_async(ssid, password, on_result=_on_result):
             log_warn("[wifi] 已有配网任务进行中")
             self._send_command_echo(format_wifi_result(False, "busy"))
-            if self._voice_remind is not None:
-                self._voice_remind.on_wifi_disconnected()
+
+    def _notify_wifi_disconnected(self) -> None:
+        from ble_wifi_manager import RESULT_DISCONNECTED
+
+        self._send_command_echo(RESULT_DISCONNECTED)
+        if self._voice_remind is not None:
+            self._voice_remind.on_wifi_disconnected()
+
+    def _notify_wifi_reconnected(self) -> None:
+        from ble_wifi_manager import RESULT_OK
+
+        self._send_command_echo(RESULT_OK)
+        if self._voice_remind is not None:
+            self._voice_remind.on_wifi_connected()
+        self._send_wifi_ip()
+
+    def _send_wifi_ip(self) -> None:
+        """DHCP 可能晚于关联，轮询后再单独推 IP:x.x.x.x。"""
+        try:
+            from ble_status_telemetry import read_lan_ip
+        except ImportError:
+            read_lan_ip = None  # type: ignore
+        ip = None
+        if read_lan_ip is not None:
+            for _ in range(20):
+                ip = read_lan_ip()
+                if ip:
+                    break
+                time.sleep(0.5)
+        if ip:
+            self._send_command_echo(f"IP:{ip}")
+            if self._telemetry is not None:
+                try:
+                    with self._telemetry._lock:
+                        self._telemetry._last_ip = ip
+                except Exception:
+                    pass
+        else:
+            log_warn("[wifi] 已连接但尚未拿到局域网 IP")
 
     def _maybe_disable_pull_on_control(self, kind: str) -> None:
         if kind not in _PULL_AUTO_OFF_KINDS:
@@ -834,6 +992,13 @@ class BleGattServer:
         self._set_pull(False, voice=True)
 
     def _handle_dispatched(self, kind, payload: str) -> None:
+        if kind.value == "heartbeat":
+            return
+        if kind.value == "handshake":
+            log_info("[ble] 收到握手 M_default")
+            self._default_mode_received = True
+            self._try_report_ready()
+            return
         if kind.value == "locate_face":
             if self._locate_face is not None:
                 action = (payload or "").strip().upper()
@@ -852,16 +1017,8 @@ class BleGattServer:
             return
         if kind.value == "sound":
             action = (payload or "").strip().upper()
-            if self._voice is not None:
-                wire = self._voice.on_sound_command(payload)
-                if wire:
-                    self._send_command_echo(wire)
-            else:
-                # 无 sound_demo 时仍回显，并仅控制本地系统提示音开关
-                if action in ("ON", "OFF"):
-                    self._send_command_echo(f"sound {action}")
-                else:
-                    log_warn("语音模块未加载（检查 sound_demo）")
+            if action in ("ON", "OFF"):
+                self._send_command_echo(f"sound {action}")
             if self._voice_remind is not None:
                 if action == "ON":
                     self._voice_remind.on_sound_on()
@@ -894,6 +1051,8 @@ class BleGattServer:
             else:
                 log_warn(f"[pull] 无效动作: {payload!r}（期望 ON/OFF）")
             return
+        if kind.value == "motor_power":
+            self._mark_mp_echo_pending(payload)
 
         self._maybe_disable_pull_on_control(kind.value)
         if self._ros_bridge is not None and self.ros_control:
@@ -1013,13 +1172,16 @@ class BleGattServer:
 
     def _on_notify_start(self) -> None:
         self._notify_active = True
+        self._notify_enabled = True
         log_info("手机已订阅 FFE2 notify")
         self._flush_pending_notifies()
         if self._telemetry is not None:
-            self._telemetry.on_subscribed()
+            self._telemetry.on_subscribed(emit_snapshot=False)
+        self._try_report_ready()
 
     def _on_notify_stop(self) -> None:
         self._notify_active = False
+        self._notify_enabled = False
         self._pending_notifies.clear()
         log_info("手机已取消 notify 订阅")
         if self._telemetry is not None:
@@ -1153,10 +1315,15 @@ class BleGattServer:
         self._wifi = WifiManager(log=log_info)
 
         def _on_wifi_link_down() -> None:
-            if self._voice_remind is not None:
-                self._voice_remind.on_wifi_disconnected()
+            self._notify_wifi_disconnected()
 
-        self._wifi.start_link_monitor(on_disconnected=_on_wifi_link_down)
+        def _on_wifi_link_up() -> None:
+            self._notify_wifi_reconnected()
+
+        self._wifi.start_link_monitor(
+            on_disconnected=_on_wifi_link_down,
+            on_reconnected=_on_wifi_link_up,
+        )
         log_info("WiFi 配网已就绪（WIFI <SSID> <PASSWORD>）")
 
     def _start_locate_face_manager(self) -> None:
@@ -1167,15 +1334,6 @@ class BleGattServer:
             return
         self._locate_face = LocateFaceManager(log=log_info)
         log_info("locate_face 管理器已就绪（locate_face ON/OFF）")
-
-    def _start_voice_manager(self) -> None:
-        try:
-            from sound_demo.integrate import VoiceBleIntegration
-
-            self._voice = VoiceBleIntegration(log=log_info)
-            log_info("语音传输已就绪（FFE1: sound ON/OFF + 0x0B 音频包）")
-        except ImportError as e:
-            log_warn(f"无法加载 sound_demo: {e}")
 
     def _start_voice_remind(self) -> None:
         if os.environ.get("VOICE_REMIND", "1").strip().lower() in ("0", "false", "no", "off"):
@@ -1206,9 +1364,7 @@ class BleGattServer:
         if self._ros_bridge.start():
             log_info("ROS 控制桥接已启动（/cmd_vel + /joy_msg）")
         else:
-            log_warn(
-                "ROS 桥接等待 roscore 中（后台继续重试，roscore 就绪后指令自动生效）"
-            )
+            log_info("ROS 桥接后台等待 roscore（BLE 广播先启动）")
 
     def _start_dispatcher(self) -> None:
         try:
@@ -1234,6 +1390,7 @@ class BleGattServer:
         def _on_mp_state(motor_on: bool) -> None:
             wire = "ON" if motor_on else "OFF"
             self._telemetry.push_mp_state(wire, force=True)
+            self._maybe_echo_mp_confirmed(wire)
             if self._voice_remind is not None:
                 if motor_on:
                     self._voice_remind.on_motor_on()
@@ -1328,7 +1485,6 @@ class BleGattServer:
         self._start_locate_face_manager()
         self._start_volume_manager()
         self._start_wifi_manager()
-        self._start_voice_manager()
         self._start_voice_remind()
         self._sync_pull_state()
         self._start_ros_bridge()
@@ -1356,18 +1512,6 @@ class BleGattServer:
         write_chrc = self._write_chrc
         service.add_characteristic(write_chrc)
         service.add_characteristic(self._notify_chrc)
-        if self.enable_voice and self._voice is not None:
-            from sound_demo.integrate import AUDIO_CHAR_UUID
-
-            self._audio_chrc = Characteristic(
-                self.bus,
-                2,
-                AUDIO_CHAR_UUID,
-                ["write", "write-without-response"],
-                service,
-                on_write=self._on_audio_write,
-            )
-            service.add_characteristic(self._audio_chrc)
         app.add_service(service)
         self._start_telemetry()
         self._wire_mp_telemetry()
@@ -1445,10 +1589,6 @@ class BleGattServer:
         log_info(">>> Bird BLE 遥控服务 <<<")
         log_info(f"    广播名: {self.name}  MAC: {addr}")
         log_info("    FFE0/FFE1/FFE2 | 协议见 BLE_PROTOCOL.md")
-        if self._voice is not None:
-            log_info("    FFE1 语音: sound ON/OFF + 0x0B 音频包 | 见 sound_demo/README.md")
-        if self.enable_voice and self._voice is not None:
-            log_info("    FFE3 语音(可选备用通道)")
         log_info("    日志: RX红(收) TX绿(发)")
         if self.ros_control:
             log_info("    摇杆→/cmd_vel 20Hz | 模式/动作→/joy_msg | 状态→FFE2")
@@ -1473,8 +1613,6 @@ class BleGattServer:
                     self._wifi.stop_link_monitor()
                 except Exception:
                     pass
-            if self._voice is not None:
-                self._voice.on_disconnect()
             if self._voice_remind is not None:
                 self._voice_remind.stop()
         return 0
@@ -1498,11 +1636,6 @@ def main() -> int:
         action="store_true",
         help="不将 BLE 指令转为 ROS 话题（仅打印）",
     )
-    parser.add_argument(
-        "--enable-voice",
-        action="store_true",
-        help="启用 FFE3 语音 PCM 实时播放（sound_demo）",
-    )
     args = parser.parse_args()
     ble_name = args.name if args.name else load_ble_name()
     server = BleGattServer(
@@ -1510,7 +1643,6 @@ def main() -> int:
         ble_name,
         echo=not args.no_echo,
         ros_control=not args.no_ros,
-        enable_voice=args.enable_voice,
     )
     return server.run()
 

@@ -19,16 +19,17 @@ VoidFn = Callable[[], None]
 WIFI_PAYLOAD_SEP = "\x1e"
 WIFI_IFACE_CANDIDATES = ("wlan0", "wlan1", "wlp1s0")
 CONNECT_TIMEOUT_SEC = 45.0
-LINK_POLL_SEC = 3.0
+LINK_POLL_SEC = 2.0
 RESULT_OK = "WIFI OK"
 RESULT_FAIL_PREFIX = "WIFI FAIL"
+RESULT_DISCONNECTED = "WiFi disconnected"
 
 
 def parse_wifi_command(text: str) -> Optional[Tuple[str, str]]:
     """
     解析 `WIFI <SSID> <PASSWORD>`。
-    - 支持引号：WIFI "My SSID" "p@ss w"
-    - 无引号时：第一个 token 为 SSID，其余为密码（密码可含空格）
+    - 引号：WIFI "Bird Phone" "p@ss w"
+    - 无引号：最后一个 token 为密码，其余为 SSID（`WIFI Bird Phone 12345678`）
     """
     raw = (text or "").strip()
     if not raw:
@@ -39,17 +40,24 @@ def parse_wifi_command(text: str) -> Optional[Tuple[str, str]]:
     rest = m.group(1).strip()
     if not rest:
         return None
-    try:
-        parts = shlex.split(rest, posix=True)
-    except ValueError:
-        parts = rest.split(None, 1)
+
+    quoted = bool(re.search(r"[\"']", rest))
+    if quoted:
+        try:
+            parts = shlex.split(rest, posix=True)
+        except ValueError:
+            return None
         if len(parts) < 2:
             return None
-        return parts[0], parts[1]
-    if len(parts) < 2:
-        return None
-    ssid = parts[0].strip()
-    password = " ".join(parts[1:]).strip()
+        ssid = parts[0].strip()
+        password = " ".join(parts[1:]).strip()
+    else:
+        tokens = rest.split()
+        if len(tokens) < 2:
+            return None
+        ssid = " ".join(tokens[:-1]).strip()
+        password = tokens[-1].strip()
+
     if not ssid or not password:
         return None
     if len(ssid) > 32 or len(password) > 63:
@@ -117,6 +125,45 @@ def _classify_nmcli_error(stderr: str, stdout: str) -> str:
     return brief or "error"
 
 
+def _list_scanned_ssids(iface: str) -> list:
+    rc, out, _ = _run(
+        ["nmcli", "-t", "-f", "SSID", "device", "wifi", "list", "ifname", iface],
+        timeout=8.0,
+    )
+    if rc != 0:
+        return []
+    names = []
+    for line in out.splitlines():
+        ssid = line.strip()
+        if ssid and ssid not in names:
+            names.append(ssid)
+    return names
+
+
+def _active_wifi_ssid(iface: str) -> Optional[str]:
+    rc, conn, _ = _run(
+        ["nmcli", "-t", "-g", "GENERAL.CONNECTION", "device", "show", iface],
+        timeout=5.0,
+    )
+    name = (conn or "").strip()
+    if rc != 0 or not name or name == "--":
+        return None
+    rc2, ssid, _ = _run(
+        ["nmcli", "-t", "-g", "802-11-wireless.ssid", "connection", "show", name],
+        timeout=5.0,
+    )
+    ssid = (ssid or "").strip()
+    return ssid if rc2 == 0 and ssid else name
+
+
+def _disconnect_wifi(iface: str, log: LogFn) -> None:
+    cur = _active_wifi_ssid(iface)
+    if cur:
+        log(f"[wifi] 断开当前热点: {cur!r}")
+    _run(["nmcli", "device", "disconnect", iface], timeout=12.0)
+    time.sleep(0.8)
+
+
 def _wifi_link_connected(iface: Optional[str] = None) -> bool:
     """当前 WiFi 网卡是否处于 connected。"""
     rc, out, _ = _run(
@@ -149,6 +196,7 @@ class WifiManager:
         self._stop = threading.Event()
         self._monitor_thread: Optional[threading.Thread] = None
         self._on_link_down: Optional[VoidFn] = None
+        self._on_link_up: Optional[VoidFn] = None
         self._was_connected = False
         self._suppress_link_events = False
 
@@ -157,9 +205,14 @@ class WifiManager:
         with self._lock:
             return self._busy
 
-    def start_link_monitor(self, on_disconnected: Optional[VoidFn] = None) -> None:
-        """轮询 WiFi 链路：曾连接后断开时回调（配网过程中抑制）。"""
+    def start_link_monitor(
+        self,
+        on_disconnected: Optional[VoidFn] = None,
+        on_reconnected: Optional[VoidFn] = None,
+    ) -> None:
+        """轮询 WiFi 链路：断开 / 重新连上时回调（配网过程中抑制）。"""
         self._on_link_down = on_disconnected
+        self._on_link_up = on_reconnected
         self._was_connected = _wifi_link_connected()
         if self._monitor_thread is not None:
             return
@@ -189,6 +242,14 @@ class WifiManager:
                         cb()
                     except Exception as e:
                         self._log(f"[wifi] 断连回调失败: {e}")
+            elif (not self._was_connected) and connected:
+                self._log("[wifi] 链路恢复")
+                cb = self._on_link_up
+                if cb is not None:
+                    try:
+                        cb()
+                    except Exception as e:
+                        self._log(f"[wifi] 重连回调失败: {e}")
             self._was_connected = connected
 
     def connect_async(
@@ -234,12 +295,33 @@ class WifiManager:
             self._log("[wifi] 未找到 WiFi 网卡")
             return False, "no_device"
 
-        # 触发扫描（忽略失败）
-        _run(["nmcli", "device", "wifi", "rescan", "ifname", iface], timeout=8.0)
-        time.sleep(1.0)
+        _run(["nmcli", "device", "wifi", "rescan", "ifname", iface], timeout=10.0)
+        time.sleep(2.5)
+        scanned = _list_scanned_ssids(iface)
+        if ssid not in scanned:
+            rest = f"{ssid} {password}".strip()
+            match = ""
+            for name in scanned:
+                if rest == name or rest.startswith(name + " "):
+                    if len(name) > len(match):
+                        match = name
+            if match and match != ssid:
+                leftover = rest[len(match):].strip()
+                if leftover:
+                    self._log(f"[wifi] SSID 校正: {ssid!r} → {match!r}")
+                    ssid, password = match, leftover
+
+        _disconnect_wifi(iface, self._log)
+        if self._on_link_down is not None:
+            try:
+                self._on_link_down()
+            except Exception as e:
+                self._log(f"[wifi] 切网断连回调失败: {e}")
 
         cmd = [
             "nmcli",
+            "-w",
+            "30",
             "device",
             "wifi",
             "connect",
@@ -250,12 +332,16 @@ class WifiManager:
             iface,
         ]
         rc, out, err = _run(cmd, timeout=CONNECT_TIMEOUT_SEC)
-        if rc == 0:
-            self._log(f"[wifi] 连接成功 ifname={iface}")
+        time.sleep(1.0)
+        now = _active_wifi_ssid(iface)
+        if rc == 0 and now == ssid:
+            self._log(f"[wifi] 已切换到 {ssid!r} ifname={iface}")
             return True, "ok"
-
+        if rc == 0 and now and now != ssid:
+            self._log(f"[wifi] nmcli 返回成功但当前仍是 {now!r}，目标 {ssid!r}")
+            return False, "not_switched"
         reason = _classify_nmcli_error(err, out)
-        self._log(f"[wifi] 连接失败 rc={rc} reason={reason}")
+        self._log(f"[wifi] 连接失败 rc={rc} reason={reason} now={now!r}")
         if err:
             self._log(f"[wifi] stderr: {err[:200]}")
         return False, reason

@@ -4,7 +4,7 @@
 BLE 文本指令 → ROS 话题桥接（对齐小程序遥控协议）。
 
 摇杆:  X:0.00,Y:0.00,Z:0.00  → /cmd_vel
-模式:  M_default / M_init / M_protect / M_resetzero / M_tech
+模式:  M_init / M_protect / M_resetzero / M_tech
 动作:  LT+RT+start(起立) / LT+RT+RB(蹲下) / LT+RT+B(卸力)
        经 /joy → joy_teleop → /joy_msg（与实体手柄一致）
 """
@@ -44,6 +44,8 @@ STICK_XY_LIMIT = 1.8
 STICK_Z_LIMIT = 1.5
 ACTION_COOLDOWN_SEC = 0.0
 MODE_COOLDOWN_SEC = 0.8
+AUTO_STAND_COOLDOWN_SEC = 4.0
+AUTO_STAND_COMBO = "lt+rt+start"
 # 挥双手：短脉冲触发（勿 1s 长按，松开会被固件当成第二次触发）
 CHEER_PULSE_SEC = 0.35
 CHEER_COOLDOWN_SEC = 0.0
@@ -77,7 +79,6 @@ STICK_RE = re.compile(
 
 # 小程序模式指令标签（具体按键序列见 _build_mode_steps，依 FSM 状态生成）
 MODE_LABELS: Dict[str, str] = {
-    "m_default": "默认模式",
     "m_init": "初始化",
     "m_protect": "保护模式",
     "m_resetzero": "调零模式",
@@ -206,6 +207,9 @@ FSM_STATE_NAMES = {
 
 def _bootstrap_ros_python_path() -> None:
     """sudo 下 PYTHONPATH 可能丢失，补全 ROS / sim2real_msg 路径。"""
+    os.environ.setdefault("ROS_MASTER_URI", "http://127.0.0.1:11311")
+    os.environ.setdefault("ROS_IP", "127.0.0.1")
+    os.environ.pop("ROS_HOSTNAME", None)
     home = os.environ.get("BIRD_HOME") or os.path.expanduser("~")
     ws = os.environ.get("SIM2REAL_WS") or os.path.join(home, "sim2real")
     extra = [
@@ -272,6 +276,9 @@ class BleCommandParser:
             )
 
         token = _norm_token(text)
+        if token == "m_default":
+            # M_default 仅作为 BLE 握手，不参与 ROS 模式切换
+            return result
         if token in MODE_LABELS:
             result.mode = token
             return result
@@ -471,6 +478,9 @@ class BleRosBridge:
         self._joy_lock = threading.Lock()
         self._power_ready_at = 0.0
         self._reviving_master = False
+        self._last_fsm_state: Optional[int] = None
+        self._auto_stand_lock = threading.Lock()
+        self._auto_stand_running = False
 
     @property
     def ready(self) -> bool:
@@ -505,10 +515,10 @@ class BleRosBridge:
             return self.ready
         self._ros_thread = threading.Thread(target=self._ros_main, daemon=True)
         self._ros_thread.start()
-        # 开机 roscore 可能晚于 bird-ble，最长等待 120s
-        if self._ready.wait(timeout=120.0):
+        # 不阻塞 GATT 广播；指令在 _ready 前会被忽略，后台继续等 roscore
+        if self._ready.wait(timeout=0.05):
             return True
-        self._log("[ros][warn] roscore 未在 120s 内就绪，后台继续等待…")
+        self._log("[ros] 后台等待 roscore / sim2real_master（不阻塞 BLE 广播）")
         return False
 
     def stop(self) -> None:
@@ -591,6 +601,14 @@ class BleRosBridge:
 
     def _ensure_sim2real_master(self, timeout: float = 20.0) -> bool:
         """断电后主节点常 SIGSEGV 退出；在参数仍在时尝试单独拉起。"""
+        try:
+            import rospy
+
+            if not rospy.core.is_initialized() or self._joy_msg_pub is None:
+                self._log("[ros] 控制桥尚未接入 ROS，跳过拉起 sim2real_master")
+                return False
+        except Exception:
+            return False
         if self._joy_path_alive():
             return True
         # 避免并发多次拉起
@@ -728,6 +746,15 @@ class BleRosBridge:
             self._trigger_action(cmd.action)
 
     def _ros_main(self) -> None:
+        try:
+            self._ros_main_impl()
+        except Exception as e:
+            self._log(f"[ros] 控制桥线程异常退出: {e}")
+            import traceback
+
+            self._log(traceback.format_exc())
+
+    def _ros_main_impl(self) -> None:
         _bootstrap_ros_python_path()
         try:
             import rospy
@@ -743,15 +770,23 @@ class BleRosBridge:
         init_deadline = time.monotonic() + 180.0
         while not self._stop.is_set():
             try:
+                # 同进程遥测/电量轮询可能已经 init_node；再调会抛错并被误判成 roscore 挂了
+                if rospy.core.is_initialized():
+                    self._log("[ros] 复用本进程已有 rospy 节点")
+                    break
                 rospy.init_node(
                     "ble_command_bridge", anonymous=True, disable_signals=True
                 )
                 break
             except Exception as e:
+                err = str(e).lower()
+                if "already been called" in err or "already initialized" in err:
+                    self._log("[ros] rospy 已初始化，复用现有节点")
+                    break
                 if time.monotonic() >= init_deadline:
                     self._log(f"[ros] 初始化失败（roscore 超时）: {e}")
                     return
-                self._log("[ros] 等待 roscore…")
+                self._log(f"[ros] 等待 roscore… ({e})")
                 time.sleep(2.0)
 
         self._cmd_pub = rospy.Publisher("/cmd_vel", Twist, queue_size=1)
@@ -778,23 +813,21 @@ class BleRosBridge:
             rospy.Subscriber(
                 "/power_switch_state", Power_switch, _on_power_state, queue_size=1
             )
-        except ImportError:
-            self._log("[MP] livelybot_power 不可用，电机电源控制已禁用")
+        except Exception as e:
+            self._log(f"[MP] 电源话题初始化失败（仍继续 /joy_msg）: {e}")
         try:
             from sim2real_msg.msg import Joy  # noqa: F401
 
             self._joy_msg_pub = rospy.Publisher("/joy_msg", Joy, queue_size=1)
             self._has_joy = True
             self._log("[ros] 已启用 /cmd_vel + /joy + /joy_msg")
-            self._log("[ros] 模式: M_default/M_init/M_protect/M_resetzero/M_tech")
+            self._log("[ros] 模式: M_init/M_protect/M_resetzero/M_tech")
             self._log("[ros] 手柄: 任意组合键文本 → 模拟 /joy_msg（见 ble_gamepad）")
             self._log("[ros] 动作: LT+RT+start/RB/B | 步态: GAIT ON/OFF")
             self._log("[ros] 疾跑: LT ON/OFF → /joy_msg lt 按住（AMP 加速）")
         except ImportError:
             self._has_joy = False
             self._log("[ros] 已启用 /cmd_vel + /joy（无 sim2real_msg）")
-
-        self._last_fsm_state: Optional[int] = None
 
         def _on_fsm(msg: Int32) -> None:
             self._last_fsm_state = int(msg.data)
@@ -954,8 +987,6 @@ class BleRosBridge:
         label = MODE_LABELS[mode_key]
         fsm = self._last_fsm_state
 
-        if mode_key == "m_default":
-            return label, ["center"]
         if mode_key == "m_protect":
             return label, ["lt+rt+b"]
         if mode_key == "m_init":
@@ -1101,9 +1132,6 @@ class BleRosBridge:
                     return
                 if mode_key == "m_resetzero":
                     self._switch_to_candidate(FSM_CANDIDATE_CALIBRATION, label)
-                    return
-                if mode_key == "m_default":
-                    self._switch_to_exec_default(label)
                     return
 
                 self._log(f"[ros]   序列({len(steps)}步): {steps}")
@@ -1279,6 +1307,21 @@ class BleRosBridge:
             return
 
         now = time.monotonic()
+        if combo == AUTO_STAND_COMBO:
+            # OLED/状态显示进程对高频站立触发敏感，站立命令做独立防抖。
+            if self._last_fsm_state == 5:
+                self._log("[ros] 忽略起立：已在 EXEC_DEFAULT")
+                return
+            last = self._last_action_ts.get(AUTO_STAND_COMBO, 0.0)
+            if now - last < AUTO_STAND_COOLDOWN_SEC:
+                left = AUTO_STAND_COOLDOWN_SEC - (now - last)
+                self._log(f"[ros] 忽略起立：冷却中，剩余 {left:.1f}s")
+                return
+            with self._auto_stand_lock:
+                if self._auto_stand_running:
+                    self._log("[ros] 忽略起立：上一条起立仍在执行中")
+                    return
+
         if (
             ACTION_COOLDOWN_SEC > 0
             and now - self._last_action_ts.get(combo, 0.0) < ACTION_COOLDOWN_SEC
@@ -1324,12 +1367,30 @@ class BleRosBridge:
             except Exception:
                 pass
 
+        if combo == AUTO_STAND_COMBO:
+            with self._auto_stand_lock:
+                self._auto_stand_running = True
         threading.Thread(
-            target=self._run_steps,
-            args=(steps, label, COMBO_HOLD_SEC),
+            target=self._run_action_steps,
+            args=(combo, steps, label, COMBO_HOLD_SEC),
             kwargs={"step_gap": step_gap},
             daemon=True,
         ).start()
+
+    def _run_action_steps(
+        self,
+        combo: str,
+        steps: List[str],
+        label: str,
+        hold_sec: float,
+        step_gap: float = STEP_GAP_SEC,
+    ) -> None:
+        try:
+            self._run_steps(steps, label, hold_sec, step_gap=step_gap)
+        finally:
+            if combo == AUTO_STAND_COMBO:
+                with self._auto_stand_lock:
+                    self._auto_stand_running = False
 
     def _read_velocity_walk_enabled(self) -> Optional[bool]:
         """True=行走(速度控制启用), False=站立, None=未知或非步态状态。"""

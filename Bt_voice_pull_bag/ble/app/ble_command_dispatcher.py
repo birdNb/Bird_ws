@@ -4,7 +4,9 @@
 
 from __future__ import annotations
 
+import os
 import re
+import sys
 import threading
 import time
 from collections import deque
@@ -30,7 +32,9 @@ STICK_RE = re.compile(
     r"(?:\s*,\s*N:\s*\d+)?\s*$",
     re.IGNORECASE,
 )
-MODE_RE = re.compile(r"^M_(default|init|protect|resetzero|tech)$", re.IGNORECASE)
+MODE_RE = re.compile(r"^M_(init|protect|resetzero|tech)$", re.IGNORECASE)
+HANDSHAKE_RE = re.compile(r"^M_default$", re.IGNORECASE)
+HEARTBEAT_RE = re.compile(r"^1$", re.IGNORECASE)
 
 ACTION_WIRE = {
     "lt+rt+start": "LT+RT+start",
@@ -69,14 +73,24 @@ GAIT_RE = re.compile(r"^GAIT\s+(ON|OFF)$", re.IGNORECASE)
 SPRINT_RE = re.compile(r"^LT\s+(ON|OFF)$", re.IGNORECASE)
 SOUND_RE = re.compile(r"^sound\s+(ON|OFF)(?:\s+(\d+))?$", re.IGNORECASE)
 VOLUME_RE = re.compile(r"^V\s+(\d{1,3})$", re.IGNORECASE)
+PULL_RE = re.compile(r"^PULL\s+(ON|OFF)$", re.IGNORECASE)
+CONV_CODE_RE = re.compile(r"^[A-Z][A-Z0-9]{1,31}$")
 
 try:
     from ble_device_name import RENAME_RE as _RENAME_RE
 except ImportError:
     _RENAME_RE = re.compile(r"^rename\s+HT_(\d{8})$", re.IGNORECASE)
 
+try:
+    from ble_gamepad import combo_to_wire, parse_gamepad_combo
+except ImportError:
+    combo_to_wire = None  # type: ignore
+    parse_gamepad_combo = None  # type: ignore
+
 
 class CommandKind(str, Enum):
+    HEARTBEAT = "heartbeat"
+    HANDSHAKE = "handshake"
     STICK = "stick"
     MODE = "mode"
     ACTION = "action"
@@ -89,6 +103,8 @@ class CommandKind(str, Enum):
     VOLUME = "volume"
     RENAME = "rename"
     WIFI = "wifi"
+    PULL = "pull"
+    CONVERSATION = "conversation"
     UNKNOWN = "unknown"
 
 
@@ -104,6 +120,32 @@ HandleFn = Callable[[CommandKind, str], None]
 AckFn = Callable[[str], None]
 EchoConfirmFn = Callable[[str], None]
 
+
+def _sanitize_wire_text(text: str) -> str:
+    """FFE1 文本清洗：去除 \\0/\\r/\\n，保留其余字符。"""
+    return text.replace("\x00", "").replace("\r", "").replace("\n", "").strip()
+
+
+def _conversation_code_exists(code: str) -> bool:
+    """识别 conversation_bag 短码（如 LYJXD），避免未进 PYTHONPATH 时误判。"""
+    if not CONV_CODE_RE.match(code.strip().upper()):
+        return False
+    try:
+        from voice_remind import conversation_code_exists
+
+        return bool(conversation_code_exists(code))
+    except ImportError:
+        ws = os.environ.get("BIRD_WS", "")
+        if ws and ws not in sys.path:
+            sys.path.insert(0, ws)
+        try:
+            from voice_remind import conversation_code_exists
+
+            return bool(conversation_code_exists(code))
+        except ImportError:
+            return False
+
+
 def _normalize_stick(x: float, y: float, z: float) -> str:
     x = max(-STICK_XY_LIMIT, min(STICK_XY_LIMIT, x))
     y = max(-STICK_XY_LIMIT, min(STICK_XY_LIMIT, y))
@@ -112,9 +154,15 @@ def _normalize_stick(x: float, y: float, z: float) -> str:
 
 
 def classify_payload(text: str) -> Tuple[CommandKind, str, str]:
-    raw = text.strip()
+    raw = _sanitize_wire_text(text)
     if not raw:
         return CommandKind.UNKNOWN, "", ""
+
+    if HEARTBEAT_RE.match(raw):
+        return CommandKind.HEARTBEAT, "1", "1"
+
+    if HANDSHAKE_RE.match(raw):
+        return CommandKind.HANDSHAKE, "m_default", "M_default"
 
     m = STICK_RE.match(raw)
     if m:
@@ -129,6 +177,12 @@ def classify_payload(text: str) -> Tuple[CommandKind, str, str]:
     if ACTION_RE.match(raw):
         key = re.sub(r"\s+", "", raw).lower()
         return CommandKind.ACTION, key, ACTION_WIRE.get(key, raw)
+
+    if parse_gamepad_combo is not None:
+        combo = parse_gamepad_combo(raw)
+        if combo is not None:
+            wire = combo_to_wire(combo) if combo_to_wire is not None else raw
+            return CommandKind.ACTION, combo, wire
 
     if NECK_CENTER_RE.match(raw):
         return CommandKind.NECK, "neck0", "neck0"
@@ -179,6 +233,16 @@ def classify_payload(text: str) -> Tuple[CommandKind, str, str]:
         digits = m_rename.group(1)
         name = f"HT_{digits}"
         return CommandKind.RENAME, name, f"rename {name}"
+
+    m_pull = PULL_RE.match(raw)
+    if m_pull:
+        action = m_pull.group(1).upper()
+        wire = f"PULL {action}"
+        return CommandKind.PULL, action, wire
+
+    if CONV_CODE_RE.match(raw.strip().upper()) and _conversation_code_exists(raw):
+        code = raw.strip().upper()
+        return CommandKind.CONVERSATION, code, code
 
     if re.match(r"^WIFI\s+", raw, re.IGNORECASE):
         try:
@@ -239,15 +303,31 @@ class CommandDispatcher:
         if len(data) > MAX_PACKET_BYTES:
             return
         try:
-            text = data.decode("utf-8").strip()
+            text = data.decode("utf-8", errors="ignore")
         except UnicodeDecodeError:
             return
-        if not text or "\n" in text or "\r" in text:
+        text = _sanitize_wire_text(text)
+        if not text:
             return
 
         kind, payload, wire = classify_payload(text)
         if kind == CommandKind.UNKNOWN:
             self._log_rx(f"无法识别: {text!r}")
+            return
+
+        if kind == CommandKind.HEARTBEAT:
+            return
+
+        if kind == CommandKind.HANDSHAKE:
+            self._log_rx("handshake: M_default")
+            try:
+                # 必须通知上层置位 default 标志，否则 ready 条件永远不满足。
+                self._handle(kind, payload)
+            except Exception as e:
+                self._log_warn(f"握手处理失败: {e}")
+                return
+            if self._ack is not None:
+                self._ack("M_default")
             return
 
         if kind == CommandKind.STICK:
@@ -282,8 +362,6 @@ class CommandDispatcher:
             except Exception as e:
                 self._log_warn(f"MP 处理失败: {e}")
                 return
-            if self._echo_confirm is not None:
-                self._echo_confirm(text)
             return
 
         if kind == CommandKind.GAIT:
@@ -339,6 +417,28 @@ class CommandDispatcher:
                 self._handle(kind, payload)
             except Exception as e:
                 self._log_warn(f"WIFI 处理失败: {e}")
+            return
+
+        if kind == CommandKind.PULL:
+            self._log_rx(f"pull: {wire}")
+            try:
+                self._handle(kind, payload)
+            except Exception as e:
+                self._log_warn(f"PULL 处理失败: {e}")
+                return
+            if self._echo_confirm is not None:
+                self._echo_confirm(wire)
+            return
+
+        if kind == CommandKind.CONVERSATION:
+            self._log_rx(f"conv: {wire}")
+            try:
+                self._handle(kind, payload)
+            except Exception as e:
+                self._log_warn(f"对话语音处理失败: {e}")
+                return
+            if self._ack is not None:
+                self._ack(wire)
             return
 
         # 模式指令同步处理并立即 ACK，避免握手 M_default 排队卡住

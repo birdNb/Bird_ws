@@ -38,7 +38,6 @@ show_help() {
   --name NAME     广播名称 (默认 ble_device_name.conf 或 HT_88888888)
   --no-echo       不回显 ACK 到 notify 特征
   --no-ros        不转发 ROS（仅验证 BLE 连接）
-  --enable-voice  启用 FFE3 语音 PCM 播放（sound_demo）
   --setup         尝试开启 BlueZ Experimental 并重启 bluetooth
   -h, --help      显示帮助
 
@@ -88,7 +87,7 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     --enable-voice)
-      EXTRA_ARGS+=(--enable-voice)
+      echo "[warn] 已移除 sound_demo 组件，参数 --enable-voice 已忽略"
       shift
       ;;
     *)

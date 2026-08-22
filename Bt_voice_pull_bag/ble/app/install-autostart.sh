@@ -57,7 +57,6 @@ if [ ! -f "${DEFAULT_ENV}" ]; then
 # Bird BLE 环境（install-autostart 维护 BLE_DEVICE_NAME_FILE）
 BLE_DEVICE_NAME_FILE=/var/lib/bird-ble/ble_device_name.conf
 # 额外启动参数（传给 run_ble_with_ros.sh）
-# EXTRA_ARGS=(--enable-voice)
 EXTRA_ARGS=()
 EOF
   echo "[ok] 已创建 ${DEFAULT_ENV}"

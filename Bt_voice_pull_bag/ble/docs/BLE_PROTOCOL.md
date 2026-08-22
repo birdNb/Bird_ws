@@ -218,14 +218,13 @@ WIFI <SSID> <PASSWORD>
 
 | 规则 | 说明 |
 | ---- | ---- |
-| SSID | 最长 32；含空格时用引号：`WIFI "My SSID" pass` |
-| PASSWORD | 最长 63；无引号时第一个 token 为 SSID，其余为密码 |
-| 板端流程 | 解析 → `nmcli` 保存并连接 → FFE2 回最终结果 |
-| 成功 | `WIFI OK`，并再推 `IP:x.x.x.x`；播报 `wifi_connected` |
-| 失败 | `WIFI FAIL <reason>`（如 `busy` / `auth` / `not_found` / `timeout` / `no_device`）；播报 `wifi_disconnected` |
-| 超时 | 约 45s |
-| 并发 | 同时仅允许一路配网；忙时立即 `WIFI FAIL busy` |
-| 语音 | 开始配网播 `wifi_changed`；链路事后断开也播 `wifi_disconnected` |
+| SSID | 最长 32；无引号时密码前全部为 SSID（`WIFI Bird Phone 12345678` → `Bird Phone`） |
+| PASSWORD | 最长 63；无引号时最后一个 token；含空格须加引号 |
+| 板端流程 | 解析 → 断开当前 WiFi → `nmcli` 连接 → FFE2 回结果 |
+| 成功 | 先 `WIFI OK`，再单独推 `IP:x.x.x.x`；播报 `wifi_connected` |
+| 失败 | `WIFI FAIL <reason>` |
+| 链路断开 | FFE2 `WiFi disconnected`（小程序需原样识别）；播报 `wifi_disconnected` |
+| 链路恢复 | 同成功：`WIFI OK` + `IP:…` |
 
 ### 1.11 指令 ACK（FFE2 notify）
 
@@ -455,4 +454,4 @@ LT OFF
 | 状态下行      | `ble_status_telemetry.py`    | IP / pwr / mp / fsm   |
 
 
-参考小程序示例：`docs/miniprogram_ble_snippet.js`
+参考小程序示例：`docs/miniprogram_ble_snippet.js` 

@@ -23,6 +23,7 @@ class MotorPowerController:
         self._log = log
         self._lock = threading.Lock()
         self._pub = None
+        self._com_pub = None
         self._pending: Optional[str] = None
         self._motor_on: Optional[bool] = None
         self._grace_until = 0.0
@@ -31,9 +32,11 @@ class MotorPowerController:
     def set_state_listener(self, fn: Optional[StateFn]) -> None:
         self._on_state_changed = fn
 
-    def attach_publisher(self, pub) -> None:
+    def attach_publisher(self, pub, com_pub=None) -> None:
         self._pub = pub
-        self._log(f"[MP] 已发布 {POWER_TOPIC}")
+        self._com_pub = com_pub
+        extra = " + /com_power_control" if com_pub is not None else ""
+        self._log(f"[MP] 已发布 {POWER_TOPIC}{extra}")
 
     def update_state_from_hardware(self, motor_on: bool) -> None:
         """订阅 /power_switch_state 回调。"""
@@ -71,7 +74,7 @@ class MotorPowerController:
             self._pending = cmd
         return True
 
-    def apply_immediate(self, action: str) -> bool:
+    def apply_immediate(self, action: str, soft: bool = False) -> bool:
         """已就绪则立刻下发，否则入队等待 tick。"""
         cmd = action.strip().upper()
         if cmd not in ("ON", "OFF"):
@@ -81,7 +84,7 @@ class MotorPowerController:
             if pub is None:
                 self._pending = cmd
                 return False
-        self._apply(cmd)
+        self._apply(cmd, soft=soft)
         return True
 
     def tick(self) -> None:
@@ -91,7 +94,7 @@ class MotorPowerController:
         if action is not None:
             self._apply(action)
 
-    def _apply(self, action: str) -> None:
+    def _apply(self, action: str, soft: bool = False) -> None:
         if self._pub is None:
             self._log("[MP] 未就绪，忽略指令")
             return
@@ -106,13 +109,23 @@ class MotorPowerController:
         msg.control_switch = 1
         msg.power_switch = 1 if on else 0
         self._pub.publish(msg)
+        if self._com_pub is not None:
+            try:
+                from std_msgs.msg import UInt8
+
+                u = UInt8()
+                u.data = 1 if on else 0
+                self._com_pub.publish(u)
+            except Exception as exc:
+                self._log(f"[MP] /com_power_control 发送失败: {exc}")
         with self._lock:
             if on:
                 self._grace_until = time.monotonic() + HARDWARE_OFF_GRACE_SEC
             else:
                 self._grace_until = 0.0
             self._motor_on = on
-        self._log(f"[MP] 电机电源已{'开启' if on else '关闭'} ({action})")
+        mode = "soft" if soft else "normal"
+        self._log(f"[MP] 电机电源已{'开启' if on else '关闭'} ({action}, {mode})")
         self._notify_state(on)
 
     def _notify_state(self, motor_on: bool) -> None:

@@ -1,0 +1,42 @@
+repositories:
+  src/hightorque_controller:
+    type: git
+    url: ssh://git@git.clicki.cn:22022/hightorque_motion/hightorque_controller.git
+    version: main
+  src/hightorque_bringup:
+    type: git
+    url: ssh://git@git.clicki.cn:22022/hightorque_motion/hightorque_bringup.git
+    version: main
+  src/hightorque_midware:
+    type: git
+    url: ssh://git@git.clicki.cn:22022/hightorque_motion/hightorque_midware.git
+    version: main
+  src/hightorque_msgs:
+    type: git
+    url: ssh://git@git.clicki.cn:22022/hightorque_motion/hightorque_msgs.git
+    version: main
+  src/hightorque_kinematics_core:
+    type: git
+    url: ssh://git@git.clicki.cn:22022/hightorque_motion/hightorque_kinematics_core.git
+    version: main
+  src/hightorque_kinematics_plugins:
+    type: git
+    url: ssh://git@git.clicki.cn:22022/hightorque_motion/hightorque_kinematics_plugins.git
+    version: main
+  src/hightorque_imu_ros2:
+    type: git
+    url: ssh://git@git.clicki.cn:22022/livelybot/hightorque_imu_ros2.git
+    version: motion/feature/namespace
+  src/hightorque_oled:
+    type: git
+    url: ssh://git@git.clicki.cn:22022/livelybot/hightorque_oled.git
+    version: motion/feature/namespace
+  src/hightorque_power:
+    type: git
+    url: ssh://git@git.clicki.cn:22022/livelybot/hightorque_power.git
+    version: motion/feature/namespace
+  src/hightorque_robot:
+    type: git
+    url: ssh://git@git.clicki.cn:22022/livelybot/hightorque_robot.git
+    version: main
+
