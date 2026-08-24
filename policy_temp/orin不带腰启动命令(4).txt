@@ -1,0 +1,85 @@
+终端一：
+sudo killall -9 rosmaster
+cd ~/workspace_huiying/ros2
+rosenv foxy
+source install/setup.bash
+ros2 launch hightorque_bringup pi_plus_orin.launch.py
+
+终端二：
+cd ~/workspace_huiying/ros2
+rosenv foxy
+source install/setup.bash
+ros2 run hightorque_midware move_to_zero.py
+
+终端三：
+conda activate motionpub
+PROJECT_DIR=/home/nvidia/workspace/yuan-ji-motionbricks/instinct_onboard
+cd "$PROJECT_DIR"
+rosenv foxy
+source ~/workspace_huiying/ros2/install/setup.bash
+source "$PROJECT_DIR/install/setup.bash"
+export PYTHONPATH="$PROJECT_DIR:/usr/lib/python3.8/dist-packages${PYTHONPATH:+:$PYTHONPATH}"
+cd "$PROJECT_DIR/motionpub"
+python scripts/pub_bfm_joint_realtime_pkl_loop.py \
+    --robot piplus_0w \
+    --bfm-logdir /home/nvidia/workspace_huiying/ros2/policy/bfmzero-piplus-h0w-isaac-20260814_191549  \
+    --motion-dir directional_motion_0w_28x10s_260815_ac13\
+    --fps 50
+    
+    --UFO 
+
+单独播放pkl 
+python scripts/pub_bfm_joint_realtime_pkl.py \
+    --robot piplus_0w \
+    --input  /home/nvidia/workspace/yuan-ji-motionbricks/instinct_onboard/motionpub/directional_motion_0w_28x10s_260815_ac13/01_Forward_speed_1.pkl\
+    --bfm-logdir /home/nvidia/workspace_huiying/ros2/policy/bfmzero-piplus-h0w-isaac-20260814_191549    
+    
+
+
+终端四：
+conda activate motionpub
+cd ~/workspace/yuan-ji-motionbricks/instinct_onboard
+rosenv foxy
+source ~/workspace_huiying/ros2/install/setup.bash
+source ~/workspace/yuan-ji-motionbricks/instinct_onboard/install/setup.bash 
+export BFM_BACKEND=trt
+export PYTHONPATH="$PWD:/usr/lib/python3.8/dist-packages${PYTHONPATH:+:$PYTHONPATH}"
+python scripts/piplus_bfm_z_encoder.py \
+    --backend tensorrt\
+    --logdir /home/nvidia/workspace_huiying/ros2/policy/bfmzero-piplus-h0w-isaac-20260814_191549  \
+    --input-topic /bfm_joint_realtime \
+    --output-topic /bfm_z_realtime \
+    --qos-depth 8 \
+    --worker-queue-capacity 8 \
+    --max-source-age 0.25 \
+    --cuda-stream-priority high
+    
+    --UFO \
+
+终端五：
+conda activate motionpub
+cd ~/workspace/yuan-ji-motionbricks/instinct_onboard
+rosenv foxy
+source ~/workspace_huiying/ros2/install/setup.bash
+source ~/workspace/yuan-ji-motionbricks/instinct_onboard/install/setup.bash 
+export PYTHONPATH="/usr/lib/python3.8/dist-packages${PYTHONPATH:+:$PYTHONPATH}"
+export BFM_BACKEND=trt
+export BFM_ACTOR_CUDA_STREAM_PRIORITY=high
+export PYTHONPATH="$PWD:/usr/lib/python3.8/dist-packages${PYTHONPATH:+:$PYTHONPATH}"
+python scripts/piplus_bfm.py \
+    --logdir /home/nvidia/workspace_huiying/ros2/policy/bfmzero-piplus-h0w-isaac-20260814_191549  \
+    --mode tracking \
+    --realtimectrl \
+    --realtime-z-topic /bfm_z_realtime \
+    --realtime-qos-depth 8 \
+    --realtime-z-buffer-size 8 \
+    --realtime-z-interpolation-delay 0.02 \
+    --realtime-timeout 0.5 \
+    --nodryrun \
+    --startup_step_size 0.03 \
+    --cold-start-debug-joint 21 \
+    --command-debug-real-joint 21 \
+    --kpkd_factor 0.7 \
+    --cold-start-done-tolerance 0.2 \
+    --joint-pos-protect-ratio 1.5 \
+    --robot-class-name PiPlus_S_12L8A0G2H0W

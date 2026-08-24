@@ -1,0 +1,96 @@
+本机：LubanCat RK3588 / 无腰 PiPlus_S_12L8A0G2H0W（22 轴）
+策略：/home/hightorque/policy/bfmzero-piplus-h0w-isaac-260814
+仓库：~/colcon_ws/src/instinct_onboard   分支 bfm_motionpub
+conda：instinct_venv
+后端：ONNX CPU（RK 不要 trt，不要 --UFO）
+bringup：pi_plus_rknn.launch.py
+
+---------------------------------------------------------------------------------------------------------
+手柄
+刚开始按两次 RB（肩键，不是扳机）：
+  第一次进入准备姿态（冷启动自动走，完成后提示 press R1）
+  第二次（肩键 RB / buttons[5]）进入策略
+进入策略后：
+  左摇杆八向走，松开回站立
+  按住 LB（buttons[4]）选第二档速度
+  右摇杆左右：原地转向
+急停：LT + RT 同时按到底（单独按扳机不会卸力）
+
+---------------------------------------------------------------------------------------------------------
+终端1, 启动 hightorque_bringup：
+sudo killall -9 rosmaster
+rosenv foxy
+cd ~/colcon_ws
+source install/setup.bash
+ros2 launch hightorque_bringup pi_plus_rknn.launch.py
+
+终端2，回零位置：
+rosenv foxy
+cd ~/colcon_ws
+source install/setup.bash
+ros2 run hightorque_midware move_to_zero.py
+
+终端3, 发布动作：
+conda activate instinct_venv
+rosenv foxy
+source ~/colcon_ws/install/setup.bash
+cd ~/colcon_ws/src/instinct_onboard
+export PYTHONPATH="$PWD:/usr/lib/python3.8/dist-packages${PYTHONPATH:+:$PYTHONPATH}"
+cd ~/colcon_ws/src/instinct_onboard/motionpub
+python scripts/pub_bfm_joint_realtime_pkl_loop.py \
+    --robot piplus_0w \
+    --bfm-logdir /home/hightorque/policy/bfmzero-piplus-h0w-isaac-260814 \
+    --motion-dir directional_motion_0w_28x10s_260815_ac13 \
+    --fps 50
+
+单独播放 pkl：
+python scripts/pub_bfm_joint_realtime_pkl.py \
+    --robot piplus_0w \
+    --input /home/hightorque/colcon_ws/src/instinct_onboard/motionpub/directional_motion_0w_28x10s_260815_ac13/01_Forward_speed_1.pkl \
+    --bfm-logdir /home/hightorque/policy/bfmzero-piplus-h0w-isaac-260814
+
+终端4，启动独立 z encoder：
+conda activate instinct_venv
+rosenv foxy
+source ~/colcon_ws/install/setup.bash
+cd ~/colcon_ws/src/instinct_onboard
+export BFM_BACKEND=onnx
+export PYTHONPATH="$PWD:/usr/lib/python3.8/dist-packages${PYTHONPATH:+:$PYTHONPATH}"
+python scripts/piplus_bfm_z_encoder.py \
+    --backend onnx \
+    --logdir /home/hightorque/policy/bfmzero-piplus-h0w-isaac-260814 \
+    --input-topic /bfm_joint_realtime \
+    --output-topic /bfm_z_realtime \
+    --qos-depth 8 \
+    --worker-queue-capacity 8 \
+    --max-source-age 0.25
+
+终端5，启动策略：
+conda activate instinct_venv
+rosenv foxy
+source ~/colcon_ws/install/setup.bash
+cd ~/colcon_ws/src/instinct_onboard
+export BFM_BACKEND=onnx
+export PYTHONPATH="$PWD:/usr/lib/python3.8/dist-packages${PYTHONPATH:+:$PYTHONPATH}"
+python scripts/piplus_bfm.py \
+    --logdir /home/hightorque/policy/bfmzero-piplus-h0w-isaac-260814 \
+    --mode tracking \
+    --realtimectrl \
+    --realtime-z-topic /bfm_z_realtime \
+    --realtime-qos-depth 8 \
+    --realtime-z-buffer-size 8 \
+    --realtime-z-interpolation-delay 0.02 \
+    --realtime-timeout 0.5 \
+    --nodryrun \
+    --startup_step_size 0.03 \
+    --cold-start-debug-joint 21 \
+    --command-debug-real-joint 21 \
+    --kpkd_factor 0.7 \
+    --cold-start-done-tolerance 0.2 \
+    --joint-pos-protect-ratio 1.5 \
+    --robot-class-name PiPlus_S_12L8A0G2H0W
+
+如果之前的环境是安装另外的项目的，可以将当前项目加进环境：
+conda activate instinct_venv
+cd ~/colcon_ws/src/instinct_onboard
+FORCE_CPU=1 python -m pip install -e . --no-deps

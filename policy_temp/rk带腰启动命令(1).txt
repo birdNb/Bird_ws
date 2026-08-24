@@ -1,0 +1,65 @@
+终端1, 启动hightorque_bringup：
+sudo killall -9 rosmaster
+cd ~/workspace/ros2_motionbricks
+rosenv foxy
+source install/setup.bash
+ros2 launch hightorque_bringup pi_plus_rknn.launch.py
+
+终端2，回零位置：
+cd ~/workspace/ros2_motionbricks
+rosenv foxy
+source install/setup.bash
+ros2 run hightorque_midware move_to_zero.py
+
+终端3, 发布动作：
+conda activate motionpub
+cd ~/workspace/yuan-ji-motionbricks/instinct_onboard/motionpub
+source /opt/ros/foxy/setup.bash
+source ~/workspace/ros2_motionbricks/install/setup.bash
+source ~/workspace/yuan-ji-motionbricks/instinct_onboard/install/setup.bash 
+python scripts/pub_bfm_joint_realtime_pkl_loop.py \
+  --bfm-logdir ~/workspace/hui-ying-motionbricks/policy/bfmzero-piplus-lse-isaac-20260715_143758 \
+  --fps 50 
+
+终端4， 启动独立 z encoder：
+conda activate motionpub
+cd ~/workspace/yuan-ji-motionbricks/instinct_onboard
+source /opt/ros/foxy/setup.bash
+source ~/workspace/ros2_motionbricks/install/setup.bash
+source ~/workspace/yuan-ji-motionbricks/instinct_onboard/install/setup.bash
+python scripts/piplus_bfm_z_encoder.py \
+    --logdir ~/workspace/hui-ying-motionbricks/policy/bfmzero-piplus-lse-isaac-20260715_143758 \
+    --backend onnx \
+    --input-topic /bfm_joint_realtime \
+    --output-topic /bfm_z_realtime \
+    --qos-depth 8 \
+    --worker-queue-capacity 8 \
+    --max-source-age 0.25 \
+    --cuda-stream-priority high
+
+终端5 启动策略，使用单线程 ROS executor 的 50 Hz BFM 控制：
+conda activate motionpub
+cd ~/workspace/yuan-ji-motionbricks/instinct_onboard
+source /opt/ros/foxy/setup.bash
+source ~/workspace/ros2_motionbricks/install/setup.bash
+source ~/workspace/yuan-ji-motionbricks/instinct_onboard/install/setup.bash
+python scripts/piplus_bfm.py \
+    --logdir ~/workspace/hui-ying-motionbricks/policy/bfmzero-piplus-lse-isaac-20260715_143758 \
+    --mode tracking \
+    --realtimectrl \
+    --realtime-z-topic /bfm_z_realtime \
+    --realtime-qos-depth 8 \
+    --realtime-z-buffer-size 8 \
+    --realtime-z-interpolation-delay 0.02 \
+    --realtime-timeout 0.5 \
+    --nodryrun \
+    --startup_step_size 0.03 \
+    --cold-start-debug-joint 22 \
+    --command-debug-real-joint 21 \
+    --kpkd_factor 0.7 \
+    --cold-start-done-tolerance 0.2 \
+    --joint-pos-protect-ratio 1.5
+
+
+如果之前的环境是安装另外的项目的，可以将当前项目加进环境
+pip install -e . --no-deps
