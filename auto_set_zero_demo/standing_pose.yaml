@@ -1,0 +1,162 @@
+# 当前站立姿态快照（ROS2 default_bt standing → standby）
+# 采集时间: 2026-08-26 11:24:24 CST
+# 机型: PiPlus S-12L8A0G2H1W（23 DoF，含 waist_yaw）
+# 上层: current_mode=default_bt, current_state=standby
+#
+# 站立指令来源: BFM policy default_pose
+#   /home/nvidia/action_library/policy/bfm/bfm.yaml
+# 实测来源: /joint_states（URDF 空间，已含 direction + urdf_offset）
+#
+# 字段:
+#   cmd_q       站立位置指令 [rad]
+#   measured_q  当前反馈位置 [rad]
+#   offset_q    相对指令的位置偏移 = measured_q - cmd_q [rad]
+#
+# 注意:
+#   offset_q 是跟指令的跟踪残差，不是 pd.yaml / joints.yaml 的 urdf_offset。
+#   urdf_offset 是电机零 → URDF 的固定映射，调零时只读不改。
+
+robot_type: S-12L8A0G2H1W
+source:
+  policy: bfm
+  command: default_pose
+  topic: /joint_states
+  controller_state: standby
+
+# 与 /joint_states、joints.yaml 相同的硬件顺序
+joint_names:
+  - l_ankle_roll_joint
+  - l_ankle_pitch_joint
+  - l_calf_joint
+  - l_thigh_joint
+  - l_hip_roll_joint
+  - l_hip_pitch_joint
+  - r_ankle_roll_joint
+  - r_ankle_pitch_joint
+  - r_calf_joint
+  - r_thigh_joint
+  - r_hip_roll_joint
+  - r_hip_pitch_joint
+  - l_shoulder_pitch_joint
+  - l_shoulder_roll_joint
+  - l_upper_arm_joint
+  - l_elbow_joint
+  - r_shoulder_pitch_joint
+  - r_shoulder_roll_joint
+  - r_upper_arm_joint
+  - r_elbow_joint
+  - head_yaw_joint
+  - head_pitch_joint
+  - waist_yaw_joint
+
+# 站立位置指令（按上面 joint_names 重排后的 BFM default_pose）
+cmd_q:
+  [0.00, -0.40, 0.65, 0.00, 0.00, -0.25,
+   0.00, -0.40, 0.65, 0.00, 0.00, -0.25,
+   0.18, 0.15, 0.00, -0.50,
+   0.18, -0.15, 0.00, -0.50,
+   0.00, 0.00,
+   0.00]
+
+# 当前站立反馈
+measured_q:
+  [-0.000628, -0.416575, 0.668531, -0.001885, 0.000000, -0.249442,
+    0.003142, -0.408407, 0.674186, -0.001885, 0.004398, -0.243788,
+    0.179239,  0.148743, 0.000000, -0.498885,
+    0.177354, -0.148743, 0.000000, -0.499513,
+    0.001257,  0.000628,
+    0.000628]
+
+# 相对站立指令的位置偏移（跟踪残差）
+offset_q:
+  [-0.000628, -0.016575, 0.018531, -0.001885, 0.000000, 0.000558,
+    0.003142, -0.008407, 0.024186, -0.001885, 0.004398, 0.006212,
+   -0.000761, -0.001257, 0.000000, 0.001115,
+   -0.002646,  0.001257, 0.000000, 0.000487,
+    0.001257,  0.000628,
+    0.000628]
+
+# 硬件 urdf_offset（电机零 → URDF，站立指令/反馈都在 URDF 空间）
+urdf_offset:
+  [0.00, 0.00, 0.00, 0.00, 0.00, 0.00,
+   0.00, 0.00, 0.00, 0.00, 0.00, 0.00,
+   1.57, -1.57, 0.00, 0.00,
+   1.57,  1.57, 0.00, 0.00,
+   0.00, 0.00,
+   0.00]
+
+# 按关节名展开，便于按轴核对
+joints:
+  l_ankle_roll_joint:     {cmd_q:  0.00, measured_q: -0.000628, offset_q: -0.000628, offset_deg: -0.036}
+  l_ankle_pitch_joint:    {cmd_q: -0.40, measured_q: -0.416575, offset_q: -0.016575, offset_deg: -0.950}
+  l_calf_joint:           {cmd_q:  0.65, measured_q:  0.668531, offset_q:  0.018531, offset_deg:  1.062}
+  l_thigh_joint:          {cmd_q:  0.00, measured_q: -0.001885, offset_q: -0.001885, offset_deg: -0.108}
+  l_hip_roll_joint:       {cmd_q:  0.00, measured_q:  0.000000, offset_q:  0.000000, offset_deg:  0.000}
+  l_hip_pitch_joint:      {cmd_q: -0.25, measured_q: -0.249442, offset_q:  0.000558, offset_deg:  0.032}
+  r_ankle_roll_joint:     {cmd_q:  0.00, measured_q:  0.003142, offset_q:  0.003142, offset_deg:  0.180}
+  r_ankle_pitch_joint:    {cmd_q: -0.40, measured_q: -0.408407, offset_q: -0.008407, offset_deg: -0.482}
+  r_calf_joint:           {cmd_q:  0.65, measured_q:  0.674186, offset_q:  0.024186, offset_deg:  1.386}
+  r_thigh_joint:          {cmd_q:  0.00, measured_q: -0.001885, offset_q: -0.001885, offset_deg: -0.108}
+  r_hip_roll_joint:       {cmd_q:  0.00, measured_q:  0.004398, offset_q:  0.004398, offset_deg:  0.252}
+  r_hip_pitch_joint:      {cmd_q: -0.25, measured_q: -0.243788, offset_q:  0.006212, offset_deg:  0.356}
+  l_shoulder_pitch_joint: {cmd_q:  0.18, measured_q:  0.179239, offset_q: -0.000761, offset_deg: -0.044}
+  l_shoulder_roll_joint:  {cmd_q:  0.15, measured_q:  0.148743, offset_q: -0.001257, offset_deg: -0.072}
+  l_upper_arm_joint:      {cmd_q:  0.00, measured_q:  0.000000, offset_q:  0.000000, offset_deg:  0.000}
+  l_elbow_joint:          {cmd_q: -0.50, measured_q: -0.498885, offset_q:  0.001115, offset_deg:  0.064}
+  r_shoulder_pitch_joint: {cmd_q:  0.18, measured_q:  0.177354, offset_q: -0.002646, offset_deg: -0.152}
+  r_shoulder_roll_joint:  {cmd_q: -0.15, measured_q: -0.148743, offset_q:  0.001257, offset_deg:  0.072}
+  r_upper_arm_joint:      {cmd_q:  0.00, measured_q:  0.000000, offset_q:  0.000000, offset_deg:  0.000}
+  r_elbow_joint:          {cmd_q: -0.50, measured_q: -0.499513, offset_q:  0.000487, offset_deg:  0.028}
+  head_yaw_joint:         {cmd_q:  0.00, measured_q:  0.001257, offset_q:  0.001257, offset_deg:  0.072}
+  head_pitch_joint:       {cmd_q:  0.00, measured_q:  0.000628, offset_q:  0.000628, offset_deg:  0.036}
+  waist_yaw_joint:        {cmd_q:  0.00, measured_q:  0.000628, offset_q:  0.000628, offset_deg:  0.036}
+
+# BFM 原顺序（policy joint_names / default_pose，未重排）
+bfm_order:
+  joint_names:
+    [r_hip_pitch_joint, r_hip_roll_joint, r_thigh_joint, r_calf_joint,
+     r_ankle_pitch_joint, r_ankle_roll_joint,
+     l_hip_pitch_joint, l_hip_roll_joint, l_thigh_joint, l_calf_joint,
+     l_ankle_pitch_joint, l_ankle_roll_joint,
+     waist_yaw_joint,
+     r_shoulder_pitch_joint, r_shoulder_roll_joint, r_upper_arm_joint, r_elbow_joint,
+     l_shoulder_pitch_joint, l_shoulder_roll_joint, l_upper_arm_joint, l_elbow_joint,
+     head_yaw_joint, head_pitch_joint]
+  cmd_q:
+    [-0.25, 0.00, 0.00, 0.65, -0.40, 0.00,
+     -0.25, 0.00, 0.00, 0.65, -0.40, 0.00,
+     0.00,
+     0.18, -0.15, 0.00, -0.50,
+     0.18,  0.15, 0.00, -0.50,
+     0.00, 0.00]
+
+# === right_arm_limit_scan (generated) ===
+# 生成时间: 2026-08-26 18:42:07
+# 仅记录撞到硬件限位时的 URDF 位置 [rad]
+right_arm_limit_q:
+  r_elbow_joint: 1.778770
+  r_upper_arm_joint: -2.630770
+  r_shoulder_roll_joint: -3.058487
+  r_shoulder_pitch_joint: -4.192602
+# === end right_arm_limit_scan ===
+
+# === waist_neck_limit_scan (generated) ===
+# 生成时间: 2026-08-26 18:42:29
+# 仅记录撞到硬件限位时的 URDF 位置 [rad]
+waist_neck_limit_q:
+  head_pitch_joint: -0.911062
+  head_yaw_joint: 1.452672
+  waist_yaw_joint: 2.667841
+# === end waist_neck_limit_scan ===
+
+# === right_leg_limit_scan (generated) ===
+# 生成时间: 2026-08-26 18:56:45
+# 仅记录撞到硬件限位时的 URDF 位置 [rad]
+right_leg_limit_q:
+  r_ankle_roll_joint: 0.772204
+  r_ankle_pitch_joint: -0.984575
+  r_calf_joint: 2.384469
+  r_thigh_joint: -2.532752
+  r_hip_roll_joint: -2.717478
+  r_hip_pitch_joint: -3.172380
+# === end right_leg_limit_scan ===
