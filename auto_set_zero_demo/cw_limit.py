@@ -1112,7 +1112,7 @@ class CwLimit(Node):
         lines: List[str] = [
             self.scan_begin,
             f"# 生成时间: {stamp}",
-            "# 仅记录撞到硬件限位时的 URDF 位置 [rad]",
+            "# 仅记录撞到硬件限位时的 URDF 位置 [rad]，保留两位小数（角度精度 0.5°）",
             "# seek_dir: 电机顺时针对应的 URDF 方向；"
             "+ 表示往 URDF 增大到限位，- 表示往减小到限位",
             f"{self.yaml_key}:",
@@ -1154,7 +1154,7 @@ class CwLimit(Node):
         lines: List[str] = [
             cfg["scan_begin"],
             f"# 生成时间: {stamp}",
-            "# 仅记录撞到硬件限位时的 URDF 位置 [rad]",
+            "# 仅记录撞到硬件限位时的 URDF 位置 [rad]，保留两位小数（角度精度 0.5°）",
             "# seek_dir: 电机顺时针对应的 URDF 方向；"
             "+ 表示往 URDF 增大到限位，- 表示往减小到限位",
             f"{cfg['yaml_key']}:",
@@ -1852,10 +1852,17 @@ def median(xs: Sequence[float]) -> float:
     return 0.5 * (ys[n // 2 - 1] + ys[n // 2])
 
 
+def quantize_limit_rad(v: float, step_deg: float = 0.5) -> float:
+    """限位角按 step_deg（默认 0.5°）取整，再保留 rad 两位小数。"""
+    step = step_deg * DEG
+    q = round(v / step) * step
+    return round(q, 2)
+
+
 def fmt(v: Optional[float]) -> str:
     if v is None or (isinstance(v, float) and (math.isnan(v) or math.isinf(v))):
         return "null"
-    return f"{v:.6f}"
+    return f"{quantize_limit_rad(float(v)):.2f}"
 
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
