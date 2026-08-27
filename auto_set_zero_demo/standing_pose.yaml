@@ -113,7 +113,7 @@ bfm_order:
      0.00, 0.00]
 
 # === right_arm_limit_scan (generated) ===
-# 生成时间: 2026-08-27 15:29:26
+# 生成时间: 2026-08-27 16:05:04
 # 仅记录撞到硬件限位时的 URDF 位置 [rad]，保留两位小数（角度精度 0.5°）
 # seek_dir: 电机顺时针对应的 URDF 方向；+ 表示往 URDF 增大到限位，- 表示往减小到限位
 right_arm_limit_q:
@@ -124,7 +124,7 @@ right_arm_limit_q:
 # === end right_arm_limit_scan ===
 
 # === waist_neck_limit_scan (generated) ===
-# 生成时间: 2026-08-27 15:29:26
+# 生成时间: 2026-08-27 16:05:04
 # 仅记录撞到硬件限位时的 URDF 位置 [rad]，保留两位小数（角度精度 0.5°）
 # seek_dir: 电机顺时针对应的 URDF 方向；+ 表示往 URDF 增大到限位，- 表示往减小到限位
 waist_neck_limit_q:
@@ -134,7 +134,7 @@ waist_neck_limit_q:
 # === end waist_neck_limit_scan ===
 
 # === right_leg_limit_scan (generated) ===
-# 生成时间: 2026-08-27 15:29:26
+# 生成时间: 2026-08-27 16:05:04
 # 仅记录撞到硬件限位时的 URDF 位置 [rad]，保留两位小数（角度精度 0.5°）
 # seek_dir: 电机顺时针对应的 URDF 方向；+ 表示往 URDF 增大到限位，- 表示往减小到限位
 right_leg_limit_q:
@@ -142,6 +142,6 @@ right_leg_limit_q:
   r_ankle_pitch_joint: 0.99  # seek_dir +1 → 往 + 到限位
   r_calf_joint: 2.38  # seek_dir +1 → 往 + 到限位
   r_thigh_joint: -2.53  # seek_dir -1 → 往 - 到限位
-  r_hip_roll_joint: -2.26  # seek_dir -1 → 往 - 到限位
+  r_hip_roll_joint: -2.71  # seek_dir -1 → 往 - 到限位
   r_hip_pitch_joint: -3.18  # seek_dir -1 → 往 - 到限位
 # === end right_leg_limit_scan ===
