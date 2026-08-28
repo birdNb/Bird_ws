@@ -1,37 +1,4 @@
 # =============================================================================
-# 结构限位（仿真参考，单位 deg；P=pitch / R=roll / Y=yaw）
-# =============================================================================
-# 髋关节:   P ±150° ; R -18° ~ +180° ; Y ±165°
-# 膝关节:   ±143°
-# 踝关节:   P -56° ~ +53° ; R ±45°
-# 肩关节:   P ±150° ; R -7° ~ +90° ; Y ±150°
-# 肘关节:   ±110°
-# 腕关节:   ±180°
-# 夹爪:     0° ~ +60°
-# 头部:     P -70° ~ +90° ; Y ±90°
-#
-# 结构化副本（deg）:
-structural_limits_sim_ref_deg:
-  hip:
-    pitch: [-150, 150]
-    roll: [-18, 180]
-    yaw: [-165, 165]
-  knee: [-143, 143]
-  ankle:
-    pitch: [-56, 53]
-    roll: [-45, 45]
-  shoulder:
-    pitch: [-150, 150]
-    roll: [-7, 90]
-    yaw: [-150, 150]
-  elbow: [-110, 110]
-  wrist: [-180, 180]
-  gripper: [0, 60]
-  head:
-    pitch: [-70, 90]
-    yaw: [-90, 90]
-
-# =============================================================================
 # 当前站立姿态快照（ROS2 default_bt standing → standby）
 # 采集时间: 2026-08-26 11:24:24 CST
 # 机型: PiPlus S-12L8A0G2H1W（23 DoF，含 waist_yaw）
@@ -113,32 +80,31 @@ bfm_order:
      0.00, 0.00]
 
 # === right_arm_limit_scan (generated) ===
-# 生成时间: 2026-08-27 16:05:04
+# 生成时间: 2026-08-28 15:35:56
 # 仅记录撞到硬件限位时的 URDF 位置 [rad]，保留两位小数（角度精度 0.5°）
 # seek_dir: 电机顺时针对应的 URDF 方向；+ 表示往 URDF 增大到限位，- 表示往减小到限位
 right_arm_limit_q:
   r_elbow_joint: 1.78  # seek_dir +1 → 往 + 到限位
-  r_upper_arm_joint: -2.63  # seek_dir -1 → 往 - 到限位
-  r_shoulder_roll_joint: -3.05  # seek_dir -1 → 往 - 到限位
-  r_shoulder_pitch_joint: -4.19  # seek_dir -1 → 往 - 到限位
+  r_upper_arm_joint: -2.64  # seek_dir -1 → 往 - 到限位
+  r_shoulder_roll_joint: -3.06  # seek_dir -1 → 往 - 到限位
+  r_shoulder_pitch_joint: -4.21  # seek_dir -1 → 往 - 到限位
 # === end right_arm_limit_scan ===
 
 # === waist_neck_limit_scan (generated) ===
-# 生成时间: 2026-08-27 16:05:04
+# 生成时间: 2026-08-28 15:35:59
 # 仅记录撞到硬件限位时的 URDF 位置 [rad]，保留两位小数（角度精度 0.5°）
 # seek_dir: 电机顺时针对应的 URDF 方向；+ 表示往 URDF 增大到限位，- 表示往减小到限位
 waist_neck_limit_q:
-  head_pitch_joint: -0.93  # seek_dir -1 → 往 - 到限位
-  head_yaw_joint: 1.46  # seek_dir +1 → 往 + 到限位
-  waist_yaw_joint: -2.69  # seek_dir -1 → 往 - 到限位
+  head_pitch_joint: -0.92  # seek_dir -1 → 往 - 到限位
+  head_yaw_joint: 1.48  # seek_dir +1 → 往 + 到限位
+  waist_yaw_joint: -2.64  # seek_dir -1 → 往 - 到限位
 # === end waist_neck_limit_scan ===
-
 # === right_leg_limit_scan (generated) ===
-# 生成时间: 2026-08-27 16:05:04
+# 生成时间: 2026-08-28 15:35:56
 # 仅记录撞到硬件限位时的 URDF 位置 [rad]，保留两位小数（角度精度 0.5°）
 # seek_dir: 电机顺时针对应的 URDF 方向；+ 表示往 URDF 增大到限位，- 表示往减小到限位
 right_leg_limit_q:
-  r_ankle_roll_joint: 0.78  # seek_dir +1 → 往 + 到限位
+  r_ankle_roll_joint: 0.77  # seek_dir +1 → 往 + 到限位
   r_ankle_pitch_joint: 0.99  # seek_dir +1 → 往 + 到限位
   r_calf_joint: 2.38  # seek_dir +1 → 往 + 到限位
   r_thigh_joint: -2.53  # seek_dir -1 → 往 - 到限位

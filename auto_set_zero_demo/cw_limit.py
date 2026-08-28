@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import math
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -32,6 +33,38 @@ from sensor_msgs.msg import JointState
 DEG = math.pi / 180.0
 HERE = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_YAML = os.path.join(HERE, "standing_pose.yaml")
+
+# 固定参考限位（standing_pose.yaml 中不覆盖）
+LIMIT_REF_KEYS = (
+    "right_arm_limit_q",
+    "waist_neck_limit_q",
+    "right_leg_limit_q",
+)
+
+
+def load_limit_refs(yaml_path: str) -> Dict[str, float]:
+    """读取 standing_pose.yaml 中固定参考限位（不依赖 PyYAML）。"""
+    out: Dict[str, float] = {}
+    if not os.path.isfile(yaml_path):
+        return out
+    with open(yaml_path, "r", encoding="utf-8") as f:
+        text = f.read()
+    for key in LIMIT_REF_KEYS:
+        m = re.search(
+            rf"(?m)^{re.escape(key)}:\s*\n((?:^[ \t]+.*\n)*)",
+            text,
+        )
+        if not m:
+            continue
+        for line in m.group(1).splitlines():
+            mm = re.match(
+                r"^\s+([A-Za-z0-9_]+):\s*([-+]?[0-9]*\.?[0-9]+(?:[eE][-+]?\d+)?)",
+                line,
+            )
+            if mm:
+                out[mm.group(1)] = float(mm.group(2))
+    return out
+
 
 # 并行标定：各车道关节顺序（组内仍远端→近端串行；车道之间同时）
 PARALLEL_LANES: Dict[str, Tuple[str, ...]] = {
@@ -58,6 +91,29 @@ PARALLEL_WAIST = "waist_yaw_joint"
 # 与预备腰右转同向（URDF 减小）；手脚标定完后继续向右撞限位
 PARALLEL_WAIST_SEEK_DIR = -1.0
 PARALLEL_YAML_GROUPS = ("right_arm", "waist_neck", "right_leg")
+# 计算零位阶段：先只动腰+上半身（腿保持标定初始姿态，左半身标准零位不动）
+UPPER_BODY_ZERO_JOINTS: Tuple[str, ...] = (
+    "r_elbow_joint",
+    "r_upper_arm_joint",
+    "r_shoulder_roll_joint",
+    "r_shoulder_pitch_joint",
+    "head_pitch_joint",
+    "head_yaw_joint",
+    "waist_yaw_joint",
+)
+# 左半身：右半身标定限位时保持卸力（kp/kd 极小 τ，不位控）
+LEFT_BODY_JOINTS: Tuple[str, ...] = (
+    "l_ankle_roll_joint",
+    "l_ankle_pitch_joint",
+    "l_calf_joint",
+    "l_thigh_joint",
+    "l_hip_roll_joint",
+    "l_hip_pitch_joint",
+    "l_shoulder_pitch_joint",
+    "l_shoulder_roll_joint",
+    "l_upper_arm_joint",
+    "l_elbow_joint",
+)
 
 # 远端先、近端后。dir: 电机顺时针对应的 URDF 方向（joints.yaml direction）
 GROUPS: Dict[str, Dict[str, Any]] = {
@@ -78,6 +134,10 @@ GROUPS: Dict[str, Dict[str, Any]] = {
         "tau": {
             "r_elbow_joint": 1.0,
             "r_upper_arm_joint": 2.0,
+            "r_shoulder_roll_joint": 3.0,
+            "r_shoulder_pitch_joint": 2.0,
+        },
+        "force_tau_limit_sec": {
             "r_shoulder_roll_joint": 2.0,
             "r_shoulder_pitch_joint": 2.0,
         },
@@ -270,6 +330,11 @@ class CwLimit(Node):
         self.parallel_mode = bool(getattr(args, "parallel", False))
         # 并行时累计各轴结果，按组写 yaml
         self.all_records: Dict[str, JointRecord] = {}
+        self.limit_ref: Dict[str, float] = load_limit_refs(self.yaml_path)
+        self.write_zero = bool(getattr(args, "write_zero", True))
+        self.update_ref = bool(getattr(args, "update_ref", False))
+        self.zero_motor_ids: List[int] = []
+        self.home_q: Dict[str, float] = {}
 
         self.js_names: List[str] = []
         self.q: Dict[str, float] = {}
@@ -283,6 +348,7 @@ class CwLimit(Node):
         self.seek_names: List[str] = []
         self.hold_names: set = set()
         self.hold_q: Dict[str, float] = {}
+        self.left_body_unload: set = set()
         self.prep_origin: Dict[str, float] = {}
         self.run_origin: Dict[str, float] = {}
         # 未测完前卸力；测完复位后从集合移除并位控固定
@@ -295,6 +361,280 @@ class CwLimit(Node):
         self.cli_get = self.create_client(GetAvailableMotors, "get_available_motors")
         self.cli_req = self.create_client(RequestControl, "request_control")
         self.cli_rel = self.create_client(ReleaseControl, "release_control")
+        try:
+            from hightorque_msgs.srv import ResetZero
+
+            self.cli_reset = self.create_client(ResetZero, "reset_zero")
+            self._ResetZero = ResetZero
+        except Exception:
+            self.cli_reset = None
+            self._ResetZero = None
+
+    def setup_left_body_unload(self) -> None:
+        """左半身全程卸力，右臂/右腿标定时不位控。"""
+        self.left_body_unload = set()
+        names: List[str] = []
+        for name in LEFT_BODY_JOINTS:
+            if name not in self.ctrl_names:
+                self.warn(f"[左半身] {name} 不在控制列表，跳过")
+                continue
+            self.left_body_unload.add(name)
+            self.hold_names.discard(name)
+            names.append(name)
+        if not names:
+            self.warn("左半身无可用轴，无法卸力")
+            return
+        self.log(
+            f"左半身卸力 {len(names)} 轴（标定右半身时保持零力矩）"
+        )
+        self.hold_loop(0.35)
+
+    def refresh_left_body_unload(self) -> None:
+        """防止其它步骤把左半身重新加入 hold。"""
+        for name in self.left_body_unload:
+            self.hold_names.discard(name)
+
+    def remember_zero_joint(self, name: str, q_home: float) -> None:
+        if getattr(self.args, "no_write_zero", False):
+            return
+        mid = self.motor_id(name)
+        self.home_q[name] = float(q_home)
+        if mid not in self.zero_motor_ids:
+            self.zero_motor_ids.append(mid)
+
+    def home_from_limit(self, name: str, q_limit_meas: float) -> Optional[float]:
+        """q_home = q_meas_limit - q_ref_limit；结果拨到靠近 0 的连续支路。"""
+        if name not in self.limit_ref:
+            return None
+        q_ref = float(self.limit_ref[name])
+        q_meas = float(q_limit_meas)
+        d = self.seek_dir(name)
+        # 参考限位若明显超出结构行程，多半是 ±π 连续角折叠；收回到 seek 侧结构极限
+        q_ref = self._canonical_limit_ref(name, q_ref, d)
+        # 参考限位与实测限位放到同一连续支路，再相减
+        q_ref_c = unwrap_near(q_ref, q_meas)
+        q_home = q_meas - q_ref_c
+        # 标定正确时 home≈0；拨到 [-π,π] 便于对照左半身标准零位
+        q_home = unwrap_near(q_home, 0.0)
+        if abs(q_home) > 25.0 * DEG:
+            self.warn(
+                f"[{name}] 计算零位偏离 0 达 {q_home / DEG:+.1f}° "
+                f"(实测限位 {q_meas:.4f}, 参考 {q_ref:.2f})；"
+                "请对照左半身标准零位，必要时用 --update-ref 重采参考限位"
+            )
+        return q_home
+
+    def _canonical_limit_ref(self, name: str, q_ref: float, seek_dir: float) -> float:
+        """把明显越界的 yaml 参考限位收到结构行程内（同 seek 方向）。"""
+        # 与 standing_pose.yaml structural_limits_sim_ref_deg 对齐
+        abs_lim = {
+            "r_elbow_joint": 110.0 * DEG,
+            "r_upper_arm_joint": 150.0 * DEG,
+            "r_shoulder_pitch_joint": 150.0 * DEG,
+            "r_shoulder_roll_joint": 180.0 * DEG,
+            "head_pitch_joint": 90.0 * DEG,
+            "head_yaw_joint": 90.0 * DEG,
+            "waist_yaw_joint": 180.0 * DEG,
+            "r_hip_pitch_joint": 150.0 * DEG,
+            "r_hip_roll_joint": 180.0 * DEG,
+            "r_thigh_joint": 165.0 * DEG,
+            "r_calf_joint": 143.0 * DEG,
+            "r_ankle_pitch_joint": 56.0 * DEG,
+            "r_ankle_roll_joint": 45.0 * DEG,
+        }.get(name)
+        if abs_lim is None:
+            return float(q_ref)
+        if abs(q_ref) <= abs_lim + 8.0 * DEG:
+            return float(q_ref)
+        side = 1.0 if float(seek_dir) >= 0.0 else -1.0
+        q_adj = side * abs_lim
+        self.warn(
+            f"[{name}] 参考限位 {q_ref:.2f} 超出结构约 ±{abs_lim:.2f}，"
+            f"按 seek_dir 收为 {q_adj:.2f}"
+        )
+        return float(q_adj)
+
+    def upper_body_homes(self) -> Dict[str, float]:
+        return {
+            n: q
+            for n, q in self.home_q.items()
+            if n in UPPER_BODY_ZERO_JOINTS
+        }
+
+    def upper_body_zero_ids(self) -> List[int]:
+        ids: List[int] = []
+        for name in UPPER_BODY_ZERO_JOINTS:
+            if name not in self.home_q:
+                continue
+            mid = self.motor_id(name)
+            if mid not in ids:
+                ids.append(mid)
+        return ids
+
+    def move_joints_to_homes(
+        self,
+        homes: Dict[str, float],
+        *,
+        note: str = "",
+    ) -> None:
+        """逐轴移到计算零位并核对到位（避免多轴同时动互相顶住）。"""
+        if note:
+            self.log(note)
+        rvel = max(self.restore_vel, 0.2)
+        for name in UPPER_BODY_ZERO_JOINTS:
+            if name not in homes:
+                continue
+            if name not in self.ctrl_names:
+                continue
+            target = homes[name]
+            d = -float(JOINT_META.get(name, {}).get("dir", self.seek_dir(name)))
+            q0 = self.q.get(name, target)
+            tgt = align_goal_along_dir(q0, target, d)
+            self.log(
+                f"[{name}] → 计算零位 {tgt:.4f} rad "
+                f"(约 {tgt / DEG:+.1f}°, 从 {q0:.4f})"
+            )
+            self.hold_names.add(name)
+            self.unload_until_sought.discard(name)
+            dist = abs(tgt - q0)
+            self._move_name(
+                name,
+                tgt,
+                duration=max(1.2, dist / rvel + 0.5),
+                ignore_stop=True,
+                vel=rvel,
+                path_dir=d,
+            )
+            self.hold_q[name] = tgt
+            self.hold_loop(0.35)
+            q_fb = self.q.get(name, tgt)
+            err = abs(unwrap_near(q_fb, tgt) - tgt)
+            if err > 8.0 * DEG:
+                self.warn(
+                    f"[{name}] 未到位: 目标 {tgt:.4f} 反馈 {q_fb:.4f} "
+                    f"误差 {err / DEG:.1f}°"
+                )
+            else:
+                self.log(
+                    f"[{name}] 已到位: 反馈 {q_fb:.4f} rad "
+                    f"(误差 {err / DEG:.1f}°)"
+                )
+            # 更新记录为实际指令目标，供写零提示
+            self.home_q[name] = tgt
+
+    def prompt_write_zero(self, homes: Optional[Dict[str, float]] = None) -> bool:
+        """打印计算零位状态，再询问是否一键写零。"""
+        show = homes if homes is not None else self.home_q
+        print("", flush=True)
+        print("=" * 60, flush=True)
+        print("  腰+上半身已到【计算零位】（非电机真零；腿/左半身未改）", flush=True)
+        print("=" * 60, flush=True)
+        for name in UPPER_BODY_ZERO_JOINTS:
+            if name not in show:
+                continue
+            q_cmd = show[name]
+            q_fb = self.q.get(name, float("nan"))
+            mid = self.motor_id(name)
+            err = abs(unwrap_near(q_fb, q_cmd) - q_cmd) / DEG
+            flag = "OK" if err < 8.0 else "偏差大"
+            print(
+                f"  {name:28s}  id={mid:2d}  "
+                f"计算零位={q_cmd:+.4f}  反馈={q_fb:+.4f} rad "
+                f"({q_fb / DEG:+.1f}°)  [{flag}]",
+                flush=True,
+            )
+        print("=" * 60, flush=True)
+        print("  若确认姿态接近左半身镜像/标准站姿，可对上述电机一键写零", flush=True)
+        print("  （当前角 → 电机 0 并写 Flash；腿与左半身不写）", flush=True)
+        print("=" * 60, flush=True)
+        if getattr(self.args, "no_write_zero", False):
+            print("已指定 --no-write-zero，跳过写零", flush=True)
+            return False
+        if getattr(self.args, "yes", False):
+            print("已指定 --yes，自动确认写零", flush=True)
+            return True
+        while True:
+            try:
+                ans = input("是否对【腰+上半身】执行电机一键写零？[y/N]: ").strip().lower()
+            except EOFError:
+                print("无交互输入，跳过写零", flush=True)
+                return False
+            if ans in ("y", "yes"):
+                return True
+            if ans in ("n", "no", ""):
+                return False
+            print("请输入 y 或 n", flush=True)
+
+    def move_hold_pose(
+        self,
+        targets: Dict[str, float],
+        *,
+        path_dir: Optional[Dict[str, float]] = None,
+        note: str = "",
+    ) -> None:
+        if not targets:
+            return
+        if note:
+            self.log(note)
+        rvel = max(self.restore_vel, 0.2)
+        planned = dict(targets)
+        dirs = dict(path_dir or {})
+        for n, t in list(planned.items()):
+            qn = self.q.get(n, t)
+            if n in dirs:
+                planned[n] = align_goal_along_dir(qn, t, dirs[n])
+            else:
+                planned[n] = unwrap_near(t, qn)
+        max_dist = max(abs(self.q.get(n, t) - t) for n, t in planned.items())
+        for n in planned:
+            self.hold_names.add(n)
+            self.unload_until_sought.discard(n)
+        self._move_names(
+            planned,
+            duration=max(1.5, max_dist / rvel + 0.5),
+            ignore_stop=True,
+            vel=rvel,
+            path_dir=dirs or None,
+        )
+        for n, t in planned.items():
+            self.hold_q[n] = t
+        self.hold_loop(0.4)
+
+    def call_reset_zero(self, motor_ids: Sequence[int]) -> bool:
+        if not motor_ids:
+            self.warn("没有需要写零的电机")
+            return False
+        if self.cli_reset is None or self._ResetZero is None:
+            self.warn("ResetZero 服务接口不可用，请先编译 hightorque_msgs / midware")
+            return False
+        if not self.cli_reset.wait_for_service(timeout_sec=3.0):
+            self.warn("/reset_zero 服务不可用")
+            return False
+        req = self._ResetZero.Request()
+        req.timeout_ms = 60000
+        if not hasattr(req, "motor_ids"):
+            self.warn(
+                "当前 /reset_zero 不支持 motor_ids（需重编译 hightorque_msgs + midware）。"
+                "已走到标定0位，但未写零。"
+            )
+            return False
+        req.motor_ids = [int(x) for x in motor_ids]
+        self.log(
+            "调用 /reset_zero，电机索引: "
+            + ", ".join(str(i) for i in req.motor_ids)
+        )
+        try:
+            resp = self.call_srv(self.cli_reset, req, timeout=70.0)
+        except Exception as exc:
+            self.warn(f"/reset_zero 调用失败: {exc}")
+            return False
+        ok = bool(getattr(resp, "success", False))
+        msg = getattr(resp, "message", "")
+        if ok:
+            self.log(f"写零成功: {msg}")
+        else:
+            self.warn(f"写零失败: {msg}")
+        return ok
 
     def apply_group(self, group: str) -> None:
         """切换当前扫描组（同一次控制权内，避免组间卸力卡顿）。"""
@@ -585,6 +925,13 @@ class CwLimit(Node):
                 torques.append(0.05)
                 velocities.append(0.0)
                 positions.append(float(q_now))
+            elif name in self.left_body_unload:
+                # 左半身：全程零力矩，不位控
+                kps.append(0.0)
+                kds.append(0.0)
+                torques.append(0.0)
+                velocities.append(0.0)
+                positions.append(float(q_now))
             elif name in self.hold_names or (
                 idle_mode == "leg_hold" and name in leg_set
             ):
@@ -828,70 +1175,64 @@ class CwLimit(Node):
             rec.q_travel_rad = rec.q_enc_limit - rec.start_q
             rec.stall_tau = self.tau.get(name, rec.tau_bias)
         q_now = self.q.get(name, rec.start_q)
-        q_lim = rec.q_enc_limit if rec.q_enc_limit is not None else q_now
+        q_lim = float(rec.q_enc_limit if rec.q_enc_limit is not None else q_now)
         back = q_lim - d * self.backoff
-        # 起点已在限位：回到 start 会再次顶死，改为停在退开后的 back
-        start_was_limit = abs(q_lim - rec.start_q) < 1.5 * DEG
-        restore_goal = back if start_was_limit else rec.start_q
+        q_home = self.home_from_limit(name, q_lim)
+        if q_home is not None:
+            q_home_aligned = align_goal_along_dir(q_lim, q_home, -float(d))
+            self.remember_zero_joint(name, q_home_aligned)
+            self.log(
+                f"[{name}] 已记录计算零位 {q_home_aligned:.4f} "
+                f"(参考 {self.limit_ref[name]:.2f})；本轴先回寻限位起点"
+            )
+            restore_goal = rec.start_q
+        else:
+            start_was_limit = abs(q_lim - rec.start_q) < 1.5 * DEG
+            restore_goal = back if start_was_limit else rec.start_q
+            self.warn(f"[{name}] 无参考限位，回退目标 {restore_goal:.4f}")
         restore_dist = abs(q_now - restore_goal)
         rvel = max(self.restore_vel, 0.2)
         restore_dur = max(self.restore_sec, restore_dist / rvel + 0.3)
-        if start_was_limit:
-            self.log(
-                f"[{name}] 起点即限位：退到 {back:.4f} 并保持 "
-                f"(限位 {q_lim:.4f}，不回到起点以免再次顶死)"
-            )
-        else:
-            self.log(
-                f"[{name}] 离开限位：先退到 {back:.4f}，再回到起点 {rec.start_q:.4f} "
-                f"(当前 {q_now:.4f}，约 {abs(q_now - rec.start_q) / DEG:.1f}°，恢复 {rvel:.1f} rad/s)"
-            )
-        # 即使 Ctrl+C，也要先离开硬限位再回起点，不能因 _stopping 跳过复位
+        self.log(
+            f"[{name}] 离开限位：先退到 {back:.4f}，再回起点 {restore_goal:.4f} "
+            f"(当前 {q_now:.4f}，原路 -seek_dir)"
+        )
+        rev = -float(d)
         self._move_name(
             name,
             back,
             duration=max(0.3, abs(self.backoff) / rvel + 0.15),
             ignore_stop=True,
             vel=rvel,
+            path_dir=rev,
         )
-        if not start_was_limit:
-            self._move_name(
-                name, rec.start_q, duration=restore_dur, ignore_stop=True, vel=rvel
-            )
+        self._move_name(
+            name,
+            restore_goal,
+            duration=restore_dur,
+            ignore_stop=True,
+            vel=rvel,
+            path_dir=rev,
+        )
         rec.restored_q = self.q.get(name, restore_goal)
         if rec.status == "limit":
             rec.status = "ok"
         restore_target = restore_goal
-        # 测完后：退出卸力列表，位控固定在恢复位置
         if (
             self.chain_hold
             or self.group_cfg.get("hold_after_restore")
             or name in self.unload_until_sought
-            or start_was_limit
+            or True
         ):
             self.unload_until_sought.discard(name)
             self.hold_q[name] = restore_target
             self.hold_names.add(name)
             self.hold_loop(0.3)
-            if name in ("r_ankle_roll_joint", "r_ankle_pitch_joint") or self.chain_hold or start_was_limit:
-                self.log(f"[{name}] 已固定在恢复位置 {restore_target:.4f} rad")
+            self.log(f"[{name}] 已固定在寻限位起点 {restore_target:.4f} rad")
         err_deg = abs(rec.restored_q - restore_target) / DEG
         self.log(
             f"[{name}] 复位 → {rec.restored_q:.4f} rad "
             f"(目标 {restore_target:.4f}, 误差 {err_deg:.1f}°, status={rec.status})"
-        )
-
-    def _move_name(
-        self,
-        name: str,
-        target: float,
-        duration: float,
-        *,
-        ignore_stop: bool = False,
-        vel: Optional[float] = None,
-    ) -> None:
-        self._move_names(
-            {name: target}, duration, ignore_stop=ignore_stop, vel=vel
         )
 
     def _move_names(
@@ -901,11 +1242,27 @@ class CwLimit(Node):
         *,
         ignore_stop: bool = False,
         vel: Optional[float] = None,
+        path_dir: Optional[Dict[str, float]] = None,
     ) -> None:
         if not targets:
             return
         cmd_vel = abs(vel if vel is not None else self.restore_vel)
         starts = {n: self.q.get(n, t) for n, t in targets.items()}
+        aligned: Dict[str, float] = {}
+        for name, target in targets.items():
+            q0 = starts[name]
+            if path_dir and name in path_dir:
+                # 指定运动方向（如限位返回：-seek_dir），禁止圆上最短弧
+                tgt = align_goal_along_dir(q0, target, path_dir[name])
+                self.log(
+                    f"[{name}] 原路返回: {q0:.4f} → {tgt:.4f} "
+                    f"(dir={path_dir[name]:+.0f}, 原始目标 {target:.4f})"
+                )
+            else:
+                # 默认也按连续支路靠近，避免 ±π 折叠
+                tgt = unwrap_near(target, q0)
+            aligned[name] = tgt
+        targets = aligned
         max_dist = max(abs(targets[n] - starts[n]) for n in targets)
         duration = max(duration, max_dist / max(cmd_vel, 0.2) + 0.25)
         steps = max(1, int(duration * self.rate_hz))
@@ -929,10 +1286,11 @@ class CwLimit(Node):
         while rclpy.ok():
             if self._stopping and not ignore_stop:
                 break
-            pending = [
-                n for n, tgt in targets.items()
-                if abs(self.q.get(n, tgt) - tgt) >= 5.0 * DEG
-            ]
+            pending = []
+            for n, tgt in targets.items():
+                qn = unwrap_near(self.q.get(n, tgt), tgt)
+                if abs(qn - tgt) >= 5.0 * DEG:
+                    pending.append(n)
             if not pending:
                 break
             if time.monotonic() - settle_t0 > settle_budget:
@@ -943,6 +1301,25 @@ class CwLimit(Node):
                 break
             self.publish_targets(self.hold_q, moving=moving, move_vel=cmd_vel)
             self.spin_for(dt)
+
+    def _move_name(
+        self,
+        name: str,
+        target: float,
+        duration: float,
+        *,
+        ignore_stop: bool = False,
+        vel: Optional[float] = None,
+        path_dir: Optional[float] = None,
+    ) -> None:
+        pd = {name: path_dir} if path_dir is not None else None
+        self._move_names(
+            {name: target},
+            duration,
+            ignore_stop=ignore_stop,
+            vel=vel,
+            path_dir=pd,
+        )
 
     def _prep_delta(self, name: str, delta_deg: float) -> float:
         if name == "r_hip_roll_joint" and self.args.flip_hip_roll:
@@ -1107,7 +1484,40 @@ class CwLimit(Node):
             else:
                 self.hold_loop(0.3)
 
+    def _replace_limit_block(self, existing: str, cfg: Dict[str, Any], block: str) -> str:
+        """替换 yaml 中限位段；兼容 (generated) / (FIXED REF) 等旧标题。"""
+        begin = cfg["scan_begin"]
+        end = cfg["scan_end"]
+        yaml_key = cfg["yaml_key"]
+        if begin in existing and end in existing:
+            pre = existing[: existing.index(begin)]
+            post = existing[existing.index(end) + len(end) :]
+            return pre.rstrip() + "\n\n" + block + post.lstrip("\n")
+        if end in existing:
+            pre = existing[: existing.index(end)]
+            lines = pre.split("\n")
+            cut = len(lines)
+            for i in range(len(lines) - 1, -1, -1):
+                line = lines[i]
+                if line.startswith("# ===") and "limit_scan" in line:
+                    cut = i
+                    break
+                if line.strip() == f"{yaml_key}:":
+                    # 往上找注释头
+                    j = i
+                    while j > 0 and (lines[j - 1].startswith("#") or not lines[j - 1].strip()):
+                        j -= 1
+                    cut = j if lines[j].startswith("# ===") else j
+                    break
+            pre = "\n".join(lines[:cut])
+            post = existing[existing.index(end) + len(end) :]
+            return pre.rstrip() + "\n\n" + block + post.lstrip("\n")
+        return existing.rstrip() + "\n\n" + block
+
     def write_yaml(self) -> None:
+        if not self.update_ref:
+            self.log("参考限位固定，跳过写入（需要时加 --update-ref）")
+            return
         stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         lines: List[str] = [
             self.scan_begin,
@@ -1137,18 +1547,24 @@ class CwLimit(Node):
         if os.path.isfile(self.yaml_path):
             with open(self.yaml_path, "r", encoding="utf-8") as f:
                 existing = f.read()
-        if self.scan_begin in existing and self.scan_end in existing:
-            pre = existing[: existing.index(self.scan_begin)]
-            post = existing[existing.index(self.scan_end) + len(self.scan_end) :]
-            text = pre.rstrip() + "\n\n" + block + post.lstrip("\n")
-        else:
-            text = existing.rstrip() + "\n\n" + block
+        text = self._replace_limit_block(
+            existing,
+            {
+                "scan_begin": self.scan_begin,
+                "scan_end": self.scan_end,
+                "yaml_key": self.yaml_key,
+            },
+            block,
+        )
         with open(self.yaml_path, "w", encoding="utf-8") as f:
             f.write(text)
         self.log(f"已写入 {self.yaml_path}")
 
     def write_yaml_group(self, group: str, names: Sequence[str]) -> None:
-        """按组把 all_records / records 写入对应 yaml 段落。"""
+        """默认不覆盖固定参考限位；仅 --update-ref 时写入。"""
+        if not self.update_ref:
+            self.log(f"[{group}] 参考限位固定，跳过写入（需要时加 --update-ref）")
+            return
         cfg = GROUPS[group]
         stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         lines: List[str] = [
@@ -1179,13 +1595,7 @@ class CwLimit(Node):
         if os.path.isfile(self.yaml_path):
             with open(self.yaml_path, "r", encoding="utf-8") as f:
                 existing = f.read()
-        begin, end = cfg["scan_begin"], cfg["scan_end"]
-        if begin in existing and end in existing:
-            pre = existing[: existing.index(begin)]
-            post = existing[existing.index(end) + len(end) :]
-            text = pre.rstrip() + "\n\n" + block + post.lstrip("\n")
-        else:
-            text = existing.rstrip() + "\n\n" + block
+        text = self._replace_limit_block(existing, cfg, block)
         with open(self.yaml_path, "w", encoding="utf-8") as f:
             f.write(text)
         self.log(f"已写入 [{group}] → {self.yaml_path}")
@@ -1263,33 +1673,45 @@ class CwLimit(Node):
         self.hold_q[name] = cmd_q
 
         lead = (cmd_q - q) * d
-        at_protect = (
-            abs(tau) >= rec.tau_protect * 0.9
-            or abs(tau_rel) >= rec.tau_protect * 0.9
+        tau_abs = abs(tau)
+        tau_rel_abs = abs(tau_rel)
+        # 并行多轴时 τ_rel 易受耦合干扰；强制返回必须以 |τ| 为准
+        at_protect = tau_abs >= rec.tau_protect * 0.85
+        at_protect_rel = (
+            tau_rel_abs >= rec.tau_protect * 0.92
+            and tau_abs >= rec.tau_protect * 0.45
         )
         moved = abs(q - rec.start_q)
         start_at_limit = (
             elapsed >= 0.45
             and moved < 1.0 * DEG
             and lead >= 0.06
-            and (
-                at_protect
-                or abs(tau) >= rec.tau_protect * 0.85
-                or abs(tau_rel) >= rec.tau_protect * 0.85
-            )
+            and (at_protect or at_protect_rel)
         )
         travel_ok = travel >= self.min_travel or start_at_limit
 
+        freeze_eps = 0.5 * DEG
+        if freeze_t0 is None or freeze_q is None or abs(q - freeze_q) > freeze_eps:
+            st["freeze_t0"] = now
+            st["freeze_q"] = q
+            st["stall_t0"] = None
+            window.clear()
+            frozen = False
+        else:
+            window.append(q)
+            frozen = travel_ok and (now - float(freeze_t0)) >= self.stall_hold
+
         if force_tau_sec > 0.0 and travel_ok:
-            if at_protect:
+            if at_protect and frozen:
                 st["tau_below_t0"] = None
                 if tau_full_t0 is None:
                     st["tau_full_t0"] = now
                     if not force_armed_logged:
                         st["force_armed_logged"] = True
                         st["log"] = (
-                            f"[{name}] 已达保护力矩 |τ|={abs(tau):.2f}，"
-                            f"{force_tau_sec:.1f}s 内强制记限位并返回"
+                            f"[{name}] 已达保护力矩 |τ|={tau_abs:.2f} "
+                            f"(rel {tau_rel:+.2f}, bias {rec.tau_bias:+.2f})，"
+                            f"位置停滞，{force_tau_sec:.1f}s 内强制记限位并返回"
                         )
                 elif now - tau_full_t0 >= force_tau_sec:
                     rec.q_enc_limit = median(list(window)) if window else q
@@ -1297,7 +1719,7 @@ class CwLimit(Node):
                     rec.stall_tau = tau
                     rec.status = "limit"
                     rec.note = (
-                        f"满力矩强制限位 {force_tau_sec:.1f}s |τ|={abs(tau):.2f} "
+                        f"满力矩强制限位 {force_tau_sec:.1f}s |τ|={tau_abs:.2f} "
                         f"(保护 {rec.tau_protect:.2f}), 行程 {rec.q_travel_rad / DEG:.2f} deg"
                     )
                     st["log"] = f"[{name}] 强制超时恢复: {rec.note}, q_limit={rec.q_enc_limit:.4f}"
@@ -1316,46 +1738,33 @@ class CwLimit(Node):
             rec.stall_tau = tau
             rec.status = "limit"
             rec.note = (
-                f"起点已在硬件限位 |τ|={abs(tau):.2f} lead={lead:.3f} "
+                f"起点已在硬件限位 |τ|={tau_abs:.2f} lead={lead:.3f} "
                 f"(保护 {rec.tau_protect:.2f}), 移动 {moved / DEG:.2f} deg"
             )
             st["log"] = f"[{name}] 起点限位，开始返回: {rec.note}, q_limit={rec.q_enc_limit:.4f}"
             return True, st
 
-        freeze_eps = 0.5 * DEG
-        if freeze_t0 is None or freeze_q is None or abs(q - freeze_q) > freeze_eps:
-            st["freeze_t0"] = now
-            st["freeze_q"] = q
-            st["stall_t0"] = None
-            window.clear()
-        else:
-            window.append(q)
-            frozen = (
-                travel_ok
-                and freeze_t0 is not None
-                and now - freeze_t0 >= self.stall_hold
-            )
+        if frozen:
             cmd_ahead = lead >= max(self.max_lead(name), 0.12)
             torque_hit = travel_ok and (
-                abs(tau_rel) >= rec.tau_protect * 0.92
-                or abs(tau) >= rec.tau_protect * 0.92
-                or (abs(tau) >= rec.tau_protect * 0.85 and cmd_ahead)
-                or (frozen and abs(tau) >= rec.tau_protect * 0.85 and lead >= 0.08)
+                tau_abs >= rec.tau_protect * 0.92
+                or at_protect_rel
+                or (tau_abs >= rec.tau_protect * 0.85 and cmd_ahead)
+                or (tau_abs >= rec.tau_protect * 0.75 and lead >= 0.08)
             )
             if stall_t0 is None and torque_hit:
                 st["stall_t0"] = now
                 stall_t0 = now
             hardware_stop = (
-                frozen
-                and torque_hit
+                torque_hit
                 and stall_t0 is not None
                 and now - stall_t0 >= self.stall_hold
             )
-            if frozen and not torque_hit and not warned_soft:
+            if not torque_hit and not warned_soft:
                 st["warned_soft"] = True
                 st["log"] = (
-                    f"[{name}] 位置停滞但 |τ|={abs(tau):.2f} lead={lead:.3f} "
-                    f"< 保护 {rec.tau_protect:.2f}，继续推"
+                    f"[{name}] 位置停滞但 |τ|={tau_abs:.2f} rel={tau_rel:+.2f} "
+                    f"lead={lead:.3f} < 保护 {rec.tau_protect:.2f}，继续推"
                 )
             if hardware_stop:
                 rec.q_enc_limit = median(list(window)) if window else q
@@ -1363,7 +1772,7 @@ class CwLimit(Node):
                 rec.stall_tau = tau
                 rec.status = "limit"
                 rec.note = (
-                    f"硬件限位 |τ|={abs(tau):.2f} |τ-τb|={abs(tau_rel):.2f} "
+                    f"硬件限位 |τ|={tau_abs:.2f} |τ-τb|={tau_rel_abs:.2f} "
                     f"lead={lead:.3f} (保护 {rec.tau_protect:.2f}), "
                     f"行程 {rec.q_travel_rad / DEG:.2f} deg"
                 )
@@ -1410,6 +1819,8 @@ class CwLimit(Node):
             restore_dur: float = 1.0
             restore_start: float = 0.0
             start_was_limit: bool = False
+            path_dir: float = 0.0
+            restore_q0: float = 0.0  # 进入复位时的连续起点
 
         workers = [Lane(name=k, queue=list(v)) for k, v in lanes.items() if v]
 
@@ -1431,7 +1842,12 @@ class CwLimit(Node):
                     tau_abort=self.tau_abort_of(name),
                 )
                 rec.start_q = float(self.q.get(name, 0.0))
-                rec.tau_bias = float(self.tau.get(name, 0.0))
+                self.hold_names.add(name)
+                rec.tau_bias = self.sample_bias(name)
+                self.log(
+                    f"[{name}] 起点 {rec.start_q:.4f} rad, "
+                    f"τ_bias={rec.tau_bias:.3f} N·m"
+                )
                 self.records[name] = rec
                 self.all_records[name] = rec
                 w.rec = rec
@@ -1499,19 +1915,46 @@ class CwLimit(Node):
                             w.rec.q_travel_rad = w.rec.q_enc_limit - w.rec.start_q
                         q_lim = float(w.rec.q_enc_limit)
                         d = w.rec.seek_dir_urdf
-                        w.restore_back = q_lim - d * self.backoff
-                        w.start_was_limit = abs(q_lim - w.rec.start_q) < 1.5 * DEG
-                        w.restore_goal = (
+                        q_now_fb = float(self.q.get(w.rec.name, q_lim))
+                        # 限位拨到与当前反馈同连续支路，避免 ±π 折叠后走最短弧
+                        q_lim_c = unwrap_near(q_lim, q_now_fb)
+                        w.path_dir = -float(d)
+                        w.restore_q0 = q_now_fb
+                        w.restore_back = align_goal_along_dir(
+                            q_now_fb, q_lim_c - d * self.backoff, w.path_dir
+                        )
+                        # 用与反馈同连续支路的限位算零位；本轴先回寻限位起点
+                        q_home = self.home_from_limit(w.rec.name, q_lim_c)
+                        if q_home is not None and not getattr(
+                            self.args, "no_write_zero", False
+                        ):
+                            q_home_aligned = align_goal_along_dir(
+                                q_lim_c, q_home, w.path_dir
+                            )
+                            self.remember_zero_joint(w.rec.name, q_home_aligned)
+                            self.log(
+                                f"[{w.rec.name}] 已记录计算零位 {q_home_aligned:.4f} "
+                                f"(参考限位 {self.limit_ref[w.rec.name]:.2f}, "
+                                f"连续限位 {q_lim_c:.4f})；本轴先回寻限位起点"
+                            )
+                        else:
+                            self.warn(f"[{w.rec.name}] 无参考限位，无法计算零位")
+                        # 撞限位后先沿原路回到本轴寻限位起点
+                        w.start_was_limit = abs(q_lim_c - w.rec.start_q) < 1.5 * DEG
+                        raw_goal = (
                             w.restore_back if w.start_was_limit else w.rec.start_q
                         )
-                        w.restore_start = float(self.q.get(w.rec.name, q_lim))
-                        dist = abs(w.restore_start - w.restore_goal) + abs(self.backoff)
+                        w.restore_goal = align_goal_along_dir(
+                            w.restore_back, raw_goal, w.path_dir
+                        )
+                        w.restore_start = q_now_fb
+                        dist = abs(w.restore_goal - w.restore_start) + abs(self.backoff)
                         w.restore_dur = max(self.restore_sec, dist / rvel + 0.4)
                         w.restore_t0 = time.monotonic()
                         w.phase = "restore"
                         self.log(
-                            f"[{w.rec.name}] 并行复位 → {w.restore_goal:.4f} "
-                            f"(先退 {w.restore_back:.4f})"
+                            f"[{w.rec.name}] 离开限位 → 目标 {w.restore_goal:.4f} "
+                            f"(先退 {w.restore_back:.4f}, 原路)"
                         )
                     else:
                         seeking.append(w.rec.name)
@@ -1520,17 +1963,17 @@ class CwLimit(Node):
                 elif w.phase == "restore" and w.rec is not None:
                     name = w.rec.name
                     elapsed = time.monotonic() - w.restore_t0
-                    # 前 30% 时间退到 back，其余到 goal
+                    # 先沿原路退到 back，再沿原路到 goal（连续插值，禁止最短弧）
                     split = max(0.25, abs(self.backoff) / rvel + 0.1)
                     if elapsed < split:
-                        tgt = w.restore_back
+                        t1 = min(1.0, elapsed / max(split, 1e-3))
+                        s = 3 * t1 * t1 - 2 * t1 * t1 * t1
+                        tgt = w.restore_q0 + (w.restore_back - w.restore_q0) * s
                     else:
-                        tgt = w.restore_goal
                         t2 = (elapsed - split) / max(w.restore_dur - split, 0.2)
                         t2 = min(1.0, max(0.0, t2))
                         s = 3 * t2 * t2 - 2 * t2 * t2 * t2
-                        q0 = w.restore_back
-                        tgt = q0 + (w.restore_goal - q0) * s
+                        tgt = w.restore_back + (w.restore_goal - w.restore_back) * s
                     self.hold_q[name] = tgt
                     moving.append(name)
                     if elapsed >= w.restore_dur:
@@ -1571,15 +2014,17 @@ class CwLimit(Node):
     def run_parallel(self) -> int:
         """
         并行流水线:
+          0) 左半身卸力并保持
           1) 腰转 90° 并保持
           2) 腿预备（踝/膝/髋）
           3) 手 + 头 + 腿 三车道同时寻限位并各自恢复
           4) 标定腰（从当前位置继续转到限位）
-          5) 全身回到启动姿态
+          5) 回初始姿态
         """
         need: List[str] = [PARALLEL_WAIST]
         for js in PARALLEL_LANES.values():
             need.extend(js)
+        need.extend(LEFT_BODY_JOINTS)
         need = list(dict.fromkeys(need))
         missing = [n for n in need if n not in self.js_names]
         if missing:
@@ -1587,13 +2032,30 @@ class CwLimit(Node):
 
         if self.args.dry_run:
             self.log("dry-run 并行流水线:")
+            self.log(f"  参考限位 {len(self.limit_ref)} 轴: " + ", ".join(sorted(self.limit_ref)[:6]) + "...")
+            self.log("  0) 左半身卸力")
             self.log("  1) 腰 -90°")
             self.log("  2) 腿预备(踝/膝/髋)")
             for k, js in PARALLEL_LANES.items():
                 self.log(f"  3) 车道 [{k}] 同时: " + ", ".join(js))
-            self.log(f"  4) 标定腰 {PARALLEL_WAIST}")
-            self.log("  5) 全身恢复启动姿态")
+            self.log(f"  4) 腰继续右转撞限位")
+            self.log("  5) 回初始姿态（--no-write-zero 时不走计算零位）")
             return 0
+
+        if not self.limit_ref:
+            raise RuntimeError(
+                f"未读到参考限位，请检查 {self.yaml_path} 中 "
+                "right_arm_limit_q / waist_neck_limit_q / right_leg_limit_q"
+            )
+        if self.update_ref:
+            self.log("限位扫描结果将覆写 standing_pose.yaml（--update-ref）")
+        else:
+            self.log(f"已加载参考限位 {len(self.limit_ref)} 轴（不加 --update-ref 则不覆写 yaml）")
+        if getattr(self.args, "no_write_zero", False):
+            self.log("不写零：完成后仅恢复初始姿态")
+        else:
+            self.log("写零: 限位完成后腰+上半身移到计算零位，再确认写零")
+        self.log("左半身: 全程卸力（不位控）")
 
         self.group_cfg = GROUPS["right_leg"]  # 力矩/idle 以腿组为准
         self.group_joints = GROUPS["right_leg"]["joints"]
@@ -1604,6 +2066,11 @@ class CwLimit(Node):
                 self.hold_q[name] = self.q.get(name, 0.0)
                 self.hold_names.add(name)
             self.hold_loop(0.3)
+
+            # ---- 0) 左半身卸力 ----
+            self.log(">>>>>>>> [parallel] 0/5 左半身卸力 <<<<<<<<")
+            self.setup_left_body_unload()
+
             self.run_origin = {
                 n: float(self.q.get(n, 0.0)) for n in self.ctrl_names
             }
@@ -1611,6 +2078,7 @@ class CwLimit(Node):
 
             # ---- 1) 腰转 90° ----
             self.log(">>>>>>>> [parallel] 1/5 腰转 90° <<<<<<<<")
+            self.refresh_left_body_unload()
             waist_delta = self._prep_delta(PARALLEL_WAIST, -90.0)
             w0 = self.q.get(PARALLEL_WAIST, 0.0)
             w1 = w0 + waist_delta * DEG
@@ -1623,20 +2091,25 @@ class CwLimit(Node):
                 vel=self.restore_vel,
             )
             self.hold_q[PARALLEL_WAIST] = w1
+            self.refresh_left_body_unload()
             self.hold_loop(0.3)
 
             # ---- 2) 腿预备 ----
             self.log(">>>>>>>> [parallel] 2/5 腿预备 <<<<<<<<")
+            self.refresh_left_body_unload()
             self.unload_until_sought = set(
                 GROUPS["right_leg"].get("unload_until_sought", ())
             )
             for n in self.unload_until_sought:
                 self.hold_names.discard(n)
             self.run_prep_steps(self._prep_steps_skip_waist())
+            self.refresh_left_body_unload()
 
             # ---- 3) 手/头/腿并行 ----
             self.log(">>>>>>>> [parallel] 3/5 手+头+腿并行寻限位 <<<<<<<<")
+            self.refresh_left_body_unload()
             self.seek_lanes_parallel(PARALLEL_LANES)
+            self.refresh_left_body_unload()
             # 写臂/头/腿（头写入 waist_neck，腰稍后再写）
             self.write_yaml_group("right_arm", PARALLEL_LANES["arm"])
             head_names = list(PARALLEL_LANES["head"])
@@ -1649,6 +2122,7 @@ class CwLimit(Node):
                     ">>>>>>>> [parallel] 4/5 腰继续向右撞限位后恢复 "
                     f"(seek_dir={PARALLEL_WAIST_SEEK_DIR:+.0f}) <<<<<<<<"
                 )
+                self.refresh_left_body_unload()
                 self.hold_names.add(PARALLEL_WAIST)
                 # 强制与预备右转同向，避免被其它组 dir 覆盖
                 JOINT_META[PARALLEL_WAIST]["dir"] = float(PARALLEL_WAIST_SEEK_DIR)
@@ -1668,45 +2142,58 @@ class CwLimit(Node):
                     list(PARALLEL_LANES["head"]) + [PARALLEL_WAIST],
                 )
 
-            # ---- 5) 全身恢复 ----
-            self.log(">>>>>>>> [parallel] 5/5 全身恢复启动姿态 <<<<<<<<")
-            planned = {
+            # ---- 5) 回初始姿态（不写零、不移动到计算零位）----
+            self.log(">>>>>>>> [parallel] 5/5 恢复到标定初始姿态 <<<<<<<<")
+            self.refresh_left_body_unload()
+
+            origin_pose = {
                 n: o
                 for n, o in self.run_origin.items()
-                if n in self.ctrl_names
+                if n in self.ctrl_names and n not in self.left_body_unload
             }
-            # 优先腿预备相关轴一起回；其余一起回
-            if planned:
-                rvel = max(self.restore_vel, 0.2)
-                max_dist = max(
-                    abs(self.q.get(n, t) - t) for n, t in planned.items()
-                )
-                for n in planned:
-                    self.hold_names.add(n)
-                    self.unload_until_sought.discard(n)
-                self._move_names(
-                    planned,
-                    duration=max(1.5, max_dist / rvel + 0.5),
-                    ignore_stop=True,
-                    vel=rvel,
-                )
-                for n, t in planned.items():
-                    self.hold_q[n] = t
-                self.hold_loop(0.4)
+            self.move_hold_pose(
+                origin_pose,
+                note="限位标定完成：恢复到【开始标定】时的初始姿态",
+            )
+            self.refresh_left_body_unload()
+
+            if getattr(self.args, "no_write_zero", False):
+                self.log("已指定 --no-write-zero：跳过计算零位移动与写零")
+                self.log("并行流水线完成")
+                return 0
+
+            homes_ub = self.upper_body_homes()
+            if not homes_ub:
+                self.warn("腰/上半身没有计算出任何零位，结束（检查 yaml 参考限位）")
+                self.log("并行流水线完成")
+                return 0
+
+            self.move_joints_to_homes(
+                homes_ub,
+                note=(
+                    "仅移动【腰+上半身】到计算零位"
+                    "（q_home = 实测限位 - 参考限位；右腿不动）"
+                ),
+            )
+            self.refresh_left_body_unload()
+            self.hold_loop(0.3)
+
+            do_zero = self.prompt_write_zero(homes_ub)
+            if do_zero:
+                ids = self.upper_body_zero_ids()
+                self.log("用户确认写零，释放控制权后调用 /reset_zero …")
+                self.release_group()
+                self.call_reset_zero(ids)
+            else:
+                self.log("已跳过写零。腰+上半身仍保持在计算零位附近；腿未改。")
             self.log("并行流水线完成")
             return 0
         finally:
-            try:
-                if self.all_records:
-                    self.write_yaml_group("right_arm", PARALLEL_LANES["arm"])
-                    self.write_yaml_group(
-                        "waist_neck",
-                        list(PARALLEL_LANES["head"]) + [PARALLEL_WAIST],
-                    )
-                    self.write_yaml_group("right_leg", PARALLEL_LANES["leg"])
-            except Exception as exc:
-                self.warn(f"写 yaml 失败: {exc}")
-            self.release_group()
+            if self.uuid:
+                try:
+                    self.release_group()
+                except Exception:
+                    pass
 
     def run_one_group(self) -> None:
         for n in self.unload_until_sought:
@@ -1852,6 +2339,39 @@ def median(xs: Sequence[float]) -> float:
     return 0.5 * (ys[n // 2 - 1] + ys[n // 2])
 
 
+def unwrap_near(q: float, ref: float) -> float:
+    """把 q 拨到与 ref 同连续支路（±2π），避免跨 ±π 跳变。"""
+    two_pi = 2.0 * math.pi
+    while q - ref > math.pi:
+        q -= two_pi
+    while q - ref < -math.pi:
+        q += two_pi
+    return q
+
+
+def align_goal_along_dir(q_now: float, q_goal: float, move_dir: float) -> float:
+    """选择 q_goal+2πk，使 (goal-now) 与 move_dir 同向（原路/指定方向），而非圆上最短弧。"""
+    if abs(move_dir) < 1e-9:
+        return unwrap_near(q_goal, q_now)
+    two_pi = 2.0 * math.pi
+    sense = 1.0 if move_dir > 0 else -1.0
+    best: Optional[float] = None
+    best_abs = float("inf")
+    for k in range(-4, 5):
+        cand = q_goal + k * two_pi
+        delta = cand - q_now
+        if delta * sense < -1e-9:
+            continue
+        ad = abs(delta)
+        if ad < best_abs:
+            best_abs = ad
+            best = cand
+    if best is not None:
+        return best
+    # 极端情况：仍强制沿 sense 走一整圈以上
+    return q_now + sense * abs(unwrap_near(q_goal, q_now) - q_now)
+
+
 def quantize_limit_rad(v: float, step_deg: float = 0.5) -> float:
     """限位角按 step_deg（默认 0.5°）取整，再保留 rad 两位小数。"""
     step = step_deg * DEG
@@ -1878,7 +2398,30 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     p.add_argument(
         "--parallel",
         action="store_true",
-        help="并行流水线：腰先转90° → 手/头/腿同时寻限位 → 再标腰 → 全身恢复",
+        help="并行流水线：腰先转90° → 手/头/腿同时寻限位 → 再标腰 → 标定0位写零",
+    )
+    p.add_argument(
+        "--write-zero",
+        dest="write_zero",
+        action="store_true",
+        default=True,
+        help="（保留）允许在确认后写零；默认开，最终仍需命令行确认",
+    )
+    p.add_argument(
+        "--no-write-zero",
+        action="store_true",
+        help="走到计算零位后不询问、不写零",
+    )
+    p.add_argument(
+        "--yes",
+        "-y",
+        action="store_true",
+        help="在计算零位处自动确认写零（不交互）",
+    )
+    p.add_argument(
+        "--update-ref",
+        action="store_true",
+        help="允许覆盖 standing_pose.yaml 中的固定参考限位（默认不写）",
     )
     args_pre, _ = p.parse_known_args(argv)
     first_group = (args_pre.groups[0] if args_pre.groups else args_pre.group)
@@ -1938,10 +2481,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     except Exception as exc:
         node.warn(str(exc))
         try:
-            node.write_yaml()
+            node.release_group()
         except Exception:
             pass
-        node.release_group()
         return 1
     finally:
         node.destroy_node()

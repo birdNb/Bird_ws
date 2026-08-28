@@ -2,12 +2,13 @@
 # 限位并行标定（推荐）:
 #   1) 腰转 90°
 #   2) 手 / 头 / 腿 三车道同时寻限位并各自恢复
-#   3) 再标定腰（从当前位置继续转到限位）
-#   4) 全身恢复启动姿态
+#   3) 再标定腰
+#   4) 恢复启动姿态，结果覆写 standing_pose.yaml
 #
 # 用法:
-#   ./run_all_limit.sh                 # 并行 + --takeover
-#   ./run_all_limit.sh --serial        # 旧版串行: 臂→腰头→腿
+#   ./run_all_limit.sh                 # 默认：扫限位 + 覆写 yaml，不写零
+#   ./run_all_limit.sh --write-zero    # 扫完后还走计算零位并询问写零
+#   ./run_all_limit.sh --serial        # 旧版串行
 #   ./run_all_limit.sh --no-takeover
 #   ./run_all_limit.sh --dry-run
 #
@@ -27,6 +28,7 @@ MODE=parallel
 TAKEOVER=1
 FROM=""
 ONLY=""
+WRITE_ZERO=0
 PASSTHRU=()
 HAS_RESTORE_VEL=0
 
@@ -38,6 +40,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --parallel)
       MODE=parallel
+      shift
+      ;;
+    --write-zero)
+      WRITE_ZERO=1
       shift
       ;;
     --no-takeover)
@@ -81,15 +87,23 @@ fi
 if [[ $HAS_RESTORE_VEL -eq 0 ]]; then
   args+=(--restore-vel 2.5 --restore-sec 1.0)
 fi
+args+=(--update-ref)
+if [[ $WRITE_ZERO -eq 0 ]]; then
+  args+=(--no-write-zero)
+fi
 if [[ $TAKEOVER -eq 1 ]]; then
   args+=(--takeover)
 fi
 
 if [[ "$MODE" == "parallel" ]]; then
-  echo "=========================================="
-  echo "  限位并行: 腰90° → 手/头/腿同时 → 腰 → 恢复"
-  echo "=========================================="
-  python3 "${ROOT}/cw_limit.py" --parallel "${args[@]}"
+echo "=========================================="
+if [[ $WRITE_ZERO -eq 1 ]]; then
+  echo "  限位并行 → 覆写 yaml → 计算零位 → 确认写零"
+else
+  echo "  限位并行 → 覆写 yaml（不写零）"
+fi
+echo "=========================================="
+python3 "${ROOT}/cw_limit.py" --parallel "${args[@]}"
 else
   STAGES=(right_arm waist_neck right_leg)
   if [[ -n "$ONLY" ]]; then
