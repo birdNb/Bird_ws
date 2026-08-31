@@ -59,6 +59,25 @@ prep_bluetooth() {
 
 prep_bluetooth
 
+# CycloneDDS 绑定 wlan0；WiFi 未 UP 时创建 ROS 节点会失败并导致控制桥退出
+wait_dds_network() {
+  local iface="wlan0"
+  if [ -f "${BIRD_HOME}/cyclonedds.xml" ]; then
+    iface="$(grep -oP '(?<=NetworkInterfaceAddress>)[^<]+' "${BIRD_HOME}/cyclonedds.xml" 2>/dev/null | head -1 || true)"
+    iface="${iface:-wlan0}"
+  fi
+  local i
+  for i in $(seq 1 60); do
+    if ip link show "${iface}" 2>/dev/null | grep -q "UP"; then
+      echo "[bird-ble] DDS 网卡就绪: ${iface}"
+      return 0
+    fi
+    sleep 0.5
+  done
+  echo "[bird-ble] 警告: ${iface} 未 UP，ROS2 桥接可能启动失败（稍后自动重试）" >&2
+}
+wait_dds_network
+
 systemctl stop torque-cmd-vel.service 2>/dev/null || true
 systemctl disable torque-cmd-vel.service 2>/dev/null || true
 pkill -f 'locate_face_cpp/build/locate_face' 2>/dev/null || true

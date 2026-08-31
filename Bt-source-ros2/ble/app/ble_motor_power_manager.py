@@ -9,7 +9,7 @@ import time
 from typing import Callable, Optional
 
 POWER_TOPIC = "/power_switch_control"
-# 上电后硬件 /power_switch_state 可能短暂仍为 OFF，勿立刻覆盖
+# 上电后硬件 /power_switch_state 可能短暂仍为 OFF，勿立刻覆盖意图
 HARDWARE_OFF_GRACE_SEC = 3.0
 
 LogFn = Callable[[str], None]
@@ -25,7 +25,8 @@ class MotorPowerController:
         self._pub = None
         self._com_pub = None
         self._pending: Optional[str] = None
-        self._motor_on: Optional[bool] = None
+        self._intent_on: Optional[bool] = None
+        self._hardware_on: Optional[bool] = None
         self._grace_until = 0.0
         self._on_state_changed: Optional[StateFn] = None
 
@@ -39,32 +40,43 @@ class MotorPowerController:
         self._log(f"[MP] 已发布 {POWER_TOPIC}{extra}")
 
     def update_state_from_hardware(self, motor_on: bool) -> None:
-        """订阅 /power_switch_state 回调。"""
+        """订阅 /power_switch_state 回调；语音/遥测仅在此确认后触发。"""
         now = time.monotonic()
         with self._lock:
             if (
                 not motor_on
-                and self._motor_on
+                and self._intent_on
                 and now < self._grace_until
             ):
                 return
-            if self._motor_on == motor_on:
+            prev_hw = self._hardware_on
+            if prev_hw == motor_on:
                 return
-            self._motor_on = motor_on
+            self._hardware_on = motor_on
+            self._intent_on = motor_on
+            if prev_hw is None:
+                # 首次订阅：同步状态，不播报（避免开机误报）
+                return
         self._notify_state(motor_on)
 
     def update_state(self, motor_on: bool) -> None:
-        with self._lock:
-            if self._motor_on == motor_on:
-                return
-            self._motor_on = motor_on
-        self._notify_state(motor_on)
+        self.update_state_from_hardware(motor_on)
 
     def get_state_wire(self) -> Optional[str]:
+        """对外上报/遥测：优先硬件实测。"""
         with self._lock:
-            if self._motor_on is None:
+            if self._hardware_on is not None:
+                return "ON" if self._hardware_on else "OFF"
+            if self._intent_on is not None:
+                return "ON" if self._intent_on else "OFF"
+            return None
+
+    def get_intent_wire(self) -> Optional[str]:
+        """运动门控：按用户指令意图（MP ON/OFF 下发后立即生效）。"""
+        with self._lock:
+            if self._intent_on is None:
                 return None
-            return "ON" if self._motor_on else "OFF"
+            return "ON" if self._intent_on else "OFF"
 
     def enqueue(self, action: str) -> bool:
         cmd = action.strip().upper()
@@ -123,10 +135,12 @@ class MotorPowerController:
                 self._grace_until = time.monotonic() + HARDWARE_OFF_GRACE_SEC
             else:
                 self._grace_until = 0.0
-            self._motor_on = on
+            self._intent_on = on
         mode = "soft" if soft else "normal"
-        self._log(f"[MP] 电机电源已{'开启' if on else '关闭'} ({action}, {mode})")
-        self._notify_state(on)
+        self._log(
+            f"[MP] 已下发 {'开启' if on else '关闭'} 指令 ({action}, {mode})，"
+            f"等待 /power_switch_state 确认后再播报"
+        )
 
     def _notify_state(self, motor_on: bool) -> None:
         if self._on_state_changed is not None:

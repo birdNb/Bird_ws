@@ -382,13 +382,21 @@ class BleStatusTelemetry:
             from std_msgs.msg import Float32, Int32, UInt8
         except ImportError:
             return
-        try:
-            if not rclpy.ok():
-                rclpy.init(args=None)
-        except Exception:
-            return
 
-        node = Node("ble_status_telemetry")
+        delay = 2.0
+        while not self._stop.is_set():
+            try:
+                if not rclpy.ok():
+                    rclpy.init(args=None)
+                node = Node("ble_status_telemetry")
+                break
+            except Exception as e:
+                log_warn(f"[telemetry] ROS2 节点创建失败: {e}，{delay:.0f}s 后重试")
+                if self._stop.wait(timeout=delay):
+                    return
+                delay = min(delay * 1.5, 30.0)
+        else:
+            return
 
         def on_float_battery(msg: Float32) -> None:
             self._on_battery_pct(int(msg.data))
@@ -451,7 +459,10 @@ class BleStatusTelemetry:
             from hightorque_power.msg import PowerSwitch
 
             def on_power_switch(msg) -> None:
-                wire = "ON" if msg.power_switch else "OFF"
+                wire = "ON" if bool(msg.power_switch) else "OFF"
+                with self._lock:
+                    if wire == self._last_mp_sent:
+                        return
                 self._send_mp_wire(wire)
 
             node.create_subscription(

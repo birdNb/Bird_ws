@@ -33,6 +33,10 @@ STICK_RE = re.compile(
     re.IGNORECASE,
 )
 MODE_RE = re.compile(r"^M_(init|protect|resetzero|tech)$", re.IGNORECASE)
+ST_RE = re.compile(r"^ST:(standing|sit|toggle|start|stop)$", re.IGNORECASE)
+FSM_RE = re.compile(
+    r"^FSM:(default|next|prev|confirm|init|protect)$", re.IGNORECASE
+)
 HANDSHAKE_RE = re.compile(r"^M_default$", re.IGNORECASE)
 HEARTBEAT_RE = re.compile(r"^1$", re.IGNORECASE)
 
@@ -99,6 +103,8 @@ class CommandKind(str, Enum):
     HANDSHAKE = "handshake"
     STICK = "stick"
     MODE = "mode"
+    UPPER_STATE = "upper_state"
+    FSM = "fsm"
     ACTION = "action"
     NECK = "neck"
     LOCATE_FACE = "locate_face"
@@ -179,6 +185,18 @@ def classify_payload(text: str) -> Tuple[CommandKind, str, str]:
         suffix = raw.split("_", 1)[1].lower()
         wire = f"M_{suffix}"
         return CommandKind.MODE, wire.lower(), wire
+
+    m_st = ST_RE.match(raw)
+    if m_st:
+        key = m_st.group(1).lower()
+        wire = f"ST:{key}"
+        return CommandKind.UPPER_STATE, key, wire
+
+    m_fsm = FSM_RE.match(raw)
+    if m_fsm:
+        key = m_fsm.group(1).lower()
+        wire = f"FSM:{key}"
+        return CommandKind.FSM, key, wire
 
     if ACTION_RE.match(raw):
         key = re.sub(r"\s+", "", raw).lower()
@@ -325,7 +343,7 @@ class CommandDispatcher:
             return
 
         if kind == CommandKind.HANDSHAKE:
-            self._log_rx("handshake: M_default")
+            self._log_rx("M_default")
             try:
                 # 必须通知上层置位 default 标志，否则 ready 条件永远不满足。
                 self._handle(kind, payload)
@@ -344,7 +362,7 @@ class CommandDispatcher:
             return
 
         if kind == CommandKind.NECK:
-            self._log_rx(f"neck: {wire}")
+            self._log_rx(wire)
             try:
                 self._handle(kind, payload)
             except Exception as e:
@@ -352,7 +370,7 @@ class CommandDispatcher:
             return
 
         if kind == CommandKind.LOCATE_FACE:
-            self._log_rx(f"locate_face: {wire}")
+            self._log_rx(wire)
             try:
                 self._handle(kind, payload)
             except Exception as e:
@@ -362,7 +380,7 @@ class CommandDispatcher:
             return
 
         if kind == CommandKind.MOTOR_POWER:
-            self._log_rx(f"MP: {wire}")
+            self._log_rx(wire)
             try:
                 self._handle(kind, payload)
             except Exception as e:
@@ -371,7 +389,7 @@ class CommandDispatcher:
             return
 
         if kind == CommandKind.GAIT:
-            self._log_rx(f"GAIT: {wire}")
+            self._log_rx(wire)
             try:
                 self._handle(kind, payload)
             except Exception as e:
@@ -382,7 +400,7 @@ class CommandDispatcher:
             return
 
         if kind == CommandKind.SPRINT:
-            self._log_rx(f"LT: {wire}")
+            self._log_rx(wire)
             try:
                 self._handle(kind, payload)
             except Exception as e:
@@ -392,7 +410,7 @@ class CommandDispatcher:
             return
 
         if kind == CommandKind.SOUND:
-            self._log_rx(f"sound: {wire}")
+            self._log_rx(wire)
             try:
                 self._handle(kind, payload)
             except Exception as e:
@@ -400,7 +418,7 @@ class CommandDispatcher:
             return
 
         if kind == CommandKind.VOLUME:
-            self._log_rx(f"V: {wire}")
+            self._log_rx(wire)
             try:
                 self._handle(kind, payload)
             except Exception as e:
@@ -410,7 +428,7 @@ class CommandDispatcher:
             return
 
         if kind == CommandKind.RENAME:
-            self._log_rx(f"rename: {wire}")
+            self._log_rx(wire)
             try:
                 self._handle(kind, payload)
             except Exception as e:
@@ -418,7 +436,7 @@ class CommandDispatcher:
             return
 
         if kind == CommandKind.WIFI:
-            self._log_rx(f"wifi: {wire}")
+            self._log_rx(wire)
             try:
                 self._handle(kind, payload)
             except Exception as e:
@@ -426,7 +444,7 @@ class CommandDispatcher:
             return
 
         if kind == CommandKind.PULL:
-            self._log_rx(f"pull: {wire}")
+            self._log_rx(wire)
             try:
                 self._handle(kind, payload)
             except Exception as e:
@@ -437,7 +455,7 @@ class CommandDispatcher:
             return
 
         if kind == CommandKind.CONVERSATION:
-            self._log_rx(f"conv: {wire}")
+            self._log_rx(wire)
             try:
                 self._handle(kind, payload)
             except Exception as e:
@@ -447,13 +465,35 @@ class CommandDispatcher:
                 self._ack(wire)
             return
 
-        # 模式指令同步处理并立即 ACK，避免握手 M_default 排队卡住
+        # 模式/上层状态：同步处理并立即 ACK，避免握手 M_default 排队卡住
         if kind == CommandKind.MODE:
-            self._log_rx(f"mode: {wire}")
+            self._log_rx(wire)
             try:
                 self._handle(kind, payload)
             except Exception as e:
                 self._log_warn(f"模式处理失败: {e}")
+                return
+            if self._ack is not None:
+                self._ack(wire)
+            return
+
+        if kind == CommandKind.UPPER_STATE:
+            self._log_rx(wire)
+            try:
+                self._handle(kind, payload)
+            except Exception as e:
+                self._log_warn(f"上层状态处理失败: {e}")
+                return
+            if self._ack is not None:
+                self._ack(wire)
+            return
+
+        if kind == CommandKind.FSM:
+            self._log_rx(wire)
+            try:
+                self._handle(kind, payload)
+            except Exception as e:
+                self._log_warn(f"FSM 处理失败: {e}")
                 return
             if self._ack is not None:
                 self._ack(wire)
@@ -490,7 +530,7 @@ class CommandDispatcher:
                 continue
 
             self._msg_count += 1
-            self._log_rx(f"{cmd.kind.value}: {cmd.wire}")
+            self._log_rx(cmd.wire)
 
             try:
                 self._handle(cmd.kind, cmd.payload)

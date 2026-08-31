@@ -207,6 +207,16 @@ export BIRD_HOME="${INSTALL_HOME}"
 export BIRD_BLE_UID="${INSTALL_UID}"
 export BIRD_WS="${BIRD_WS}"
 export COLCON_WS="${COLCON_WS}"
+if [ ! -f "${COLCON_WS}/install/setup.bash" ]; then
+  for _cw in "${INSTALL_HOME}/hightorque_workspace" "${INSTALL_HOME}/colcon_ws"; do
+    if [ -f "${_cw}/install/setup.bash" ]; then
+      COLCON_WS="${_cw}"
+      break
+    fi
+  done
+fi
+export COLCON_WS
+unset _cw
 export PKG_DIR="${BLE_DIR}"
 export BT_DIR="${BLE_DIR}/app"
 

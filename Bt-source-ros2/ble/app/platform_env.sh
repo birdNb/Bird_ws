@@ -22,6 +22,15 @@ else
   export BIRD_USER="${USER:-hightorque}"
 fi
 export BIRD_HOME="${BIRD_HOME:-/home/${BIRD_USER}}"
+if [ -z "${COLCON_WS:-}" ] || [ ! -f "${COLCON_WS}/install/setup.bash" ]; then
+  for _cw in "${BIRD_HOME}/hightorque_workspace" "${BIRD_HOME}/colcon_ws"; do
+    if [ -f "${_cw}/install/setup.bash" ]; then
+      export COLCON_WS="${_cw}"
+      break
+    fi
+  done
+fi
 export COLCON_WS="${COLCON_WS:-${BIRD_HOME}/colcon_ws}"
+unset _cw
 export BIRD_BLE_UID="${BIRD_BLE_UID:-$(id -u "${BIRD_USER}" 2>/dev/null || echo 1000)}"
 unset _pe_dir _ws_owner

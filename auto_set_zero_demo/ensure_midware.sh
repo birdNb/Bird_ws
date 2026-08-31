@@ -1,6 +1,8 @@
 #!/bin/bash
-# 确保 ROS2 midware 已起来、/joint_states 有数据。
-# 常见原因：开机默认跑了 ROS1 sim2real，占住 /dev/ttyACM*，ROS2 起不来。
+# 确保 ROS2 midware + IMU 已起来：
+#   - /joint_states 有数据 → 站立/寻限位可用
+#   - /imu 有数据       → AMP 闭环路步态可用（无 IMU 会开环直接倒）
+# 常见原因：开机默认跑了 ROS1 sim2real，占住 /dev/ttyACM* / ttyUSB*，ROS2 起不来。
 #
 # 用法:
 #   ./ensure_midware.sh              # 检查；没有 joint_states 则停 ROS1 并拉起 ROS2 bringup
@@ -82,6 +84,36 @@ sys.exit(0 if got["ok"] else 1)
 PY
 }
 
+has_imu() {
+  if timeout 2.5s ros2 topic echo /imu --once 2>/dev/null | grep -q 'angular_velocity:'; then
+    return 0
+  fi
+  python3 - <<'PY' 2>/dev/null
+import sys, time
+import rclpy
+from sensor_msgs.msg import Imu
+
+rclpy.init(args=None)
+node = rclpy.create_node("ensure_midware_imu_check")
+got = {"ok": False}
+
+def cb(_msg):
+    got["ok"] = True
+
+node.create_subscription(Imu, "/imu", cb, 10)
+t0 = time.time()
+while time.time() - t0 < 2.0 and not got["ok"]:
+    rclpy.spin_once(node, timeout_sec=0.1)
+node.destroy_node()
+rclpy.shutdown()
+sys.exit(0 if got["ok"] else 1)
+PY
+}
+
+sensors_ready() {
+  has_joint_states && has_imu
+}
+
 ros1_running() {
   pgrep -af 'roslaunch|rosmaster|sim2real' 2>/dev/null | grep -v grep >/dev/null
 }
@@ -89,6 +121,10 @@ ros1_running() {
 ros2_bringup_running() {
   pgrep -af 'ros2 launch hightorque_bringup pi_plus_orin|pi_plus_orin.launch' 2>/dev/null \
     | grep -v grep >/dev/null
+}
+
+controller_running() {
+  pgrep -af 'hightorque_controller_node|bfm_real.launch' 2>/dev/null | grep -v grep >/dev/null
 }
 
 stop_ros1() {
@@ -127,7 +163,7 @@ stop_ros2_bringup() {
   pkill -INT -f 'ros2 launch hightorque_bringup pi_plus_orin' 2>/dev/null || true
   pkill -INT -f 'pi_plus_orin.launch' 2>/dev/null || true
   sleep 1
-  pkill -TERM -f 'hightorque_midware|motor_sdk|pi_plus_orin' 2>/dev/null || true
+  pkill -TERM -f 'hightorque_midware|motor_sdk|pi_plus_orin|yesense_imu' 2>/dev/null || true
   sleep 0.5
 }
 
@@ -140,18 +176,28 @@ start_ros2_bringup() {
   echo "[ensure_midware] bringup pid=$(cat "$PID_FILE")"
 }
 
-wait_joint_states() {
+wait_sensors() {
   local deadline=$((SECONDS + WAIT_SEC))
-  echo "[ensure_midware] 等待 /joint_states （最长 ${WAIT_SEC}s）…"
+  echo "[ensure_midware] 等待 /joint_states + /imu （最长 ${WAIT_SEC}s）…"
   while (( SECONDS < deadline )); do
-    if has_joint_states; then
-      echo "[ensure_midware] OK: /joint_states 已有数据"
+    local js=0 imu=0
+    has_joint_states && js=1
+    has_imu && imu=1
+    if [[ $js -eq 1 && $imu -eq 1 ]]; then
+      echo "[ensure_midware] OK: /joint_states 与 /imu 均有数据"
       return 0
+    fi
+    if (( (SECONDS % 5) == 0 )); then
+      echo "[ensure_midware] … joint_states=$js imu=$imu"
     fi
     sleep 0.5
   done
-  echo "[error] 超时仍无 /joint_states。请查看: $BRINGUP_LOG" >&2
-  tail -n 40 "$BRINGUP_LOG" 2>/dev/null || true
+  echo "[error] 超时传感器未就绪:" >&2
+  has_joint_states || echo "  - 无 /joint_states（midware/电机串口）" >&2
+  has_imu || echo "  - 无 /imu（yesense /dev/ttyUSB0）" >&2
+  echo "  请查看: $BRINGUP_LOG" >&2
+  grep -iE 'yesense|ttyUSB|imu|midware|error|fail' "$BRINGUP_LOG" 2>/dev/null | tail -n 15 >&2 || true
+  ls -l /dev/ttyACM* /dev/ttyUSB* 2>/dev/null || echo "  当前无 ttyACM/ttyUSB 设备" >&2
   return 1
 }
 
@@ -159,22 +205,27 @@ echo "=========================================="
 echo "  ensure_midware  (ROS2 pi_plus_orin)"
 echo "=========================================="
 
-if has_joint_states; then
-  echo "[ensure_midware] 已有 /joint_states"
+if sensors_ready; then
+  echo "[ensure_midware] 已有 /joint_states 与 /imu"
   if [[ $STATUS_ONLY -eq 1 ]]; then
     exit 0
   fi
   if [[ $RESTART -eq 0 ]]; then
-    echo "[ensure_midware] 无需操作。可直接: ./run_all_limit.sh"
+    echo "[ensure_midware] 无需操作。可直接: ./run_all_limit.sh 或 BLE 步态"
     exit 0
   fi
-  echo "[ensure_midware] --restart：将重启 midware"
+  echo "[ensure_midware] --restart：将重启 bringup"
+elif has_joint_states; then
+  echo "[ensure_midware] 仅有 /joint_states，/imu 未就绪（步态会开环倒，请查 ttyUSB0）"
+  if [[ $STATUS_ONLY -eq 1 ]]; then
+    exit 1
+  fi
 fi
 
 if [[ $STATUS_ONLY -eq 1 ]]; then
-  echo "[ensure_midware] 状态: 无 /joint_states"
+  echo "[ensure_midware] 状态: joint_states=$(has_joint_states && echo OK || echo NO) imu=$(has_imu && echo OK || echo NO)"
   if ros1_running; then
-    echo "[ensure_midware] 原因提示: ROS1 正在运行（常占 /dev/ttyACM*）"
+    echo "[ensure_midware] 原因提示: ROS1 正在运行（常占 /dev/ttyACM* / ttyUSB*）"
   fi
   if ! ros2_bringup_running; then
     echo "[ensure_midware] 原因提示: ROS2 pi_plus_orin bringup 未运行"
@@ -195,9 +246,9 @@ if [[ $RESTART -eq 1 ]] || ros2_bringup_running; then
   if [[ $RESTART -eq 1 ]]; then
     stop_ros2_bringup
     start_ros2_bringup
-  elif ! has_joint_states; then
-    # bringup 进程在但无 joint_states：重启更稳
-    echo "[ensure_midware] bringup 似在跑但无 joint_states，重启一次"
+  elif ! sensors_ready; then
+    # bringup 进程在但传感器不全：重启更稳
+    echo "[ensure_midware] bringup 似在跑但 joint_states/imu 未齐，重启一次"
     stop_ros2_bringup
     start_ros2_bringup
   fi
@@ -205,5 +256,12 @@ else
   start_ros2_bringup
 fi
 
-wait_joint_states
+wait_sensors
 echo "[ensure_midware] 完成。下一步: cd ${ROOT} && ./run_all_limit.sh"
+if controller_running; then
+  echo "[ensure_midware] 重要: 检测到 hightorque_controller / bfm_real 仍在运行。" >&2
+  echo "[ensure_midware] midware 已重启，控制器须同步重启，否则 ST:standing 会卡在 Waiting for motor control。" >&2
+  echo "[ensure_midware] 请执行: pkill -f 'bfm_real|hightorque_controller_node|input_arbiter' && ros2 launch hightorque_bringup bfm_real.launch.py" >&2
+else
+  echo "[ensure_midware] BLE 步态前请确认 journal 无 yesense ttyUSB 报错"
+fi

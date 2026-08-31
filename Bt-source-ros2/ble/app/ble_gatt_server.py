@@ -88,7 +88,7 @@ ADAPTER_IFACE = "org.bluez.Adapter1"
 _PULL_SERVICE = "torque-cmd-vel.service"
 # 收到以下控制类指令时，若拖拽模式已开则自动关闭
 _PULL_AUTO_OFF_KINDS = frozenset(
-    {"stick", "mode", "action", "gait", "sprint", "neck", "motor_power"}
+    {"stick", "mode", "action", "gait", "sprint", "neck", "motor_power", "upper_state"}
 )
 LINK_IDLE_TIMEOUT_SEC = 7.0
 LINK_WATCHDOG_TICK_MS = 1000
@@ -467,20 +467,12 @@ class BleGattServer:
 
         def _stop_hw() -> None:
             try:
+                # 连接期间只停保活线程 + 注销 D-Bus 广播。
+                # 勿在链路仍连接时执行 hci/btmgmt advertising off，否则手机会瞬间断连。
                 if _stop_adv_keeper is not None:
                     _stop_adv_keeper()
-                if _stop_ble_advertising is not None:
-                    _stop_ble_advertising(hci_dev)
-                if (
-                    plat is not None
-                    and plat.adv_mode != "legacy_hci"
-                    and _btmgmt_adv is not None
-                ):
-                    _btmgmt_adv(hci_dev, "advertising", "off")
-                    _btmgmt_adv(hci_dev, "rm-adv", "1")
-                    _btmgmt_adv(hci_dev, "rm-adv", "2")
             except Exception as e:
-                log_warn(f"停止 BLE 广播失败: {e}")
+                log_warn(f"停止 BLE 广播保活失败: {e}")
 
         threading.Thread(target=_stop_hw, daemon=True).start()
 
@@ -736,10 +728,9 @@ class BleGattServer:
             preview = data.decode("utf-8", errors="replace").strip()[:80]
         except Exception:
             preview = data[:24].hex()
-        # 摇杆速度包频率高，日志刷屏，默认不打印。
+        # 摇杆/心跳由 dispatcher 统一打 RX 日志；此处不再重复。
         is_stick = bool(preview and STICK_LOG_RE.match(preview))
-        if preview and not is_stick and not (len(data) >= 3 and data[0] == 0x0B):
-            log_rx(f"FFE1 ← {preview}")
+        _ = is_stick
 
         # 兼容历史语音包：首字节 0x0B 的二进制数据直接忽略，不参与控制。
         if len(data) >= 3 and data[0] == 0x0B:
@@ -1609,7 +1600,7 @@ class BleGattServer:
         log_info(">>> Bird BLE 遥控服务 <<<")
         log_info(f"    广播名: {self.name}  MAC: {addr}")
         log_info("    FFE0/FFE1/FFE2 | 协议见 BLE_PROTOCOL.md")
-        log_info("    日志: RX红(收) TX绿(发)")
+        log_info("    日志: RX红(收) TX蓝(发)")
         if self.ros_control:
             log_info("    摇杆→/joy 50Hz | GAIT→AMP+LT+RT+LB | 起立 START | LT加速 | 状态→FFE2")
         log_info("    Ctrl+C 退出")

@@ -18,11 +18,24 @@ if [ -f /opt/ros/foxy/setup.bash ]; then
   source /opt/ros/foxy/setup.bash
 fi
 
+# 优先使用已安装的 colcon 工作空间（本机常为 hightorque_workspace）
+if [ ! -f "${COLCON_WS:-}/install/setup.bash" ]; then
+  for _ws in \
+    "${COLCON_WS:-}" \
+    "${BIRD_HOME:-$HOME}/hightorque_workspace" \
+    "${BIRD_HOME:-$HOME}/colcon_ws"; do
+    if [ -n "${_ws}" ] && [ -f "${_ws}/install/setup.bash" ]; then
+      COLCON_WS="${_ws}"
+      break
+    fi
+  done
+fi
 COLCON_WS="${COLCON_WS:-${BIRD_HOME:-$HOME}/colcon_ws}"
 if [ -f "${COLCON_WS}/install/setup.bash" ]; then
   # shellcheck disable=SC1091
   source "${COLCON_WS}/install/setup.bash"
 fi
+unset _ws
 
 export RMW_IMPLEMENTATION="${RMW_IMPLEMENTATION:-rmw_cyclonedds_cpp}"
 if [ -f "${BIRD_HOME:-$HOME}/cyclonedds.xml" ]; then

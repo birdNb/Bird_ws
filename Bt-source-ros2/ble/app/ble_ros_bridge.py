@@ -43,6 +43,9 @@ SERVICE_CALL_SEC = 2.5
 STATE_WAIT_SEC = 8.0
 POLICY_WAIT_SEC = 8.0
 STANDING_WAIT_SEC = 20.0
+JOINT_STATES_WAIT_SEC = 15.0
+IMU_WAIT_SEC = 15.0
+IMU_STALE_SEC = 1.0
 AMP_POLICY_NAME = "amp"
 
 # 量产文档当前映射 / 建议映射：禁止切回 BFM 或 amp_lower
@@ -112,6 +115,14 @@ CHANGE_FSM_CANDIDATES = (
     "/hightorque_controller/change_fsm_state",
     "/change_fsm_state",
 )
+START_POLICY_CANDIDATES = (
+    "/hightorque_controller/start_policy",
+    "/default_bt/start_policy",
+)
+STOP_POLICY_CANDIDATES = (
+    "/hightorque_controller/stop_policy",
+    "/default_bt/stop_policy",
+)
 CONTROLLER_STATE_TOPICS = (
     "/hightorque_controller/state",
     "/hightorque_controller/controller_state",
@@ -160,7 +171,9 @@ MODE_LABELS: Dict[str, str] = {
     "m_tech": "示教模式",
 }
 
-_POWER_GATED_KINDS = frozenset({"stick", "mode", "action", "gait", "sprint"})
+_POWER_GATED_KINDS = frozenset(
+    {"stick", "mode", "action", "gait", "sprint", "upper_state"}
+)
 
 from ble_neck_bridge import NeckController
 from ble_motor_power_manager import MotorPowerController, POWER_TOPIC
@@ -325,9 +338,12 @@ class BleRosBridge:
         self._power_ready_at = 0.0
         self._SwitchPolicy = None
         self._ChangeState = None
+        self._Common = None
         self._policy_clients = []
         self._state_clients = []
         self._fsm_clients = []
+        self._start_policy_clients = []
+        self._stop_policy_clients = []
         self._current_policy = ""
         self._current_state = ""
         self._current_mode = ""
@@ -338,6 +354,13 @@ class BleRosBridge:
         self._last_mode_wire = ""
         self._gait_lock = threading.Lock()
         self._gait_busy = False
+        self._joint_states_received = False
+        self._joint_state_count = 0
+        self._joint_state_names: set = set()
+        self._imu_received = False
+        self._last_imu_ts = 0.0
+        self._stand_lock = threading.Lock()
+        self._stand_busy = False
 
     @property
     def ready(self) -> bool:
@@ -345,6 +368,9 @@ class BleRosBridge:
 
     def get_motor_power_wire(self) -> Optional[str]:
         return self._motor_power.get_state_wire()
+
+    def get_motor_power_intent_wire(self) -> Optional[str]:
+        return self._motor_power.get_intent_wire()
 
     def set_motor_power_listener(self, fn) -> None:
         self._motor_power.set_state_listener(fn)
@@ -447,6 +473,10 @@ class BleRosBridge:
             self._trigger_gait(text.strip().upper())
         elif kind == "sprint":
             self._set_sprint(text.strip().upper() == "ON")
+        elif kind == "upper_state":
+            self._trigger_upper_state(text)
+        elif kind == "fsm":
+            self._trigger_fsm(text)
 
     def _joy_path_alive(self) -> bool:
         for pub in (self._joy_pub, self._ht_joy_pub):
@@ -468,13 +498,13 @@ class BleRosBridge:
         return False
 
     def _check_motion_allowed(self, kind: str) -> Tuple[bool, str]:
-        wire = self._motor_power.get_state_wire()
+        wire = self._motor_power.get_intent_wire()
         if wire == "OFF":
             return False, "电机电源未开启(mp=OFF)，请先 MP ON"
         if wire == "ON" and not self._motor_power_ready_for_motion():
             left = max(0.0, self._power_ready_at - time.monotonic())
             return False, f"上电未就绪，请再等 {left:.1f}s"
-        if kind in ("gait", "action") and self.ready:
+        if kind in ("gait", "action", "upper_state") and self.ready:
             if not self._joy_path_alive() and not self._services_alive():
                 return False, "量产控制器未启动，无法起立/行走。请重启 ROS2 启动脚本"
         return True, ""
@@ -498,7 +528,7 @@ class BleRosBridge:
             self._log(f"[MP] 上电完成，再等 {POWER_ON_SETTLE_SEC:.1f}s 后允许走路/进策略")
 
     def _motor_power_ready_for_motion(self) -> bool:
-        wire = self._motor_power.get_state_wire()
+        wire = self._motor_power.get_intent_wire()
         if wire != "ON":
             return wire is None
         return time.monotonic() >= self._power_ready_at
@@ -519,13 +549,21 @@ class BleRosBridge:
             self._trigger_action(cmd.action)
 
     def _ros_main(self) -> None:
-        try:
-            self._ros_main_impl()
-        except Exception as e:
-            self._log(f"[ros] 控制桥线程异常退出: {e}")
-            import traceback
+        import traceback
 
-            self._log(traceback.format_exc())
+        delay = 2.0
+        while not self._stop.is_set():
+            try:
+                self._ros_main_impl()
+                return
+            except Exception as e:
+                self._ready.clear()
+                self._log(f"[ros] 控制桥异常: {e}")
+                self._log(traceback.format_exc())
+                if self._stop.wait(timeout=delay):
+                    return
+                self._log(f"[ros] {delay:.0f}s 后重试 ROS2 控制桥…")
+                delay = min(delay * 1.5, 30.0)
 
     def _ros_main_impl(self) -> None:
         _bootstrap_ros_python_path()
@@ -581,6 +619,32 @@ class BleRosBridge:
 
         node.create_subscription(UInt8, "/battery_level", _on_battery, 1)
 
+        def _on_joint_states(_msg) -> None:
+            names = list(getattr(_msg, "name", []) or [])
+            with self._lock:
+                self._joint_states_received = bool(names)
+                self._joint_state_count = len(names)
+                self._joint_state_names = set(names)
+
+        try:
+            from sensor_msgs.msg import JointState
+
+            node.create_subscription(JointState, "/joint_states", _on_joint_states, 1)
+        except Exception as e:
+            self._log(f"[ros][warn] 无法订阅 /joint_states: {e}")
+
+        def _on_imu(_msg) -> None:
+            with self._lock:
+                self._imu_received = True
+                self._last_imu_ts = time.monotonic()
+
+        try:
+            from sensor_msgs.msg import Imu
+
+            node.create_subscription(Imu, "/imu", _on_imu, 1)
+        except Exception as e:
+            self._log(f"[ros][warn] 无法订阅 /imu: {e}")
+
         self._Int32 = Int32
         self._fsm_pub = node.create_publisher(Int32, "/fsm_state", 1)
 
@@ -629,10 +693,11 @@ class BleRosBridge:
 
     def _init_controller_ifaces(self, node) -> None:
         try:
-            from hightorque_msgs.srv import ChangeState, SwitchPolicy
+            from hightorque_msgs.srv import ChangeState, Common, SwitchPolicy
 
             self._SwitchPolicy = SwitchPolicy
             self._ChangeState = ChangeState
+            self._Common = Common
             self._policy_clients = [
                 node.create_client(SwitchPolicy, name) for name in SWITCH_POLICY_CANDIDATES
             ]
@@ -642,12 +707,21 @@ class BleRosBridge:
             self._fsm_clients = [
                 node.create_client(ChangeState, name) for name in CHANGE_FSM_CANDIDATES
             ]
+            self._start_policy_clients = [
+                node.create_client(Common, name) for name in START_POLICY_CANDIDATES
+            ]
+            self._stop_policy_clients = [
+                node.create_client(Common, name) for name in STOP_POLICY_CANDIDATES
+            ]
             self._log(
-                "[ros] 已注册 SwitchPolicy / ChangeState "
+                "[ros] 已注册 SwitchPolicy / ChangeState / start_policy / stop_policy "
                 "(/hightorque_controller/switch_policy|change_state|change_fsm_state)"
             )
         except Exception as e:
             self._log(f"[ros][warn] 量产服务接口不可用，将只用 /joy 组合键: {e}")
+            self._start_policy_clients = []
+            self._stop_policy_clients = []
+            self._Common = None
 
         try:
             from hightorque_msgs.msg import ControllerState
@@ -787,16 +861,135 @@ class BleRosBridge:
     def _motion_consumer_alive(self) -> bool:
         return self._joy_path_alive() or self._services_alive()
 
-    def _request_stand(self) -> bool:
-        if self._call_change_state("standing"):
-            self._notify_action("auto_stand")
-            return True
-        if self._motion_consumer_alive():
+    def _stand_up_worker(self) -> None:
+        with self._stand_lock:
+            if self._stand_busy:
+                self._log("[ros] ST:standing 忽略：上一次尚未完成")
+                return
+            self._stand_busy = True
+        try:
+            self._log(f"[ros] ST:standing 开始 | {self._snapshot()}")
+            ok = self._stand_up(notify=True)
+            if ok:
+                self._log(f"[ros] ST:standing 完成 | {self._snapshot()}")
+            else:
+                self._log(
+                    "[ros][warn] ST:standing 失败：未进入 standby。"
+                    "若刚执行 ensure_midware，请重启 bfm_real/控制器；"
+                    "并确认 MP ON、/joint_states 含 waist_yaw_joint"
+                )
+        finally:
+            with self._stand_lock:
+                self._stand_busy = False
+
+    def _joint_states_ready(self, *, wait: bool = False) -> Tuple[bool, str]:
+        def ok() -> bool:
+            with self._lock:
+                if not self._joint_states_received or self._joint_state_count <= 0:
+                    return False
+                return "waist_yaw_joint" in self._joint_state_names
+
+        if ok():
+            return True, ""
+        if wait:
+            if self._wait_until(ok, JOINT_STATES_WAIT_SEC, "joint_states"):
+                return True, ""
+        with self._lock:
+            n = self._joint_state_count
+            has_waist = "waist_yaw_joint" in self._joint_state_names
+        if n > 0 and not has_waist:
+            return (
+                False,
+                f"/joint_states 缺 waist_yaw_joint（仅 {n} 关节；midware 未完整或控制器需重启）",
+            )
+        return (
+            False,
+            "/joint_states 无数据（电机栈 hightorque_midware_node 未运行或未上电）",
+        )
+
+    def _motor_power_hardware_on(self) -> bool:
+        return self._motor_power.get_state_wire() == "ON"
+
+    def _prepare_for_standing(self) -> None:
+        """退出 running/卡住的 standing，避免行为树一直 Waiting for motor control。"""
+        st = _norm_label(self._current_state)
+        if st == "running":
+            self._log("[ros] 起立前：running → stop_policy")
+            self._call_common_policy(False, "stop_policy")
+            self._wait_state("standby", timeout=STATE_WAIT_SEC)
+            st = _norm_label(self._current_state)
+        if st in ("standing", "siting"):
+            self._log(f"[ros] 起立前：复位上层 state={st} → init")
+            self._call_change_state("init")
+            self._wait_state("init", "standby", timeout=8.0)
+            time.sleep(0.3)
+
+    def _imu_live(self) -> bool:
+        with self._lock:
+            if not self._imu_received:
+                return False
+            return (time.monotonic() - self._last_imu_ts) <= IMU_STALE_SEC
+
+    def _imu_ready(self, *, wait: bool = False) -> Tuple[bool, str]:
+        if self._imu_live():
+            return True, ""
+        if wait:
+            ok = self._wait_until(self._imu_live, IMU_WAIT_SEC, "imu")
+            if ok:
+                return True, ""
+        return (
+            False,
+            "/imu 无数据或已过期（yesense_imu 未就绪，检查 /dev/ttyUSB0 与 bringup 日志）",
+        )
+
+    def _stand_up(self, *, notify: bool = True) -> bool:
+        if not self._ensure_default_bt():
+            self._log("[ros][warn] 起立失败：未进入 default_bt（请先 FSM:default 或 M_init）")
+            return False
+        if not self._motor_power_hardware_on():
+            self._log(
+                "[ros][warn] 起立失败：/power_switch_state 未确认 ON（请先 MP ON 并等待硬件反馈）"
+            )
+            return False
+        ok_js, js_reason = self._joint_states_ready(wait=True)
+        if not ok_js:
+            self._log(f"[ros][warn] 起立失败：{js_reason}")
+            return False
+
+        self._prepare_for_standing()
+
+        sent = self._call_change_state("standing")
+        if sent:
+            self._log(f"[ros] change_state(standing) 已发送 | {self._snapshot()}")
+            time.sleep(COMBO_HOLD_SEC + 0.2)
+        elif self._motion_consumer_alive():
             self._start_combo("lt+rt+start", COMBO_HOLD_SEC, "起立")
-            self._notify_action("auto_stand")
+            time.sleep(COMBO_HOLD_SEC + 0.2)
+        else:
+            self._log(
+                "[ros][warn] 起立未执行：量产控制器未启动（无 change_state / 无 /hightorque_joy 订阅）"
+            )
+            return False
+
+        if self._wait_state("standby", timeout=STANDING_WAIT_SEC):
+            if notify:
+                self._notify_action("auto_stand")
             return True
-        self._log("[ros][warn] 起立未执行：量产控制器未启动（无 change_state / 无 /hightorque_joy 订阅）")
+
+        self._log(
+            f"[ros][warn] 起立超时：服务已响应但未进入 standby | {self._snapshot()}"
+        )
+        if self._motion_consumer_alive():
+            self._start_combo("lt+rt+start", COMBO_HOLD_SEC, "起立回退")
+            time.sleep(COMBO_HOLD_SEC + 0.2)
+            if self._wait_state("standby", timeout=STANDING_WAIT_SEC):
+                if notify:
+                    self._notify_action("auto_stand")
+                return True
         return False
+
+    def _request_stand(self, *, notify: bool = False) -> bool:
+        return self._stand_up(notify=notify)
 
     def _request_sit(self) -> bool:
         if self._call_change_state_any(("siting", "sitting", "sit")):
@@ -808,6 +1001,40 @@ class BleRosBridge:
             return True
         self._log("[ros][warn] 坐下未执行：量产控制器未启动")
         return False
+
+    def _trigger_upper_state(self, cmd_key: str) -> None:
+        key = _norm_label(cmd_key)
+        wire = f"ST:{key}"
+        if key == "standing":
+            threading.Thread(
+                target=self._stand_up_worker,
+                daemon=True,
+                name="ble-stand",
+            ).start()
+            return
+        if key in ("sit", "siting", "sitting"):
+            self._request_sit()
+            return
+        if key in ("toggle", "toggle_policy"):
+            self._toggle_upper(wire)
+            return
+        if key == "start":
+            self._call_common_policy(True, "start_policy")
+            return
+        if key == "stop":
+            self._call_common_policy(False, "stop_policy")
+            return
+        self._log(f"[ros] 未知上层状态指令: {wire}")
+
+    def _call_common_policy(self, enable: bool, label: str) -> bool:
+        clients = self._start_policy_clients if enable else self._stop_policy_clients
+        if self._Common is None or not clients:
+            self._log(f"[ros][warn] {label} 服务不可用")
+            return False
+        req = self._Common.Request()
+        req.enable = bool(enable)
+        req.str = ""
+        return self._try_clients(clients, req, label)
 
     def _start_combo(
         self,
@@ -1008,6 +1235,111 @@ class BleRosBridge:
             return True
         return False
 
+    def _trigger_fsm(self, cmd_key: str) -> None:
+        threading.Thread(
+            target=self._fsm_worker,
+            args=(cmd_key,),
+            daemon=True,
+            name="ble-fsm-cmd",
+        ).start()
+
+    def _fsm_worker(self, cmd_key: str) -> None:
+        if not self.ready:
+            self._log("[ros] 桥接未就绪（等待 ROS2），忽略 FSM 指令")
+            return
+        key = _norm_label(cmd_key)
+        wire = f"FSM:{key}"
+        self._log(f"[ros] {wire} 开始 | {self._snapshot()}")
+
+        if key == "default":
+            if _norm_label(self._current_mode) == "default_bt" or self._fsm_value == FSM_EXEC_DEFAULT:
+                self._log(f"[ros] {wire} 已在 default_bt/FSM=5")
+            elif self._call_fsm("default"):
+                self._wait_mode("default_bt", timeout=STATE_WAIT_SEC) or self._wait_fsm_value(
+                    5, timeout=3.0
+                )
+                self._set_fsm_local(FSM_EXEC_DEFAULT, wire)
+            else:
+                self._start_combo("center", COMBO_PULSE_SEC, wire, zero_stick=True)
+                self._set_fsm_local(FSM_EXEC_DEFAULT, f"{wire} 手柄兜底")
+            self._notify_mode("m_default")
+            self._log(f"[ros] {wire} 完成 | {self._snapshot()}")
+            return
+
+        if key == "init":
+            if self._call_fsm("init"):
+                self._wait_mode("init", timeout=3.0) or self._wait_fsm_value(0, timeout=2.0)
+                self._set_fsm_local(FSM_INIT, wire)
+                self._notify_mode("m_init")
+                self._log(f"[ros] {wire} 完成 | {self._snapshot()}")
+            else:
+                self._log(f"[ros][warn] {wire} 失败：change_fsm_state 服务不可用")
+            return
+
+        if key == "protect":
+            if _norm_label(self._current_mode) == "protect" or self._fsm_value == FSM_PROTECT:
+                self._log(f"[ros] {wire} 已在 PROTECT")
+                return
+            if self._call_fsm("protect"):
+                self._wait_mode("protect", timeout=3.0) or self._wait_fsm_value(8, timeout=2.0)
+                self._set_fsm_local(FSM_PROTECT, wire)
+                with self._lock:
+                    self._stick_target = None
+                    self._stick_filtered = None
+                    self._sprint_enabled = False
+                self._policy_on = False
+                self._notify_mode("m_protect")
+                self._log(f"[ros] {wire} 完成 | {self._snapshot()}")
+            else:
+                with self._lock:
+                    self._stick_target = None
+                    self._stick_filtered = None
+                    self._sprint_enabled = False
+                self._policy_on = False
+                self._start_combo("lt+rt+b", ESTOP_HOLD_SEC, wire)
+                self._log(f"[ros][warn] {wire} 服务不可用，已发手柄兜底")
+            return
+
+        if key == "next":
+            if not self._in_fsm_menu():
+                self._log(f"[ros][warn] {wire} 忽略：当前不在 FSM 候选菜单")
+                return
+            nxt = self._next_candidate()
+            if self._call_fsm("next"):
+                self._set_fsm_local(nxt, wire)
+            else:
+                self._start_combo("lt+rt+dpr", COMBO_PULSE_SEC, wire, zero_stick=True)
+                self._set_fsm_local(nxt, f"{wire} 手柄兜底")
+            self._log(f"[ros] {wire} 完成 | {self._snapshot()}")
+            return
+
+        if key == "prev":
+            if not self._in_fsm_menu():
+                self._log(f"[ros][warn] {wire} 忽略：当前不在 FSM 候选菜单")
+                return
+            nxt = self._prev_candidate()
+            if self._call_fsm("prev"):
+                self._set_fsm_local(nxt, wire)
+            else:
+                self._start_combo("lt+rt+dpu", COMBO_PULSE_SEC, wire, zero_stick=True)
+                self._set_fsm_local(nxt, f"{wire} 手柄兜底")
+            self._log(f"[ros] {wire} 完成 | {self._snapshot()}")
+            return
+
+        if key == "confirm":
+            cur = self.get_fsm_value()
+            if self._call_fsm("confirm"):
+                if cur == FSM_CANDIDATE_RESET_ZERO:
+                    self._set_fsm_local(FSM_EXEC_RESET_ZERO, wire)
+                else:
+                    self._set_fsm_local(FSM_EXEC_DEFAULT, wire)
+            else:
+                self._start_combo("lt+rt+a", COMBO_PULSE_SEC, wire, zero_stick=True)
+            self._log(f"[ros] {wire} 完成 | {self._snapshot()}")
+            return
+
+        self._log(f"[ros] 未知 FSM 指令: {wire}")
+
     def _trigger_mode(self, mode_key: str) -> None:
         label = MODE_LABELS.get(mode_key, mode_key)
         self._notify_mode(mode_key)
@@ -1161,12 +1493,17 @@ class BleRosBridge:
         RUNNING 中先 toggle 回 STANDBY 再换策略。
         """
         self._log(f"[ros] GAIT {'ON' if want_on else 'OFF'} 开始 | {self._snapshot()}")
+        if want_on:
+            ok_imu, imu_reason = self._imu_ready(wait=True)
+            if not ok_imu:
+                self._log(f"[ros][warn] GAIT ON 拒绝：{imu_reason}")
+                return
         if not self._ensure_default_bt():
             self._log("[ros][warn] 未进入 EXEC_DEFAULT/default_bt，步态可能无效")
 
         st = _norm_label(self._current_state)
         if want_on and st in ("", "init"):
-            self._stand_up()
+            self._stand_up(notify=False)
             st = _norm_label(self._current_state)
 
         if not self._switch_to_amp(prefer_standby=True):
@@ -1212,12 +1549,6 @@ class BleRosBridge:
                 5, timeout=2.0
             )
         return False
-
-    def _stand_up(self) -> bool:
-        if not self._request_stand():
-            return False
-        time.sleep(COMBO_HOLD_SEC + 0.2)
-        return self._wait_state("standby", "standing", timeout=STANDING_WAIT_SEC)
 
     def _toggle_upper(self, reason: str) -> None:
         if self._call_change_state_any(("toggle_policy", "toggle")):
@@ -1300,7 +1631,7 @@ class BleRosBridge:
                 msg = getattr(resp, "message", "") or ""
                 extra = getattr(resp, "current_policy", "") or ""
                 if ok:
-                    self._log(f"[ros] {label} 已接收 @ {name} {msg} {extra}".strip())
+                    self._log(f"[ros] {label} 服务已响应 @ {name} {msg} {extra}".strip())
                     return True
                 self._log(f"[ros][warn] {label} 失败 @ {name}: {msg}")
             except Exception as e:
