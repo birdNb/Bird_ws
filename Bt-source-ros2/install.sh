@@ -121,6 +121,7 @@ cleanup_residuals() {
   echo "[0/5] 清理旧服务与残留..."
   local units=(
     bird-ble.service
+    ros2-bringup.service
     torque-cmd-vel.service
     bird-ble-boot.service
     bt-control.service
@@ -139,7 +140,7 @@ cleanup_residuals() {
   pkill -f 'ble_gatt_boot\.pyc?' 2>/dev/null || true
   pkill -f 'torque_cmd_vel_bridge\.pyc?' 2>/dev/null || true
 
-  rm -f /etc/default/bird-ble /etc/default/torque-cmd-vel
+  rm -f /etc/default/bird-ble /etc/default/torque-cmd-vel /etc/default/ros2-bringup
 
   systemctl daemon-reload 2>/dev/null || true
   systemctl reset-failed 2>/dev/null || true
@@ -276,8 +277,12 @@ else
   echo "[warn] 缺少 scripts/install-ros2-autostart.sh，跳过 ROS2 自启"
 fi
 
-echo "[5/5] 启动蓝牙服务并自检..."
+echo "[5/5] 启动 ROS2 量产栈 → 蓝牙服务…"
 systemctl daemon-reload
+systemctl enable ros2-bringup.service 2>/dev/null || true
+systemctl restart ros2-bringup.service 2>/dev/null || systemctl start ros2-bringup.service 2>/dev/null || true
+echo "[info] 等待 ROS2 bringup 初始化（约 15s）…"
+sleep 15
 systemctl restart bird-ble.service || systemctl start bird-ble.service || true
 sleep 5
 
@@ -302,7 +307,8 @@ echo " 正式目录: ${INSTALL_ROOT}"
 echo " 蓝牙:     sudo systemctl status bird-ble"
 echo " 拖拽:     sudo systemctl status torque-cmd-vel  # PULL ON 后运行"
 echo " 语音:     ${VOICE_DIR}"
-echo " 日志:     journalctl -u bird-ble -f"
-echo " ROS2自启: ${INSTALL_HOME}/.config/autostart/Pi_plus_ros2.desktop"
+echo " 日志 BLE: journalctl -u bird-ble -f"
+echo " 日志 ROS: journalctl -u ros2-bringup -f"
+echo " ROS2自启: systemd ros2-bringup（仅此一路，桌面旧自启已删除）"
 echo " ROS1自启: 已 Hidden（Pi_plus_start.desktop）"
 "${BLE_DIR}/app/scripts/check.sh" || true

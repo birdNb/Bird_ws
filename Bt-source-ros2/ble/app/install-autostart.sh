@@ -50,13 +50,15 @@ sed \
   -e "s|@BIRD_USER@|${BIRD_USER}|g" \
   -e "s|@BIRD_HOME@|${BIRD_HOME}|g" \
   -e "s|@BIRD_BLE_UID@|${BIRD_BLE_UID}|g" \
+  -e "s|@COLCON_WS@|${COLCON_WS}|g" \
   "${UNIT_SRC}" >"${UNIT_DST}"
 
 if [ ! -f "${DEFAULT_ENV}" ]; then
   cat >"${DEFAULT_ENV}" <<EOF
-# Bird BLE 环境（install-autostart 维护 BLE_DEVICE_NAME_FILE）
+# Bird BLE 环境（install-autostart 维护）
 BLE_DEVICE_NAME_FILE=/var/lib/bird-ble/ble_device_name.conf
-# 额外启动参数（传给 run_ble_with_ros.sh）
+# 等待 ROS2 量产栈就绪的最长时间（秒）
+ROS2_WAIT_SEC=300
 EXTRA_ARGS=()
 EOF
   echo "[ok] 已创建 ${DEFAULT_ENV}"

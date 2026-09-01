@@ -101,11 +101,11 @@ P1Y0      # 抬头 10°
 P-1Y0     # 低头 10°
 P0Y1      # 右转 10°
 P0Y-1     # 左转 10°
-P0Y0      # 无偏移
+P0Y0      # 平滑回中（同 neck0）
 neck0     # 回中
 ```
 
-板端发布 `/pi_plus_absolute`（`head_yaw_joint` / `head_pitch_joint`）。
+板端发布 `/pi_plus_absolute`（`head_yaw_joint` / `head_pitch_joint`），实现见 `ble_neck_bridge.py`。
 
 ### 1.5 人脸跟踪（locate_face）
 

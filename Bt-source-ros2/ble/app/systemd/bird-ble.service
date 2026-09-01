@@ -1,8 +1,8 @@
 [Unit]
 Description=Bird BLE GATT Remote Control (BT_Control_0717)
 Documentation=file://@PKG_DIR@/docs/BLE_PROTOCOL.md
-After=bluetooth.service network-online.target
-Wants=bluetooth.service network-online.target
+After=bluetooth.service network-online.target ros2-bringup.service
+Wants=bluetooth.service network-online.target ros2-bringup.service
 
 [Service]
 Type=simple
@@ -12,7 +12,7 @@ WorkingDirectory=@BT_DIR@
 Environment=ROS_DISTRO=foxy
 Environment=RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
 Environment=CYCLONEDDS_URI=file://@BIRD_HOME@/cyclonedds.xml
-Environment=COLCON_WS=@BIRD_HOME@/colcon_ws
+Environment=COLCON_WS=@COLCON_WS@
 Environment=PKG_DIR=@PKG_DIR@
 Environment=BT_DIR=@BT_DIR@
 Environment=BIRD_WS=@BIRD_WS@

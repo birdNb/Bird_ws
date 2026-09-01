@@ -9,9 +9,9 @@ BLE 文本指令 → ROS2 量产算法桥接（Foxy / rclpy）。
   /hightorque_controller/switch_policy      bfm → amp
 失败时回退到 /joy 组合键，保留 ROS1 小程序操作习惯。
 
-摇杆:  X,Y,Z → /joy 左摇杆平移 + 右摇杆转向
+摇杆:  X,Y,Z → /joy（AMP）；BFM 运行时改发 /cmd_vel（符号+阈值方向映射）
 起立:  LT+RT+START（服务 standing / 手柄兜底）
-步态:  GAIT ON/OFF → 确认 AMP 后 toggle_policy（STANDBY ↔ RUNNING）
+步态:  GAIT ON/OFF → 保持当前 walk 策略(bfm/amp/amp_lower) 后 toggle_policy
 坐下:  LT+RT+RB（仅 standby）
 加速:  LT ON → LT 扳机 axes[2]=-1
 急停:  LT+RT+B → 服务 protect，失败则手柄
@@ -47,8 +47,33 @@ JOINT_STATES_WAIT_SEC = 15.0
 IMU_WAIT_SEC = 15.0
 IMU_STALE_SEC = 1.0
 AMP_POLICY_NAME = "amp"
+WALK_POLICIES = frozenset({"amp", "amp_lower", "bfm"})
 
-# 量产文档当前映射 / 建议映射：禁止切回 BFM 或 amp_lower
+# BFM motion source：只用符号/阈值选方向，示例幅值 0.8；激活 0.3 / 释放 0.25
+BFM_CMD_LEVEL = 0.8
+BFM_ACTIVATE_THRESH = 0.3
+BFM_RELEASE_THRESH = 0.25
+
+# BLE POL:* / 量产手柄可切策略（与 input_arbiter_walk allowed_policies + 编舞一致）
+ALLOWED_POLICIES = frozenset(
+    {
+        "bfm",
+        "amp",
+        "amp_lower",
+        "byd_small_kick",
+        "byd_power",
+        "byd_bb",
+        "byd_zzx",
+        "pi_plus_shanggouquan",
+        "pi_plus_zhidengtui",
+        "pi_plus_zhongquan",
+        "pi_plus_zoo",
+        "pi_plus_guanjun",
+        "SP8",
+    }
+)
+
+# 手柄误触禁止切 BFM/amp_lower；显式 POL:* 不受此限
 BLOCKED_POLICY_COMBOS = frozenset(
     {
         "lt+y",
@@ -172,7 +197,7 @@ MODE_LABELS: Dict[str, str] = {
 }
 
 _POWER_GATED_KINDS = frozenset(
-    {"stick", "mode", "action", "gait", "sprint", "upper_state"}
+    {"stick", "mode", "action", "gait", "sprint", "upper_state", "policy"}
 )
 
 from ble_neck_bridge import NeckController
@@ -217,6 +242,19 @@ def _norm_token(text: str) -> str:
 
 def _norm_label(text: Optional[str]) -> str:
     return (text or "").strip().lower()
+
+
+def _canonical_policy(name: Optional[str]) -> Optional[str]:
+    raw = (name or "").strip()
+    if not raw:
+        return None
+    if raw.upper() == "SP8":
+        return "SP8"
+    low = raw.lower()
+    for p in ALLOWED_POLICIES:
+        if p.lower() == low:
+            return p
+    return None
 
 
 def _clamp_axis(v: float, limit: float = STICK_XY_LIMIT) -> float:
@@ -321,8 +359,12 @@ class BleRosBridge:
         self._executor = None
         self._joy_pub = None
         self._ht_joy_pub = None
+        self._cmd_vel_pub = None
         self._Joy = None
+        self._Twist = None
         self._HightorqueJoy = None
+        self._bfm_dir = (0, 0, 0)  # linear.x / linear.y / angular.z 符号 -1/0/1
+        self._bfm_cmd_active = False
         self._neck = NeckController(log=log)
         self._motor_power = MotorPowerController(log=log)
         self._battery_pct: Optional[int] = None
@@ -451,6 +493,9 @@ class BleRosBridge:
             self._combo_until = 0.0
             self._combo_zero_stick = False
         self._set_sprint(False, log=False)
+        self._publish_cmd_vel(0.0, 0.0, 0.0)
+        self._bfm_dir = (0, 0, 0)
+        self._bfm_cmd_active = False
         self._log("[ros] 断连急停：摇杆回中")
 
     def handle_command(self, kind: str, text: str) -> None:
@@ -477,6 +522,8 @@ class BleRosBridge:
             self._trigger_upper_state(text)
         elif kind == "fsm":
             self._trigger_fsm(text)
+        elif kind == "policy":
+            self._trigger_policy(text)
 
     def _joy_path_alive(self) -> bool:
         for pub in (self._joy_pub, self._ht_joy_pub):
@@ -573,6 +620,7 @@ class BleRosBridge:
             from rclpy.node import Node
             from rclpy.qos import QoSProfile, ReliabilityPolicy
             from sensor_msgs.msg import JointState, Joy
+            from geometry_msgs.msg import Twist
             from std_msgs.msg import Int32, UInt8
         except ImportError as e:
             self._log(f"[ros] 未找到 rclpy/sensor_msgs: {e}")
@@ -583,10 +631,12 @@ class BleRosBridge:
             rclpy.init(args=None)
 
         self._Joy = Joy
+        self._Twist = Twist
         node = Node("ble_command_bridge")
         self._node = node
         qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE)
         self._joy_pub = node.create_publisher(Joy, "/joy", qos)
+        self._cmd_vel_pub = node.create_publisher(Twist, "/cmd_vel", qos)
         try:
             from hightorque_msgs.msg import HightorqueJoy
 
@@ -664,19 +714,20 @@ class BleRosBridge:
         spin_thread = threading.Thread(target=executor.spin, daemon=True)
         spin_thread.start()
 
-        self._log("[ros] 已启用 ROS2 量产控制桥（默认 AMP，不用 BFM）")
-        self._log("[ros] 摇杆 X/Y/Z → /joy 与 /hightorque_joy")
-        self._log("[ros] GAIT → switch_policy(amp) + change_state(toggle_policy)")
+        self._log("[ros] 已启用 ROS2 量产控制桥")
+        self._log("[ros] 摇杆 X/Y/Z → AMP:/joy；BFM running → /cmd_vel 三轴±0.8(含斜向/自转)")
+        self._log("[ros] GAIT → 保持 walk 策略(bfm/amp/amp_lower) + toggle_policy")
         self._log("[ros] 起立 change_state(standing)；失败再发手柄组合")
         self._log("[ros] 起立 LT+RT+START | 坐下 LT+RT+RB | 加速 LT 扳机 | 急停 protect")
         self._ready.set()
-        self._log(f"[ros] /joy+/hightorque_joy {JOY_PUBLISH_HZ}Hz | 超时 {STICK_TIMEOUT_SEC}s")
+        self._log(f"[ros] /joy+/cmd_vel {JOY_PUBLISH_HZ}Hz | 超时 {STICK_TIMEOUT_SEC}s")
 
         interval = 1.0 / JOY_PUBLISH_HZ
         while not self._stop.is_set() and rclpy.ok():
             self._neck.tick()
             self._motor_power.tick()
             self._tick_joy()
+            self._tick_cmd_vel()
             now = time.monotonic()
             if now - self._last_fsm_pub_ts >= FSM_PUBLISH_PERIOD_SEC:
                 self._publish_fsm()
@@ -770,6 +821,93 @@ class BleRosBridge:
             self._stick_filtered = filtered
             return filtered
 
+    def _bfm_cmd_vel_mode(self) -> bool:
+        """BFM 方向输入仅在 policy=bfm 且 state=running 时生效。"""
+        return (
+            _norm_label(self._current_policy) == "bfm"
+            and _norm_label(self._current_state) == "running"
+        )
+
+    @staticmethod
+    def _hysteresis_dir(value: float, prev: int) -> int:
+        mag = abs(value)
+        if prev == 0:
+            if mag >= BFM_ACTIVATE_THRESH:
+                return 1 if value > 0.0 else -1
+            return 0
+        if mag < BFM_RELEASE_THRESH:
+            return 0
+        if value > 0.0:
+            return 1
+        if value < 0.0:
+            return -1
+        return 0
+
+    def _stick_to_bfm_twist(self, stick: Optional[StickCommand]) -> Tuple[float, float, float]:
+        """
+        BLE X前+/Y右+/Z右转+ → cmd_vel linear.x前+/y左+/angular.z左转+
+        （与 /joy 映射一致：ly=+X, lx=-Y, rx=-Z），再按阈值输出 ±0.8。
+        """
+        if stick is None:
+            self._bfm_dir = (0, 0, 0)
+            return 0.0, 0.0, 0.0
+        raw_x = float(stick.x)
+        raw_y = float(-stick.y)
+        raw_z = float(-stick.z)
+        dx, dy, dz = self._bfm_dir
+        dx = self._hysteresis_dir(raw_x, dx)
+        dy = self._hysteresis_dir(raw_y, dy)
+        dz = self._hysteresis_dir(raw_z, dz)
+        self._bfm_dir = (dx, dy, dz)
+        return (
+            dx * BFM_CMD_LEVEL,
+            dy * BFM_CMD_LEVEL,
+            dz * BFM_CMD_LEVEL,
+        )
+
+    def _publish_cmd_vel(self, lx: float, ly: float, az: float) -> None:
+        if self._cmd_vel_pub is None or self._Twist is None:
+            return
+        msg = self._Twist()
+        msg.linear.x = float(lx)
+        msg.linear.y = float(ly)
+        msg.linear.z = 0.0
+        msg.angular.x = 0.0
+        msg.angular.y = 0.0
+        msg.angular.z = float(az)
+        self._cmd_vel_pub.publish(msg)
+
+    def _tick_cmd_vel(self) -> None:
+        """BFM running：按 XYZ 独立滞回发离散三轴 /cmd_vel（±0.8），支持斜向与原地转向。"""
+        in_bfm = self._bfm_cmd_vel_mode()
+        if not in_bfm:
+            if self._bfm_cmd_active:
+                self._publish_cmd_vel(0.0, 0.0, 0.0)
+                self._bfm_dir = (0, 0, 0)
+                self._bfm_cmd_active = False
+            return
+
+        # 使用 _tick_joy 已更新的滤波摇杆，避免二次 EMA
+        stick = self._peek_stick()
+        lx, ly, az = self._stick_to_bfm_twist(stick)
+        moving = abs(lx) > 1e-6 or abs(ly) > 1e-6 or abs(az) > 1e-6
+        if not moving:
+            if self._bfm_cmd_active:
+                self._publish_cmd_vel(0.0, 0.0, 0.0)
+                self._bfm_cmd_active = False
+            return
+        self._publish_cmd_vel(lx, ly, az)
+        self._bfm_cmd_active = True
+
+    def _peek_stick(self) -> Optional[StickCommand]:
+        now = time.monotonic()
+        with self._lock:
+            if self._stick_filtered is None:
+                return None
+            if now - self._last_stick_ts > STICK_TIMEOUT_SEC:
+                return None
+            return self._stick_filtered
+
     def _tick_joy(self) -> None:
         if self._joy_pub is None or self._Joy is None or self._node is None:
             return
@@ -789,15 +927,25 @@ class BleRosBridge:
                 self._combo_parts = []
                 self._combo_zero_stick = False
 
-        stick = None if zero_stick else self._current_stick()
+        use_bfm_cmd = self._bfm_cmd_vel_mode()
+        # BFM：方向只走 /cmd_vel（X/Y/Z→前进/左移/左转），不把摇杆写入 /joy，
+        # 避免 joy_mapper 与物理手柄零速互相覆盖，导致只剩前后能用。
+        if use_bfm_cmd:
+            if not zero_stick:
+                self._current_stick()  # 刷新 EMA，供 _tick_cmd_vel 使用
+            if not combo_parts:
+                return
+            stick = None
+        else:
+            stick = None if zero_stick else self._current_stick()
+
         if stick is not None:
-            # 量产/ROS1 习惯: ly>0 前进, lx>0 左移, rx>0 左转
-            # BLE: X 前+, Y 右+, Z 右转+
+            # AMP：连续摇杆
             msg.axes[AXIS_LX] = _to_unit(-stick.y, STICK_XY_LIMIT)
             msg.axes[AXIS_LY] = _to_unit(stick.x, STICK_XY_LIMIT)
             msg.axes[AXIS_RX] = _to_unit(-stick.z, STICK_Z_LIMIT)
 
-        if sprint:
+        if sprint and not use_bfm_cmd:
             msg.axes[AXIS_LT] = TRIGGER_PRESS
         self._apply_combo_parts(msg, combo_parts)
 
@@ -1025,6 +1173,61 @@ class BleRosBridge:
             self._call_common_policy(False, "stop_policy")
             return
         self._log(f"[ros] 未知上层状态指令: {wire}")
+
+    def _trigger_policy(self, policy_name: str) -> None:
+        """POL:{name} → /hightorque_controller/switch_policy。"""
+        name = _canonical_policy(policy_name)
+        wire = f"POL:{policy_name}"
+        if not name:
+            self._log(f"[ros] 拒绝未知策略: {wire}")
+            return
+        wire = f"POL:{name}"
+        if _norm_label(self._current_policy) == _norm_label(name):
+            self._log(f"[ros] 已是策略 {name} | {self._snapshot()}")
+            if name == "bfm":
+                self._ensure_bfm_running(wire)
+            return
+
+        self._log(f"[ros] {wire} 开始 | {self._snapshot()}")
+        if not self._ensure_default_bt():
+            self._log("[ros][warn] 未进入 default_bt，策略切换可能失败")
+
+        st = _norm_label(self._current_state)
+        if st == "running":
+            self._toggle_upper(f"{wire} 前切 STANDBY")
+            self._wait_state("standby", timeout=STATE_WAIT_SEC)
+
+        if self._call_switch_policy(name) and self._wait_policy(
+            name, timeout=POLICY_WAIT_SEC
+        ):
+            self._log(f"[ros] {wire} 完成 | {self._snapshot()}")
+            if name == "bfm":
+                self._ensure_bfm_running(wire)
+            return
+        self._log(f"[ros][warn] {wire} 未确认 current_policy | {self._snapshot()}")
+
+    def _ensure_bfm_running(self, reason: str) -> None:
+        """BFM 方向输入要求 state=running；切策略后自动 toggle 进入。"""
+        if _norm_label(self._current_policy) != "bfm":
+            return
+        if _norm_label(self._current_state) == "running":
+            self._policy_on = True
+            self._notify_gait("ON")
+            self._log(f"[ros] BFM 已在 RUNNING，摇杆走 /cmd_vel | {self._snapshot()}")
+            return
+        st = _norm_label(self._current_state)
+        if st not in ("standby", "init", ""):
+            self._log(
+                f"[ros][warn] BFM 当前 state={st}，请先 ST:standing 到 standby 再 GAIT ON"
+            )
+            return
+        self._toggle_upper(f"{reason} → RUNNING")
+        if self._wait_state("running", timeout=STATE_WAIT_SEC):
+            self._policy_on = True
+            self._notify_gait("ON")
+            self._log(f"[ros] BFM 已进 RUNNING，推摇杆即可行走 | {self._snapshot()}")
+        else:
+            self._log(f"[ros][warn] BFM 未进 RUNNING，请发 GAIT ON | {self._snapshot()}")
 
     def _call_common_policy(self, enable: bool, label: str) -> bool:
         clients = self._start_policy_clients if enable else self._stop_policy_clients
@@ -1486,11 +1689,11 @@ class BleRosBridge:
 
     def _gait_worker_impl(self, want_on: bool) -> None:
         """
-        量产推荐顺序：
+        量产顺序：
           default_bt + STANDBY
-            -> switch_policy(amp) 并等待 current_policy
+            -> 保持/切到 walk 策略（已是 bfm/amp/amp_lower 则不强制改 amp）
             -> toggle_policy 进入 RUNNING（GAIT ON）
-        RUNNING 中先 toggle 回 STANDBY 再换策略。
+        RUNNING 中先 toggle 回 STANDBY。
         """
         self._log(f"[ros] GAIT {'ON' if want_on else 'OFF'} 开始 | {self._snapshot()}")
         if want_on:
@@ -1506,12 +1709,13 @@ class BleRosBridge:
             self._stand_up(notify=False)
             st = _norm_label(self._current_state)
 
-        if not self._switch_to_amp(prefer_standby=True):
-            self._log("[ros][warn] AMP 切换未在 topic 上确认，仍尝试步态切换")
+        if not self._ensure_walk_policy(prefer_standby=True):
+            self._log("[ros][warn] walk 策略未确认，仍尝试步态切换")
 
         st = _norm_label(self._current_state)
+        pol = _norm_label(self._current_policy)
         if want_on:
-            if st == "running" and _norm_label(self._current_policy) in ("amp", ""):
+            if st == "running" and pol in WALK_POLICIES | {""}:
                 self._policy_on = True
                 self._notify_gait("ON")
                 self._log(f"[ros] GAIT ON 已在 RUNNING | {self._snapshot()}")
@@ -1531,6 +1735,9 @@ class BleRosBridge:
         with self._lock:
             self._stick_target = None
             self._stick_filtered = None
+        self._publish_cmd_vel(0.0, 0.0, 0.0)
+        self._bfm_dir = (0, 0, 0)
+        self._bfm_cmd_active = False
         if st == "running":
             self._toggle_upper("GAIT OFF → STANDBY")
             self._wait_state("standby", timeout=STATE_WAIT_SEC)
@@ -1557,6 +1764,13 @@ class BleRosBridge:
         self._start_combo("lt+rt+lb", COMBO_HOLD_SEC, reason)
         time.sleep(COMBO_HOLD_SEC + 0.25)
 
+    def _ensure_walk_policy(self, prefer_standby: bool = True) -> bool:
+        """已是 bfm/amp/amp_lower 则保留；否则默认切到 amp。"""
+        pol = _norm_label(self._current_policy)
+        if pol in WALK_POLICIES:
+            return True
+        return self._switch_to_amp(prefer_standby=prefer_standby)
+
     def _switch_to_amp(self, prefer_standby: bool = True) -> bool:
         if _norm_label(self._current_policy) == AMP_POLICY_NAME:
             return True
@@ -1577,15 +1791,15 @@ class BleRosBridge:
         return self._wait_policy(AMP_POLICY_NAME, timeout=3.0)
 
     def _call_switch_policy(self, policy_name: str) -> bool:
-        name = (policy_name or "").strip().lower()
-        if name != AMP_POLICY_NAME:
-            self._log(f"[ros] 拒绝切换到非 AMP 策略: {policy_name}")
+        name = _canonical_policy(policy_name)
+        if not name:
+            self._log(f"[ros] 拒绝未知/禁用策略: {policy_name}")
             return False
         if self._SwitchPolicy is None or not self._policy_clients:
             return False
         req = self._SwitchPolicy.Request()
-        req.policy_name = AMP_POLICY_NAME
-        return self._try_clients(self._policy_clients, req, f"SwitchPolicy({AMP_POLICY_NAME})")
+        req.policy_name = name
+        return self._try_clients(self._policy_clients, req, f"SwitchPolicy({name})")
 
     def _call_change_state_any(self, commands: Sequence[str]) -> bool:
         for cmd in commands:

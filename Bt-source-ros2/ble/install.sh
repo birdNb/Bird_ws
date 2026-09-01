@@ -1,5 +1,9 @@
 #!/bin/bash
-# Bird BLE 一键安装：系统依赖 + 开机自启
+# Bird BLE 一键安装/更新（仅改 Bt-source-ros2，不碰 hightorque_workspace / action_library 源码）
+# 用法: cd ~/Bird_ws/Bt-source-ros2/ble && sudo ./install.sh
+#
+# ROS2 量产栈自启请另执行:
+#   sudo ~/Bird_ws/Bt-source-ros2/scripts/install-ros2-autostart.sh
 set -euo pipefail
 
 PKG_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -14,18 +18,31 @@ fi
 INSTALL_USER="${SUDO_USER:-${BIRD_USER:-hightorque}}"
 INSTALL_HOME="$(getent passwd "${INSTALL_USER}" | cut -d: -f6)"
 INSTALL_UID="$(id -u "${INSTALL_USER}" 2>/dev/null || echo 1000)"
-COLCON_WS="${COLCON_WS:-${INSTALL_HOME}/colcon_ws}"
 BIRD_WS="${BIRD_WS:-${INSTALL_HOME}/Bird_ws}"
 INSTALL_GID="$(id -g "${INSTALL_USER}" 2>/dev/null || echo 1000)"
 
+if [ -z "${COLCON_WS:-}" ] || [ ! -f "${COLCON_WS}/install/setup.bash" ]; then
+  COLCON_WS=""
+  for _ws in \
+    "${INSTALL_HOME}/hightorque_workspace" \
+    "${INSTALL_HOME}/colcon_ws"; do
+    if [ -f "${_ws}/install/setup.bash" ]; then
+      COLCON_WS="${_ws}"
+      break
+    fi
+  done
+  COLCON_WS="${COLCON_WS:-${INSTALL_HOME}/hightorque_workspace}"
+fi
+unset _ws
+
 echo "=========================================="
-echo " Bird BLE ROS2 遥控安装包 (Bt-source-ros2)"
+echo " Bird BLE ROS2 遥控安装/更新 (Bt-source-ros2)"
 echo " 安装目录: ${PKG_DIR}"
 echo " 运行用户: ${INSTALL_USER}"
-echo " ROS2 工作空间: ${COLCON_WS}"
+echo " ROS2 工作空间(只读引用): ${COLCON_WS}"
 echo "=========================================="
 
-echo "[1/4] 安装系统依赖..."
+echo "[1/5] 安装系统依赖..."
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 apt-get install -y --no-install-recommends \
@@ -39,7 +56,7 @@ else
   echo "[ok] ROS2 Foxy 已安装"
 fi
 
-echo "[2/4] 配置 BlueZ Experimental..."
+echo "[2/5] 配置 BlueZ Experimental..."
 CONF="/etc/bluetooth/main.conf"
 if [ -f "${CONF}" ] && ! grep -qE '^[[:space:]]*Experimental[[:space:]]*=[[:space:]]*true' "${CONF}" 2>/dev/null; then
   BACKUP="${CONF}.bak.$(date +%Y%m%d%H%M%S)"
@@ -54,7 +71,7 @@ if [ -f "${CONF}" ] && ! grep -qE '^[[:space:]]*Experimental[[:space:]]*=[[:spac
   echo "[ok] 已启用 Experimental=true（备份: ${BACKUP}）"
 fi
 
-echo "[3/4] 写入环境 /etc/default/bird-ble ..."
+echo "[3/5] 写入环境 /etc/default/bird-ble ..."
 cat >/etc/default/bird-ble <<EOF
 BIRD_USER=${INSTALL_USER}
 BIRD_HOME=${INSTALL_HOME}
@@ -84,21 +101,17 @@ export BIRD_HOME="${INSTALL_HOME}"
 export BIRD_BLE_UID="${INSTALL_UID}"
 export BIRD_WS="${BIRD_WS}"
 export COLCON_WS="${COLCON_WS}"
+export PKG_DIR="${PKG_DIR}"
 
 chown "${INSTALL_USER}:${INSTALL_GID}" "${PKG_DIR}/ble_device_name.conf" 2>/dev/null || true
 chmod 664 "${PKG_DIR}/ble_device_name.conf" 2>/dev/null || true
-chmod +x "${APP_DIR}"/*.sh "${APP_DIR}/scripts/"*.sh "${APP_DIR}/systemd/"*.sh
+chmod +x "${APP_DIR}"/*.sh "${APP_DIR}/scripts/"*.sh "${APP_DIR}/systemd/"*.sh 2>/dev/null || true
+chmod +x "${APP_DIR}/ensure_bfm_joy_mapper.sh" "${APP_DIR}/joy_mapper_bfm_fix.py" 2>/dev/null || true
 
-echo "[4/5] 安装 systemd 开机自启..."
+echo "[4/5] 安装 systemd 开机自启 (bird-ble)..."
 "${APP_DIR}/install-autostart.sh"
 
-echo "[5/5] 检查 ROS2 / colcon 环境..."
-if [ -f "${COLCON_WS}/install/setup.bash" ]; then
-  echo "[ok] colcon: ${COLCON_WS}/install"
-else
-  echo "[warn] 未找到 colcon 工作空间（${COLCON_WS}）"
-fi
-
+echo "[5/5] 重启 bird-ble 使本目录代码生效..."
 set +u
 [ -f /opt/ros/foxy/setup.bash ] && source /opt/ros/foxy/setup.bash
 [ -f "${COLCON_WS}/install/setup.bash" ] && source "${COLCON_WS}/install/setup.bash"
@@ -108,12 +121,17 @@ python3 -c "import rclpy" 2>/dev/null && echo "[ok] rclpy 可导入" \
   || echo "[warn] 无法 import rclpy — 检查 ROS2 Foxy"
 
 systemctl restart bird-ble.service || systemctl start bird-ble.service || true
-sleep 5
+sleep 3
+
+# bird-ble-boot 内也会 ensure；此处再补一次，覆盖手动 launch 已拉起的 joy_mapper
+"${APP_DIR}/ensure_bfm_joy_mapper.sh" || true
+
 echo ""
 echo "=========================================="
-echo " 安装完成"
+echo " BLE 安装/更新完成（未改 hightorque_workspace 源码）"
 echo "=========================================="
+echo " 以后更新 BLE:  cd ${PKG_DIR} && sudo ./install.sh"
+echo " ROS2 开机自启: sudo ${BIRD_WS}/Bt-source-ros2/scripts/install-ros2-autostart.sh"
 echo " 状态: sudo systemctl status bird-ble"
 echo " 日志: journalctl -u bird-ble -f"
-echo " 手动: cd ${APP_DIR} && ./start.sh"
 "${APP_DIR}/scripts/check.sh" || true

@@ -1,0 +1,24 @@
+[Unit]
+Description=ROS2 bfm_real bringup (hightorque_workspace)
+After=network-online.target
+Wants=network-online.target
+Before=bird-ble.service
+
+[Service]
+Type=simple
+User=nvidia
+Group=nvidia
+WorkingDirectory=/home/nvidia/hightorque_workspace
+Environment=HOME=/home/nvidia
+Environment=RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+Environment=CYCLONEDDS_URI=file:///home/nvidia/cyclonedds.xml
+ExecStart=/home/nvidia/Bird_ws/Bt-source-ros2/scripts/ros2-bringup-boot.sh
+Restart=on-failure
+RestartSec=15
+TimeoutStartSec=600
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ros2-bringup
+
+[Install]
+WantedBy=multi-user.target

@@ -90,7 +90,7 @@ _PULL_SERVICE = "torque-cmd-vel.service"
 _PULL_AUTO_OFF_KINDS = frozenset(
     {"stick", "mode", "action", "gait", "sprint", "neck", "motor_power", "upper_state"}
 )
-LINK_IDLE_TIMEOUT_SEC = 7.0
+LINK_IDLE_TIMEOUT_SEC = 60.0
 LINK_WATCHDOG_TICK_MS = 1000
 CONNECT_ATTEMPT_LOG_INTERVAL_SEC = 5.0
 STICK_LOG_RE = re.compile(
@@ -372,9 +372,11 @@ class BleGattServer:
         return False
 
     def _start_link_watchdog(self) -> None:
-        self._touch_link_watchdog()
+        # 连接成功后先不 touch：等首包 FFE1（握手/心跳/摇杆）再开始空闲计时，
+        # 避免「刚连上、小程序还没写特征」就被 踢线。
         if self._link_watchdog_source_id is not None:
             return
+        self._link_last_downlink_ts = 0.0
         self._link_watchdog_source_id = GLib.timeout_add(
             LINK_WATCHDOG_TICK_MS, self._link_watchdog_cb
         )
@@ -414,6 +416,7 @@ class BleGattServer:
             return True
         last = self._link_last_downlink_ts
         if last <= 0.0:
+            # 尚未收到任何下行，保持连接（等 M_default / 心跳 / 摇杆）
             return True
         idle = time.monotonic() - last
         if idle < LINK_IDLE_TIMEOUT_SEC:

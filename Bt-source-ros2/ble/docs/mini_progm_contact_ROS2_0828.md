@@ -9,7 +9,7 @@
 | 标记 | 含义 |
 |------|------|
 | ✅ | 当前固件已支持该 BLE 指令 |
-| 🔜 | 文档已定义，板端待实现（`POL:`/`WP:`/`SPD`/`VEL`） |
+| 🔜 | 文档已定义，板端待实现（`WP:`/`SPD`/`VEL`） |
 | — | 无 ROS，纯 BLE / 系统 |
 
 ---
@@ -79,21 +79,23 @@ FSM:default   →  change_fsm_state {states: ['default']}   # 「默认模式」
 
 | 用户操作 | BLE 指令 | 类型 | ROS2 全名 | 消息类型 | 字段 / 说明 | 板端 |
 |----------|----------|------|-----------|----------|-------------|------|
-| 摇杆前后左右转 | `X:{x},Y:{y},Z:{z}` | 话题 | `/cmd_vel` | `geometry_msgs/msg/Twist` | `linear.x/y`, `angular.z`（板端从 XYZ 换算） | 🔜 目标；✅ 当前经 `/joy` |
+| 摇杆前后左右转 | `X:{x},Y:{y},Z:{z}` | 话题 | `/cmd_vel`（BFM running）或 `/joy`（AMP） | `Twist` / `Joy` | BFM：符号+阈值→±0.8；AMP：经 joy_mapper | ✅ |
 | 显式速度 | `VEL:{lx},{ly},{az}` | 话题 | `/cmd_vel` | `geometry_msgs/msg/Twist` | 直接填三轴 | 🔜 |
-| 停止 | `X:0,Y:0,Z:0` | 话题 | `/cmd_vel` | `Twist` | 全 0 | 🔜 |
+| 停止 | `X:0,Y:0,Z:0` | 话题 | `/cmd_vel` | `Twist` | 全 0 → BFM standing | ✅ |
 | **2 倍速** | `SPD ON` | 话题 | `/cmd_vel` | `Twist` | 发布前线/角速度 ×2 | 🔜 |
 | 关闭 2 倍速 | `SPD OFF` | 话题 | `/cmd_vel` | `Twist` | 恢复 ×1 | 🔜 |
 
-**前提**：`MP ON` + 上电 2.5s + `GAIT ON`（`current_state=running`）。
+**前提**：`MP ON` + 上电 2.5s + `GAIT ON`（`current_state=running`）。BFM 还须 `current_policy=bfm`。
 
-**XYZ → `/cmd_vel` 换算（板端）：**
+**BFM：XYZ → `/cmd_vel`（板端映射，与文档 §5 一致）**
 
-| BLE 轴 | `/cmd_vel` 字段 | 方向 |
-|--------|-----------------|------|
-| X（前+） | `linear.x` | 板端取反 |
-| Y（右+） | `linear.y` | 板端取反 |
-| Z（右转+） | `angular.z` | 板端取反 |
+| BLE 轴 | 映射到 Twist | 激活 | 输出 |
+|--------|--------------|------|------|
+| X（前+） | `linear.x` | \|v\|≥0.3 / 释放 0.25 | ±0.8 |
+| Y（右+） | `linear.y`（取反→左+） | 同上 | ±0.8 |
+| Z（右转+） | `angular.z`（取反→左转+） | 同上 | ±0.8 |
+
+50Hz 在摇杆有效时持续发布三轴（可同时非零 → 斜向/行进转向）；松杆发一次零速后停发。BFM 不向 `/joy` 写摇杆；`joy_mapper` 回中也不再发零速，避免盖掉 BLE 的左右/自转/复合方向。
 
 ### 0.5 步态 / 策略切换（服务 switch_policy）
 
@@ -124,7 +126,7 @@ FSM:default   →  change_fsm_state {states: ['default']}   # 「默认模式」
 | 猪猪侠舞 | `POL:byd_zzx` | `byd_zzx` | ✅ |
 | SP8 | `POL:SP8` | `SP8` | ✅ |
 
-板端：🔜（当前部分动作仍走 `/joy` 组合键兜底）
+板端：✅ 步态策略 `POL:bfm|amp|amp_lower`；编舞策略同表 ✅；`piplus_walk` / `pi_plus_soccer` 仍 ❌
 
 ### 0.7 Waypoint 动作（服务 execute_waypoint）
 

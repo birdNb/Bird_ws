@@ -37,6 +37,8 @@ ST_RE = re.compile(r"^ST:(standing|sit|toggle|start|stop)$", re.IGNORECASE)
 FSM_RE = re.compile(
     r"^FSM:(default|next|prev|confirm|init|protect)$", re.IGNORECASE
 )
+# 步态/策略：POL:bfm | POL:amp | POL:amp_lower | POL:byd_power | POL:SP8 …
+POL_RE = re.compile(r"^POL:([A-Za-z][A-Za-z0-9_]{0,63})$")
 HANDSHAKE_RE = re.compile(r"^M_default$", re.IGNORECASE)
 HEARTBEAT_RE = re.compile(r"^1$", re.IGNORECASE)
 
@@ -75,7 +77,7 @@ PULSE_ACTION_KEYS = frozenset({
     "a", "x",
     "lt+dpr", "lt+dpd", "lt+dpl",
 })
-NECK_OFFSET_RE = re.compile(r"^[Pp]([+-]?\d+)Y([+-]?\d+)$")
+NECK_OFFSET_RE = re.compile(r"^[Pp]([+-]?\d+)[Yy]([+-]?\d+)$")
 NECK_CENTER_RE = re.compile(r"^neck0$", re.IGNORECASE)
 LOCATE_FACE_RE = re.compile(r"^locate_face\s+(ON|OFF)$", re.IGNORECASE)
 MP_RE = re.compile(r"^MP\s+(ON|OFF)$", re.IGNORECASE)
@@ -105,6 +107,7 @@ class CommandKind(str, Enum):
     MODE = "mode"
     UPPER_STATE = "upper_state"
     FSM = "fsm"
+    POLICY = "policy"
     ACTION = "action"
     NECK = "neck"
     LOCATE_FACE = "locate_face"
@@ -197,6 +200,17 @@ def classify_payload(text: str) -> Tuple[CommandKind, str, str]:
         key = m_fsm.group(1).lower()
         wire = f"FSM:{key}"
         return CommandKind.FSM, key, wire
+
+    m_pol = POL_RE.match(raw)
+    if m_pol:
+        name = m_pol.group(1)
+        # SP8 等保留原文大小写；其余策略名统一小写以匹配控制器
+        if name.upper() == "SP8":
+            name = "SP8"
+        else:
+            name = name.lower()
+        wire = f"POL:{name}"
+        return CommandKind.POLICY, name, wire
 
     if ACTION_RE.match(raw):
         key = re.sub(r"\s+", "", raw).lower()
@@ -494,6 +508,17 @@ class CommandDispatcher:
                 self._handle(kind, payload)
             except Exception as e:
                 self._log_warn(f"FSM 处理失败: {e}")
+                return
+            if self._ack is not None:
+                self._ack(wire)
+            return
+
+        if kind == CommandKind.POLICY:
+            self._log_rx(wire)
+            try:
+                self._handle(kind, payload)
+            except Exception as e:
+                self._log_warn(f"策略切换失败: {e}")
                 return
             if self._ack is not None:
                 self._ack(wire)

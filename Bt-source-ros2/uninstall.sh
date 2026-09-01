@@ -33,7 +33,7 @@ if [ "$(id -u)" -ne 0 ]; then
   exit $?
 fi
 
-for u in bird-ble.service torque-cmd-vel.service; do
+for u in bird-ble.service ros2-bringup.service torque-cmd-vel.service; do
   systemctl stop "${u}" 2>/dev/null || true
   systemctl disable "${u}" 2>/dev/null || true
   rm -f "/etc/systemd/system/${u}"
@@ -55,6 +55,6 @@ if [ -f "${ROS2_DESKTOP}" ]; then
   echo "[ok] 已隐藏 ROS2 步态自启: ${ROS2_DESKTOP}"
 fi
 
-echo "[ok] 已移除 bird-ble / torque-cmd-vel 开机服务"
+echo "[ok] 已移除 bird-ble / ros2-bringup / torque-cmd-vel 开机服务"
 echo "    正式目录默认保留: ~/Bird_ws/Bt-source-ros2"
 echo "    若需删除: rm -rf ~/Bird_ws/Bt-source-ros2"

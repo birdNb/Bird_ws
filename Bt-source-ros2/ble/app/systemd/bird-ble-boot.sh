@@ -78,11 +78,23 @@ wait_dds_network() {
 }
 wait_dds_network
 
+# 注意：不要阻塞等待 midware/joint_states。
+# 否则 GATT 服务迟迟不启动 → 手机能搜到名称/残留广播但连不上。
+# ROS2 由 ble_ros_bridge 后台等待；指令在栈未就绪时会打 warn。
+if ! pgrep -f hightorque_controller_node >/dev/null 2>&1; then
+  echo "[bird-ble] 提示: 控制器尚未运行，先启动 BLE；请确认 systemctl status ros2-bringup" >&2
+fi
+
 systemctl stop torque-cmd-vel.service 2>/dev/null || true
 systemctl disable torque-cmd-vel.service 2>/dev/null || true
 pkill -f 'locate_face_cpp/build/locate_face' 2>/dev/null || true
 pkill -f 'locate_face\.py' 2>/dev/null || true
 pkill -f 'face_yunet_worker' 2>/dev/null || true
+
+# BFM：确保 joy_mapper 回中不发零速（与 install.sh 同一套逻辑）
+if [ -x "${BT_DIR}/ensure_bfm_joy_mapper.sh" ]; then
+  "${BT_DIR}/ensure_bfm_joy_mapper.sh" || echo "[bird-ble] warn: ensure_bfm_joy_mapper 失败" >&2
+fi
 
 EXTRA_ARGS=()
 if [ -f /etc/default/bird-ble ]; then
