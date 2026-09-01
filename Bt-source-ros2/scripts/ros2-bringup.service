@@ -1,21 +1,27 @@
 [Unit]
 Description=ROS2 bfm_real bringup (hightorque_workspace)
-After=network-online.target
-Wants=network-online.target
+After=network-online.target bird-imu-serial.service
+Wants=network-online.target bird-imu-serial.service
 Before=bird-ble.service
 
 [Service]
 Type=simple
 User=nvidia
 Group=nvidia
+SupplementaryGroups=dialout
 WorkingDirectory=/home/nvidia/hightorque_workspace
 Environment=HOME=/home/nvidia
 Environment=RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
-Environment=CYCLONEDDS_URI=file:///home/nvidia/cyclonedds.xml
+Environment=CYCLONEDDS_URI=file:///home/nvidia/.config/bird/cyclonedds.runtime.xml
+# 启动前清残留（root 权限），避免与旧手动 launch 抢电机
+ExecStartPre=+/home/nvidia/Bird_ws/Bt-source-ros2/scripts/ros2-kill-old-stack.sh
 ExecStart=/home/nvidia/Bird_ws/Bt-source-ros2/scripts/ros2-bringup-boot.sh
-Restart=on-failure
-RestartSec=15
+# 节点因 DDS 崩掉时：boot 脚本会主动退出，触发重试（等 WiFi/UDP 真正可用）
+Restart=always
+RestartSec=10
 TimeoutStartSec=600
+KillMode=control-group
+TimeoutStopSec=30
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=ros2-bringup

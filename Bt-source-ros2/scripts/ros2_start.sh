@@ -6,49 +6,28 @@ set -eo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 _kill_old_stack() {
-  echo "[ros2_start] 清理旧 ROS2 量产进程..."
-  # 若 systemd 自启仍在跑，尽量停掉（无权限则依赖后面 pkill）
-  if systemctl is-active --quiet ros2-bringup.service 2>/dev/null; then
-    systemctl stop ros2-bringup.service 2>/dev/null || true
+  if [ -x "${SCRIPT_DIR}/ros2-kill-old-stack.sh" ]; then
+    "${SCRIPT_DIR}/ros2-kill-old-stack.sh" || true
+    return
   fi
-
-  # 先温和结束 launch 与核心节点
+  echo "[ros2_start] 清理旧 ROS2 量产进程..."
   local patterns=(
     'ros2 launch hightorque_bringup bfm_real'
-    'ros2-bringup-boot.sh'
     'hightorque_controller_node'
     'hightorque_midware_node'
-    'input_arbiter_walk'
-    'bfm_motion_source'
-    'recorded_bfm_joint_publisher'
-    'bfm_startup_guard'
     'yesense_imu_node'
-    'hightorque_oled_node'
-    'hightorque_power'
-    'power_node'
-    'joy_mapper_node'
-    'joy_linux_node'
-    'wait_and_stand'
   )
   local p
   for p in "${patterns[@]}"; do
     pkill -f "$p" 2>/dev/null || true
   done
   sleep 1
-  # 残留则强杀
-  for p in "${patterns[@]}"; do
-    pkill -KILL -f "$p" 2>/dev/null || true
-  done
-  sleep 1
-
-  if pgrep -af 'bfm_real|hightorque_controller_node|hightorque_midware_node|yesense_imu_node' >/dev/null 2>&1; then
-    echo "[ros2_start][warn] 仍有残留（可能属 root/其它用户）:"
-    pgrep -af 'bfm_real|hightorque_controller_node|hightorque_midware_node|yesense_imu_node' || true
-    echo "[ros2_start][warn] 可执行: sudo ${SCRIPT_DIR}/stop-ros2-autostart.sh"
-  else
-    echo "[ros2_start] 旧进程已清空"
-  fi
 }
+
+# 手动启动时若 systemd 栈在跑，先停掉以免双开
+if systemctl is-active --quiet ros2-bringup.service 2>/dev/null; then
+  systemctl stop ros2-bringup.service 2>/dev/null || true
+fi
 
 _kill_old_stack
 

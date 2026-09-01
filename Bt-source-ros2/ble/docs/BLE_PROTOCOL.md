@@ -66,7 +66,7 @@ X:{x},Y:{y},Z:{z},N:{seq}    # 可选序号，20Hz 保活
 | ------ | ------------- | ---------------------------------- |
 | 起立     | `LT+RT+start` | `change_state(standing)`，失败则 LT+RT+START 长按 1s |
 | 进/退步态  | `GAIT ON` / `GAIT OFF` | 先确认 `default_bt`，`SwitchPolicy(amp)` 并等待 `current_policy`，再 `toggle_policy` |
-| 坐下     | `LT+RT+RB`    | `change_state(siting)`，失败则 LT+RT+RB 长按 1s（仅 standby） |
+| 坐下     | `LT+RT+RB` / `ST:sit` | running 先自动 `toggle→standby`（回执 `GAIT OFF`）再 `siting`；失败则手柄兜底 |
 | 急停     | `LT+RT+B`     | `change_fsm_state(protect)`，失败则 LT+RT 扳机 |
 | 加速     | `LT ON`       | LT 扳机 `axes[2]=-1`                 |
 | 自定义    | 挥手/踢球等      | 组合键叠加到 `/joy`（动作库尚未按 ROS2 重做） |
@@ -383,7 +383,7 @@ LT OFF
 | `M_resetzero`     | 模式   | FSM RESETZERO     | `init` → `prev` → `confirm`         | `ACK:M_resetzero`     |                           |
 | `M_tech`          | 模式   | 无                | **忽略**                              | `ACK:M_tech`          |                           |
 | `LT+RT+start`     | 起立   | standing          | `change_state`，失败则 `/joy` 1s     | `ACK:LT+RT+start`     | standing                  |
-| `LT+RT+RB`        | 坐下   | siting            | `change_state`，失败则 `/joy` 1s     | `ACK:LT+RT+RB`        | 仅 standby                 |
+| `LT+RT+RB`        | 坐下   | siting            | running 时先 `toggle→standby` 再 `siting`；失败则 `/joy` 1s | `ACK:LT+RT+RB` / `GAIT OFF` | BFM/AMP 不可直接从 running 蹲 |
 | `LT+RT+B`         | 急停   | protect           | `change_fsm_state`，失败则 LT+RT     | `ACK:LT+RT+B`         |                           |
 | `RT+A`            | 动作   | 短脉冲             | `/joy` 叠加                             | `ACK:RT+A`            |                           |
 | `RT+X`            | 动作   | 短脉冲             | `/joy` 叠加                             | `ACK:RT+X`            |                           |

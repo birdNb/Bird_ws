@@ -55,7 +55,7 @@ FSM:default   →  change_fsm_state {states: ['default']}   # 「默认模式」
 | 用户操作 | BLE 指令 | 类型 | ROS2 全名 | 服务类型 | 请求参数 | 板端 |
 |----------|----------|------|-----------|----------|----------|------|
 | **站立** | `ST:standing` | 服务 | `/hightorque_controller/change_state` | `hightorque_msgs/srv/ChangeState` | `{states: ['standing']}` | ✅ |
-| **坐下** | `ST:sit` | 服务 | 同上 | 同上 | `{states: ['siting']}`（仅 standby） | ✅ |
+| **坐下** | `ST:sit` | 服务 | 同上 | 同上 | running→先 `toggle` 到 standby，再 `{states: ['siting']}` | ✅ |
 | **启停策略** toggle | `ST:toggle` | 服务 | 同上 | 同上 | `{states: ['toggle_policy']}` | ✅ |
 | **启动策略** | `ST:start` | 服务 | `/hightorque_controller/start_policy` | `hightorque_msgs/srv/Common` | `{enable: true, str: ''}` | ✅ |
 | **停止策略** | `ST:stop` | 服务 | `/hightorque_controller/stop_policy` | `hightorque_msgs/srv/Common` | `{enable: false, str: ''}` | ✅ |

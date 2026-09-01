@@ -38,9 +38,16 @@ fi
 unset _ws
 
 export RMW_IMPLEMENTATION="${RMW_IMPLEMENTATION:-rmw_cyclonedds_cpp}"
-if [ -f "${BIRD_HOME:-$HOME}/cyclonedds.xml" ]; then
-  export CYCLONEDDS_URI="${CYCLONEDDS_URI:-file://${BIRD_HOME:-$HOME}/cyclonedds.xml}"
+# 优先用开机脚本生成的 runtime（含本机 IP Peer）；否则回退用户 ~/cyclonedds.xml
+_dds_runtime="${BIRD_HOME:-$HOME}/.config/bird/cyclonedds.runtime.xml"
+if [ -z "${CYCLONEDDS_URI:-}" ]; then
+  if [ -f "${_dds_runtime}" ]; then
+    export CYCLONEDDS_URI="file://${_dds_runtime}"
+  elif [ -f "${BIRD_HOME:-$HOME}/cyclonedds.xml" ]; then
+    export CYCLONEDDS_URI="file://${BIRD_HOME:-$HOME}/cyclonedds.xml"
+  fi
 fi
+unset _dds_runtime
 
 if [ "$_ros_strict_u" -eq 1 ]; then
   set -u

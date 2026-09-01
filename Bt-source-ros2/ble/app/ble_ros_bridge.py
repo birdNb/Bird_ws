@@ -12,7 +12,7 @@ BLE 文本指令 → ROS2 量产算法桥接（Foxy / rclpy）。
 摇杆:  X,Y,Z → /joy（AMP）；BFM 运行时改发 /cmd_vel（符号+阈值方向映射）
 起立:  LT+RT+START（服务 standing / 手柄兜底）
 步态:  GAIT ON/OFF → 保持当前 walk 策略(bfm/amp/amp_lower) 后 toggle_policy
-坐下:  LT+RT+RB（仅 standby）
+坐下:  LT+RT+RB / ST:sit（running 时先自动 toggle→standby，再 siting；BFM 不可直接蹲）
 加速:  LT ON → LT 扳机 axes[2]=-1
 急停:  LT+RT+B → 服务 protect，失败则手柄
 """
@@ -1145,19 +1145,76 @@ class BleRosBridge:
         return self._stand_up(notify=notify)
 
     def _request_sit(self) -> bool:
+        """蹲下。BFM/AMP running 时控制器拒绝直接 siting，须先回 standby。"""
+        with self._gait_lock:
+            if self._gait_busy:
+                self._log("[ros] 忽略坐下：步态/坐下切换仍在进行")
+                return False
+            self._gait_busy = True
+        threading.Thread(
+            target=self._sit_worker,
+            daemon=True,
+            name="ble-sit",
+        ).start()
+        return True
+
+    def _sit_worker(self) -> None:
+        try:
+            self._sit_worker_impl()
+        finally:
+            with self._gait_lock:
+                self._gait_busy = False
+
+    def _ensure_standby_for_sit(self) -> bool:
+        """running 不可直接蹲：停速 → toggle → standby，并回执 GAIT OFF。"""
+        st = _norm_label(self._current_state)
+        if st in ("standby", "siting", "sitting"):
+            return True
+        if st == "running":
+            pol = _norm_label(self._current_policy)
+            self._log(
+                f"[ros] 坐下前：running → standby"
+                f"（{pol or 'walk'} 不可直接蹲）| {self._snapshot()}"
+            )
+            with self._lock:
+                self._stick_target = None
+                self._stick_filtered = None
+            self._publish_cmd_vel(0.0, 0.0, 0.0)
+            self._bfm_dir = (0, 0, 0)
+            self._bfm_cmd_active = False
+            self._toggle_upper("坐下前 → STANDBY")
+            if not self._wait_state("standby", timeout=STATE_WAIT_SEC):
+                self._log(f"[ros][warn] 坐下前未进入 standby | {self._snapshot()}")
+                return False
+            self._policy_on = False
+            self._notify_gait("OFF")
+            return True
+        if st == "standing":
+            self._log(f"[ros] 坐下前等待 standing→standby | {self._snapshot()}")
+            return self._wait_state("standby", timeout=STANDING_WAIT_SEC)
+        self._log(f"[ros][warn] 当前 state={st}，无法蹲下 | {self._snapshot()}")
+        return False
+
+    def _sit_worker_impl(self) -> None:
         try:
             self._neck.release_control(reason="坐下前让权")
         except Exception:
             pass
+        if not self._ensure_standby_for_sit():
+            self._log("[ros][warn] 坐下中止：未就绪 standby")
+            return
         if self._call_change_state_any(("siting", "sitting", "sit")):
+            if self._wait_state("siting", "sitting", timeout=STATE_WAIT_SEC):
+                self._log(f"[ros] 坐下完成 | {self._snapshot()}")
+            else:
+                self._log(f"[ros] 已发 siting（状态回读超时）| {self._snapshot()}")
             self._notify_action("squat")
-            return True
+            return
         if self._motion_consumer_alive():
             self._start_combo("lt+rt+rb", COMBO_HOLD_SEC, "坐下")
             self._notify_action("squat")
-            return True
+            return
         self._log("[ros][warn] 坐下未执行：量产控制器未启动")
-        return False
 
     def _trigger_upper_state(self, cmd_key: str) -> None:
         key = _norm_label(cmd_key)
@@ -1713,6 +1770,16 @@ class BleRosBridge:
         if want_on:
             ok_imu, imu_reason = self._imu_ready(wait=True)
             if not ok_imu:
+                # 等待期间若已是 RUNNING（例如手柄已切步态），仍回执 ON，避免误报拒绝
+                st_now = _norm_label(self._current_state)
+                pol_now = _norm_label(self._current_policy)
+                if st_now == "running" and pol_now in WALK_POLICIES | {""}:
+                    self._policy_on = True
+                    self._notify_gait("ON")
+                    self._log(
+                        f"[ros][warn] /imu 未就绪但仍保持 RUNNING | {imu_reason} | {self._snapshot()}"
+                    )
+                    return
                 self._log(f"[ros][warn] GAIT ON 拒绝：{imu_reason}")
                 return
         if not self._ensure_default_bt():

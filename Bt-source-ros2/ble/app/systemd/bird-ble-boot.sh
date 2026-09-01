@@ -71,7 +71,7 @@ prep_bluetooth() {
 
 prep_bluetooth
 
-# CycloneDDS 绑定 wlan0；等链路 UP + 尽量等到有 IP（不阻塞过久）
+# CycloneDDS 绑定 wlan0；必须等 IPv4（仅 link UP 时 DDS 会报不支持 UDP）
 wait_dds_network() {
   local iface="wlan0"
   if [ -f "${BIRD_HOME}/cyclonedds.xml" ]; then
@@ -80,11 +80,13 @@ wait_dds_network() {
   fi
   local i
   local up=0
-  for i in $(seq 1 90); do
+  for i in $(seq 1 120); do
     if ip link show "${iface}" 2>/dev/null | grep -q "UP"; then
       up=1
       if ip -4 addr show "${iface}" 2>/dev/null | grep -q "inet "; then
         echo "[bird-ble] DDS 网卡就绪: ${iface} (已有 IPv4)"
+        # 再等 2s，避免「有 IP 但仍不支持 UDP」的窗口
+        sleep 2
         return 0
       fi
     fi
@@ -98,10 +100,18 @@ wait_dds_network() {
 }
 wait_dds_network
 
-# 注意：不要阻塞等待 midware/joint_states。
-# 否则 GATT 服务迟迟不启动 → 手机能搜到名称/残留广播但连不上。
+# 与 ros2-bringup 共用 runtime DDS（本机 IP Peer），避免无组播时 DDS 空转占满 CPU
+_PREPARE="$(cd "$(dirname "$0")/../../.." && pwd)/scripts/prepare-cyclonedds-runtime.sh"
+if [ -x "${_PREPARE}" ]; then
+  # shellcheck disable=SC1090
+  source "${_PREPARE}" || true
+  echo "[bird-ble] CYCLONEDDS_URI=${CYCLONEDDS_URI:-unset}"
+fi
+unset _PREPARE
+
+# 若 ROS2 栈尚未起来，多等一会再提示（不永久阻塞 GATT）
 if ! pgrep -f hightorque_controller_node >/dev/null 2>&1; then
-  echo "[bird-ble] 提示: 控制器尚未运行，先启动 BLE；请确认 systemctl status ros2-bringup" >&2
+  echo "[bird-ble] 提示: 控制器尚未运行；若刚开机，ros2-bringup 可能仍在等 DDS" >&2
 fi
 
 systemctl stop torque-cmd-vel.service 2>/dev/null || true

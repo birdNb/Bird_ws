@@ -1,0 +1,15 @@
+[Unit]
+Description=Bird Yesense IMU serial fix (ttyUSB0 / permissions)
+DefaultDependencies=no
+After=systemd-udevd.service local-fs.target
+Before=ros2-bringup.service bird-ble.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/home/nvidia/Bird_ws/Bt-source-ros2/scripts/ensure_imu_serial.sh
+# 若悬空软链挡住真设备，先拆再 ensure（与 fix_imu_perm 同思路，精简版）
+ExecStartPre=/bin/bash -c 'if [ -L /dev/ttyUSB0 ] && [ ! -c /dev/ttyUSB0 ]; then rm -f /dev/ttyUSB0; fi; udevadm trigger --subsystem-match=tty || true; sleep 0.5; true'
+
+[Install]
+WantedBy=multi-user.target
