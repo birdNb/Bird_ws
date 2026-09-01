@@ -71,43 +71,53 @@ prep_bluetooth() {
 
 prep_bluetooth
 
-# CycloneDDS 绑定 wlan0；必须等 IPv4（仅 link UP 时 DDS 会报不支持 UDP）
-wait_dds_network() {
+# USB 冷启动：等 WiFi 有 IP 再拉 GATT。
+# 否则广播刚起来就被 WiFi 关联抖动触发 BlueZ Release，看门狗虽显示 ActiveInstances=1，
+# 空中常无有效广播，需手动 systemctl restart 才可搜到。
+wait_wifi_for_usb_bt() {
+  if [ "${BLE_BT_KIND}" != "usb_dongle" ]; then
+    return 0
+  fi
   local iface="wlan0"
   if [ -f "${BIRD_HOME}/cyclonedds.xml" ]; then
     iface="$(grep -oP '(?<=NetworkInterfaceAddress>)[^<]+' "${BIRD_HOME}/cyclonedds.xml" 2>/dev/null | head -1 || true)"
     iface="${iface:-wlan0}"
   fi
+  echo "[bird-ble] USB 蓝牙：等待 ${iface} IPv4 稳定后再广播（最多 90s）..."
   local i
-  local up=0
-  for i in $(seq 1 120); do
-    if ip link show "${iface}" 2>/dev/null | grep -q "UP"; then
-      up=1
+  for i in $(seq 1 90); do
+    if ip -4 addr show "${iface}" 2>/dev/null | grep -q "inet "; then
+      echo "[bird-ble] ${iface} 已有 IPv4，再稳定 5s"
+      sleep 5
       if ip -4 addr show "${iface}" 2>/dev/null | grep -q "inet "; then
-        echo "[bird-ble] DDS 网卡就绪: ${iface} (已有 IPv4)"
-        # 再等 2s，避免「有 IP 但仍不支持 UDP」的窗口
-        sleep 2
+        echo "[bird-ble] ${iface} 稳定: $(ip -4 -o addr show "${iface}" | awk '{print $4}' | head -1)"
         return 0
       fi
     fi
-    sleep 0.5
+    sleep 1
   done
-  if [ "${up}" = "1" ]; then
-    echo "[bird-ble] 警告: ${iface} 已 UP 但尚无 IPv4，先启动 BLE（ROS 桥会重试）" >&2
-  else
-    echo "[bird-ble] 警告: ${iface} 未 UP，ROS2 桥接可能启动失败（稍后自动重试）" >&2
-  fi
+  echo "[bird-ble] 警告: ${iface} 长时间无 IPv4，仍启动 BLE" >&2
 }
-wait_dds_network
+wait_wifi_for_usb_bt
 
-# 与 ros2-bringup 共用 runtime DDS（本机 IP Peer），避免无组播时 DDS 空转占满 CPU
+# 尽快拉起 GATT/广播；DDS 由 ROS 桥后台等待
+# 若已有 IPv4，顺手生成 runtime DDS，减少桥接空转 CPU
 _PREPARE="$(cd "$(dirname "$0")/../../.." && pwd)/scripts/prepare-cyclonedds-runtime.sh"
-if [ -x "${_PREPARE}" ]; then
-  # shellcheck disable=SC1090
-  source "${_PREPARE}" || true
-  echo "[bird-ble] CYCLONEDDS_URI=${CYCLONEDDS_URI:-unset}"
+_dds_iface="wlan0"
+if [ -f "${BIRD_HOME}/cyclonedds.xml" ]; then
+  _dds_iface="$(grep -oP '(?<=NetworkInterfaceAddress>)[^<]+' "${BIRD_HOME}/cyclonedds.xml" 2>/dev/null | head -1 || true)"
+  _dds_iface="${_dds_iface:-wlan0}"
 fi
-unset _PREPARE
+if ip -4 addr show "${_dds_iface}" 2>/dev/null | grep -q "inet "; then
+  if [ -x "${_PREPARE}" ]; then
+    # shellcheck disable=SC1090
+    source "${_PREPARE}" || true
+    echo "[bird-ble] CYCLONEDDS_URI=${CYCLONEDDS_URI:-unset}"
+  fi
+else
+  echo "[bird-ble] ${_dds_iface} 尚无 IPv4，先启动 BLE 广播；ROS 桥稍后重试" >&2
+fi
+unset _PREPARE _dds_iface
 
 # 若 ROS2 栈尚未起来，多等一会再提示（不永久阻塞 GATT）
 if ! pgrep -f hightorque_controller_node >/dev/null 2>&1; then

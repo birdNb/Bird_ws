@@ -373,6 +373,27 @@ class BleStatusTelemetry:
         elif self._subscribed.is_set():
             self._maybe_send_pwr(pct)
 
+    def _wait_dds_ready(self, timeout: float = 60.0) -> bool:
+        deadline = time.monotonic() + timeout
+        attempt = 0
+        while not self._stop.is_set() and time.monotonic() < deadline:
+            attempt += 1
+            try:
+                import rclpy
+                from rclpy.node import Node
+
+                if not rclpy.ok():
+                    rclpy.init(args=None)
+                n = Node(f"ble_telem_dds_probe_{os.getpid()}_{attempt}")
+                n.destroy_node()
+                return True
+            except Exception as e:
+                if attempt == 1 or attempt % 5 == 0:
+                    log_warn(f"[telemetry] 等待 DDS… ({e})")
+                if self._stop.wait(timeout=1.5):
+                    return False
+        return False
+
     def _ros_loop(self) -> None:
         _bootstrap_ros_python_path()
         try:
@@ -386,6 +407,9 @@ class BleStatusTelemetry:
         delay = 2.0
         while not self._stop.is_set():
             try:
+                # 先等 DDS，避免 create_node 失败刷屏占满 CPU（拖垮 BLE 广播）
+                if not self._wait_dds_ready():
+                    raise RuntimeError("CycloneDDS 未就绪")
                 if not rclpy.ok():
                     rclpy.init(args=None)
                 node = Node("ble_status_telemetry")

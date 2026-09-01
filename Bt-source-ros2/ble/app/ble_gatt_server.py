@@ -261,13 +261,15 @@ class Advertisement(dbus.service.Object):
         dbus.service.Object.__init__(self, bus, self.path)
 
     def get_properties(self):
-        # 广播包仅 31 字节：用 16 位 UUID + 名称，避免名称被挤掉
-        # ServiceUUIDs 必须是完整 128-bit，否则 BlueZ 可能不广播
+        # 广播包仅 31 字节：LocalName + 完整 128-bit Service UUID（短写 0000ffe0 易被 BlueZ Release）
         return {
             LE_ADV_IFACE: {
                 "Type": "peripheral",
                 "LocalName": self.local_name,
-                "ServiceUUIDs": dbus.Array(["0000ffe0"], signature="s"),
+                "ServiceUUIDs": dbus.Array(
+                    [SERVICE_UUID],
+                    signature="s",
+                ),
                 "IncludeTxPower": dbus.Boolean(False),
                 "MinInterval": dbus.UInt16(0x00A0),
                 "MaxInterval": dbus.UInt16(0x00C0),
@@ -280,10 +282,16 @@ class Advertisement(dbus.service.Object):
     @dbus.service.method(LE_ADV_IFACE, in_signature="", out_signature="")
     def Release(self):
         log_info("BLE 广播已释放")
-        # BlueZ 主动 Release 时标记为未注册，断连恢复逻辑会重新注册
+        # BlueZ 主动 Release 时旧 Advertisement 对象不可靠，必须换新 path 再注册
         server = getattr(self, "_server", None)
         if server is not None:
             server._adv_registered = False
+            try:
+                from gi.repository import GLib as _GLib
+
+                _GLib.idle_add(server._on_bluez_adv_released)
+            except Exception:
+                pass
 
 
 
@@ -487,7 +495,7 @@ class BleGattServer:
         hci_dev = self._adapter_path.split("/")[-1] if self._adapter_path else "hci0"
         _ = hci_dev
         plat = detect_platform() if detect_platform else None
-        is_usb = bool(plat and getattr(plat, "is_usb_bt", lambda: False)())
+        is_usb = bool(plat.is_usb_bt) if plat is not None else False
         log_info("已连接且已握手：停止 BLE 广播保活（断连后自动恢复可扫描）")
 
         def _stop_hw() -> None:
@@ -571,9 +579,17 @@ class BleGattServer:
         return "AlreadyExists" in text or "Already Exists" in text
 
     def _refresh_advertising_after_disconnect(self, hci_dev: str = "hci0") -> None:
-        """断连后恢复可扫描。Realtek 禁止 btmgmt advertising on。"""
+        """断连后恢复可扫描。USB 只用 D-Bus 重注册；RK 用 Legacy HCI。"""
         self._run_btmgmt("le", "on")
         self._run_btmgmt("connectable", "on")
+        plat = detect_platform() if detect_platform else None
+        if plat is not None and plat.adv_mode == "btmgmt":
+            if self._le_adv_active_count() > 0:
+                log_info(f"断连后 D-Bus 广播仍在播: {self.name}")
+                return
+            log_info("断连后 D-Bus ActiveInstances=0，重新 RegisterAdvertisement")
+            self._schedule_restart_advertising()
+            return
 
         def _worker() -> None:
             try:
@@ -606,41 +622,11 @@ class BleGattServer:
             self._refresh_advertising_after_disconnect(hci_dev)
             return False
 
-        # Orin：断连后 BlueZ 仍可能保留 Advertisement 注册
-        if self._adv_registered or self._adv_manager is None:
-            log_info("断连后恢复 BLE 可扫描状态...")
-            self._refresh_advertising_after_disconnect(hci_dev)
+        active = self._le_adv_active_count()
+        if active > 0 and self._adv_registered:
             return False
 
-        def adv_done() -> None:
-            self._adv_registered = True
-            log_info(f"断连后 BLE 广播已重新注册: {self.name}")
-            self._refresh_advertising_after_disconnect(hci_dev)
-
-        def adv_failed(error: dbus.DBusException) -> None:
-            if self._is_adv_already_exists(error):
-                self._adv_registered = True
-                log_info("断连后 BLE 广播仍注册，刷新广播包")
-                self._refresh_advertising_after_disconnect(hci_dev)
-                return
-            log_warn(f"断连后广播恢复失败: {self._dbus_error_text(error)}，尝试注销后重注册")
-            self._reregister_advertisement(hci_dev)
-
-        try:
-            self._adv_manager.RegisterAdvertisement(
-                self._adv.get_path(),
-                _dbus_sv_opts(),
-                reply_handler=adv_done,
-                error_handler=adv_failed,
-            )
-        except dbus.exceptions.DBusException as e:
-            if self._is_adv_already_exists(e):
-                self._adv_registered = True
-                log_info("断连后 BLE 广播仍注册，刷新广播包")
-                self._refresh_advertising_after_disconnect(hci_dev)
-            else:
-                log_warn(f"断连后 RegisterAdvertisement 异常: {self._dbus_error_text(e)}")
-                self._reregister_advertisement(hci_dev)
+        self._force_reregister_advertisement(reason="restart-cb")
         return False
 
     def _reregister_advertisement(self, hci_dev: str) -> None:
@@ -650,8 +636,10 @@ class BleGattServer:
         def register_again() -> None:
             def on_registered() -> None:
                 self._adv_registered = True
-                log_info(f"断连后 BLE 广播已重新注册: {self.name}")
-                self._refresh_advertising_after_disconnect(hci_dev)
+                log_info(
+                    f"断连后 BLE 广播已重新注册: {self.name} "
+                    f"(ActiveInstances={self._le_adv_active_count()})"
+                )
 
             def on_register_failed(err: dbus.DBusException) -> None:
                 log_warn(
@@ -1310,16 +1298,45 @@ class BleGattServer:
         except dbus.exceptions.DBusException as e:
             log_warn(f"读取适配器信息失败: {e}")
 
+    def _le_adv_active_count(self) -> int:
+        path = self._adapter_path
+        if not path:
+            return -1
+        try:
+            props = dbus.Interface(
+                self.bus.get_object(BLUEZ_SERVICE, path), DBUS_PROP_IFACE
+            )
+            return int(props.Get(LE_ADV_MANAGER_IFACE, "ActiveInstances"))
+        except Exception:
+            return -1
+
     def _patch_le_adv_data(
         self, hci_dev: str = "hci0", force: bool = False, initial_delay: float = 0.4
     ) -> None:
-        """按平台外发广播：RK 板载 Legacy HCI，Orin USB btmgmt。"""
+        """按平台外发广播：RK 板载 Legacy HCI；Orin USB 优先保留 D-Bus 广播。
+
+        注意：USB 路径若先 RegisterAdvertisement 成功，再跑 btmgmt/hci
+        prepare（含 advertising off / LE Set Adv Enable=0），会把
+        ActiveInstances 清成 0，手机完全扫不到。
+        """
         if self._connected_devices:
             return
         if initial_delay > 0:
             time.sleep(initial_delay)
+        plat = detect_platform() if detect_platform else None
+        # USB/btmgmt：优先保留/重拉 D-Bus 广播，禁止 HCI/btmgmt 清掉 ActiveInstances
+        if plat is not None and plat.adv_mode == "btmgmt":
+            active = self._le_adv_active_count()
+            if active > 0 and self._adv_registered and not force:
+                log_info(f"[adv] D-Bus LE 广播正常 (ActiveInstances={active})，跳过 HCI/btmgmt 覆盖")
+                return
+            if active <= 0:
+                log_warn("[adv] ActiveInstances=0，走强制重建 Advertisement（不用 HCI）")
+                GLib.idle_add(lambda: self._force_reregister_advertisement("patch") or False)
+                return
+            # active>0 且 force：无需再动
+            return
         if _start_ble_advertising is not None:
-            plat = detect_platform() if detect_platform else None
             _start_ble_advertising(
                 hci_dev,
                 self.name,
@@ -1330,6 +1347,96 @@ class BleGattServer:
             )
             return
         log_warn("[adv] ble_legacy_adv 未加载，跳过广播刷新")
+
+    def _on_bluez_adv_released(self) -> bool:
+        """BlueZ Release 后：换新 Advertisement 对象再注册（旧 path 常成幽灵 ActiveInstances）。"""
+        if self._connected_devices:
+            return False
+        log_warn("[adv] BlueZ Release → 重建 Advertisement 并重注册")
+        self._force_reregister_advertisement(reason="bluez-release")
+        return False
+
+    def _recreate_advertisement_object(self) -> None:
+        old = self._adv
+        if old is not None:
+            try:
+                if self._adv_manager is not None:
+                    try:
+                        self._adv_manager.UnregisterAdvertisement(old.get_path())
+                    except Exception:
+                        pass
+                old.remove_from_connection()
+            except Exception:
+                pass
+        self._adv_index += 1
+        adv = Advertisement(self.bus, self._adv_index, self.name)
+        adv._server = self
+        self._adv = adv
+        self._adv_registered = False
+
+    def _force_reregister_advertisement(self, reason: str = "") -> None:
+        if self._connected_devices or self._adv_manager is None:
+            return
+        if self._adv_reregister_pending:
+            return
+        self._adv_reregister_pending = True
+        tag = f" ({reason})" if reason else ""
+
+        def _do() -> bool:
+            self._adv_reregister_pending = False
+            if self._connected_devices:
+                return False
+            try:
+                self._recreate_advertisement_object()
+            except Exception as e:
+                log_warn(f"[adv] 重建 Advertisement 失败{tag}: {e}")
+                return False
+
+            def adv_done() -> None:
+                self._adv_registered = True
+                n = self._le_adv_active_count()
+                log_info(f"[adv] 强制重注册完成{tag}: {self.name} ActiveInstances={n}")
+
+            def adv_failed(error: dbus.DBusException) -> None:
+                if self._is_adv_already_exists(error):
+                    self._adv_registered = True
+                    log_info(f"[adv] 强制重注册 AlreadyExists{tag}")
+                    return
+                log_warn(f"[adv] 强制重注册失败{tag}: {self._dbus_error_text(error)}")
+
+            try:
+                self._adv_manager.RegisterAdvertisement(
+                    self._adv.get_path(),
+                    _dbus_sv_opts(),
+                    reply_handler=adv_done,
+                    error_handler=adv_failed,
+                )
+            except dbus.exceptions.DBusException as e:
+                log_warn(f"[adv] RegisterAdvertisement 异常{tag}: {self._dbus_error_text(e)}")
+            return False
+
+        GLib.timeout_add(500, _do)
+
+    def _boot_adv_settle_cb(self) -> bool:
+        """冷启动 WiFi 抖动后补一次强制重注册，避免幽灵 ActiveInstances=1 但空中无广播。"""
+        if self._connected_devices:
+            return False
+        active = self._le_adv_active_count()
+        log_info(f"[adv] 开机稳定期复查 ActiveInstances={active}，强制刷新广播")
+        self._force_reregister_advertisement(reason="boot-settle")
+        return False
+
+    def _adv_watchdog_cb(self) -> bool:
+        """开机后周期性检查：无连接且无广播则重拉。"""
+        if self._connected_devices:
+            return True
+        if self._adv_stop_pending or self._adv_reregister_pending:
+            return True
+        active = self._le_adv_active_count()
+        if active <= 0:
+            log_warn("[adv] 看门狗：ActiveInstances=0，强制重建广播")
+            self._force_reregister_advertisement(reason="watchdog")
+        return True
 
     def _start_volume_manager(self) -> None:
         try:
@@ -1352,6 +1459,9 @@ class BleGattServer:
 
         def _on_wifi_link_up() -> None:
             self._notify_wifi_reconnected()
+            # 开机 WiFi 恢复后常伴随 BlueZ 幽灵广播；无连接时强制刷新
+            if not self._connected_devices:
+                GLib.timeout_add_seconds(2, self._boot_adv_settle_cb)
 
         self._wifi.start_link_monitor(
             on_disconnected=_on_wifi_link_down,
@@ -1577,13 +1687,16 @@ class BleGattServer:
         def register_done() -> None:
             log_info("GATT 服务已注册，等待手机连接")
             hci_dev = adapter_path.split("/")[-1]
-            threading.Thread(
-                target=self._patch_le_adv_data,
-                kwargs={"hci_dev": hci_dev},
-                daemon=True,
-            ).start()
             if not use_dbus_adv:
+                # RK Legacy：无 D-Bus 广播，GATT 后直接 HCI 外发
+                threading.Thread(
+                    target=self._patch_le_adv_data,
+                    kwargs={"hci_dev": hci_dev, "force": True},
+                    daemon=True,
+                ).start()
                 GLib.timeout_add(2500, self._ble_ready_timeout_cb)
+                GLib.timeout_add_seconds(8, self._adv_watchdog_cb)
+            # USB：广播由 RegisterAdvertisement 回调维护，切勿在此 HCI 清广播
 
         def register_failed(error: dbus.DBusException) -> None:
             log_warn(f"GATT 注册失败: {error}")
@@ -1598,17 +1711,35 @@ class BleGattServer:
             log_info(f"BLE 广播已开启，小程序应能扫到名称: {self.name}")
             log_info(f"    或按服务 UUID 扫描: {SERVICE_UUID}")
             self._verify_le_advertising(adapter_path)
-            hci_dev = adapter_path.split("/")[-1]
-            threading.Thread(
-                target=self._patch_le_adv_data,
-                kwargs={"hci_dev": hci_dev},
-                daemon=True,
-            ).start()
+            active = self._le_adv_active_count()
+            log_info(f"[adv] ActiveInstances={active}")
+            # USB：勿再 HCI/btmgmt 清广播；仅 ActiveInstances=0 时才补救
+            if active <= 0:
+                hci_dev = adapter_path.split("/")[-1]
+                threading.Thread(
+                    target=self._patch_le_adv_data,
+                    kwargs={"hci_dev": hci_dev, "force": True, "initial_delay": 0.2},
+                    daemon=True,
+                ).start()
             self._notify_ble_ready()
+            GLib.timeout_add_seconds(8, self._adv_watchdog_cb)
+            # 冷启动：WiFi 常在广播后抖动并触发 BlueZ Release；15s/35s 各强制刷新一次
+            GLib.timeout_add_seconds(15, self._boot_adv_settle_cb)
+            GLib.timeout_add_seconds(35, self._boot_adv_settle_cb)
 
         def adv_failed(error: dbus.DBusException) -> None:
             log_warn(f"广播注册失败: {error}")
-            self.mainloop.quit()
+            # D-Bus 失败时回退 HCI/btmgmt，勿直接退出（否则手机永远扫不到）
+            hci_dev = adapter_path.split("/")[-1]
+            threading.Thread(
+                target=self._patch_le_adv_data,
+                kwargs={"hci_dev": hci_dev, "force": True, "initial_delay": 0.3},
+                daemon=True,
+            ).start()
+            self._notify_ble_ready()
+            GLib.timeout_add_seconds(8, self._adv_watchdog_cb)
+            GLib.timeout_add_seconds(15, self._boot_adv_settle_cb)
+            GLib.timeout_add_seconds(35, self._boot_adv_settle_cb)
 
         gatt_manager.RegisterApplication(
             app.get_path(),
