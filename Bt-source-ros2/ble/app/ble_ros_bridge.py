@@ -644,8 +644,9 @@ class BleRosBridge:
             self._ht_joy_pub = node.create_publisher(HightorqueJoy, "/hightorque_joy", qos)
         except Exception as e:
             self._log(f"[ros][warn] 无法发布 /hightorque_joy: {e}")
-        self._neck.attach_publisher(
-            node.create_publisher(JointState, "/pi_plus_absolute", 1),
+        self._neck.attach(
+            node,
+            abs_pub=node.create_publisher(JointState, "/pi_plus_absolute", 1),
             clock=node.get_clock(),
         )
         try:
@@ -1091,6 +1092,10 @@ class BleRosBridge:
         )
 
     def _stand_up(self, *, notify: bool = True) -> bool:
+        try:
+            self._neck.release_control(reason="起立前让权")
+        except Exception:
+            pass
         if not self._ensure_default_bt():
             self._log("[ros][warn] 起立失败：未进入 default_bt（请先 FSM:default 或 M_init）")
             return False
@@ -1140,6 +1145,10 @@ class BleRosBridge:
         return self._stand_up(notify=notify)
 
     def _request_sit(self) -> bool:
+        try:
+            self._neck.release_control(reason="坐下前让权")
+        except Exception:
+            pass
         if self._call_change_state_any(("siting", "sitting", "sit")):
             self._notify_action("squat")
             return True
@@ -1695,6 +1704,11 @@ class BleRosBridge:
             -> toggle_policy 进入 RUNNING（GAIT ON）
         RUNNING 中先 toggle 回 STANDBY。
         """
+        # 脖子占头电机时全身策略无法接管 → 先释放，避免新功能挡旧行走
+        try:
+            self._neck.release_control(reason="GAIT 前让权")
+        except Exception:
+            pass
         self._log(f"[ros] GAIT {'ON' if want_on else 'OFF'} 开始 | {self._snapshot()}")
         if want_on:
             ok_imu, imu_reason = self._imu_ready(wait=True)

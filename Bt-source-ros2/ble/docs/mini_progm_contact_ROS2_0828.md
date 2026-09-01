@@ -154,8 +154,8 @@ FSM:default   →  change_fsm_state {states: ['default']}   # 「默认模式」
 |----------|----------|------|-----------|---------------|-------------|------|
 | 电机上电 | `MP ON` | 话题 | `/power_switch_control` | `hightorque_power/msg/PowerSwitch` | `control_switch=1` | ✅ |
 | 电机断电 | `MP OFF` | 话题 | `/power_switch_control` | 同上 | `control_switch=0`；先停 `/cmd_vel` | ✅ |
-| 脖子步进 | `P{n}Y{m}` | 话题 | `/pi_plus_absolute` | `sensor_msgs/msg/JointState` | `head_pitch_joint` / `head_yaw_joint` | ✅ |
-| 脖子回中 | `neck0` | 话题 | `/pi_plus_absolute` | 同上 | 平滑回中 | ✅ |
+| 脖子步进 | `P{n}Y{m}` | 话题/服务 | `/request_control` + `/control_command`（兼发 `/pi_plus_absolute`） | `MotorControlCommand` / `JointState` | 每步 10°；需 midware | ✅ |
+| 脖子回中 | `neck0` / `P0Y0` | 同上 | 同上 | 同上 | 平滑回中 | ✅ |
 | 开启拖拽 | `PULL ON` | 系统 | — | — | 启动 `torque-cmd-vel.service`；桥接订阅 `/error_joint_states` → 发布 `/cmd_vel` | ✅ |
 | 关闭拖拽 | `PULL OFF` | 系统 | — | — | 停止 service + `/cmd_vel` 清零 | ✅ |
 | 人脸跟踪开 | `locate_face ON` | 进程 | — | — | 启动 `locate_face_cpp`；内部用 `/pi_plus_absolute`、`/fsm_state` | ✅ |

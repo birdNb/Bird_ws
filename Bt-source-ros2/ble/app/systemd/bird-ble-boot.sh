@@ -21,7 +21,7 @@ source "${BT_DIR}/ros_env.sh"
 
 wait_hci() {
   local i
-  for i in $(seq 1 20); do
+  for i in $(seq 1 40); do
     if hciconfig "${BLE_HCI_DEV}" 2>/dev/null | grep -q "${BLE_HCI_DEV}"; then
       return 0
     fi
@@ -39,12 +39,22 @@ prep_bluetooth() {
   if ! systemctl is-active --quiet bluetooth 2>/dev/null; then
     echo "[bird-ble] 启动 bluetooth.service"
     systemctl start bluetooth 2>/dev/null || true
-    sleep 0.4
+    sleep 0.8
   fi
   wait_hci || return 1
 
+  # USB 棒冷启动：先 down/up 一次，避免「能连不能写 FFE1」
+  if [ "${BLE_BT_KIND}" = "usb_dongle" ]; then
+    echo "[bird-ble] USB 蓝牙 settle: ${BLE_HCI_DEV} down/up"
+    hciconfig "${BLE_HCI_DEV}" down 2>/dev/null || true
+    sleep 0.6
+    hciconfig "${BLE_HCI_DEV}" up 2>/dev/null || true
+    sleep 1.0
+  fi
+
   if ! hci_up; then
     hciconfig "${BLE_HCI_DEV}" up 2>/dev/null || true
+    sleep 0.5
   fi
 
   BLE_NAME="$(python3 -c "from ble_device_name import load_ble_name; print(load_ble_name())")"
@@ -55,11 +65,13 @@ prep_bluetooth() {
   timeout 1 bluetoothctl system-alias "${BLE_NAME}" >/dev/null 2>&1 || true
   timeout 1 bluetoothctl discoverable off >/dev/null 2>&1 || true
   timeout 1 bluetoothctl pairable off >/dev/null 2>&1 || true
+  # 给 bluez/GATT 再留一点稳定时间（与手动 install 后“热机”接近）
+  sleep 1.5
 }
 
 prep_bluetooth
 
-# CycloneDDS 绑定 wlan0；WiFi 未 UP 时创建 ROS 节点会失败并导致控制桥退出
+# CycloneDDS 绑定 wlan0；等链路 UP + 尽量等到有 IP（不阻塞过久）
 wait_dds_network() {
   local iface="wlan0"
   if [ -f "${BIRD_HOME}/cyclonedds.xml" ]; then
@@ -67,20 +79,27 @@ wait_dds_network() {
     iface="${iface:-wlan0}"
   fi
   local i
-  for i in $(seq 1 60); do
+  local up=0
+  for i in $(seq 1 90); do
     if ip link show "${iface}" 2>/dev/null | grep -q "UP"; then
-      echo "[bird-ble] DDS 网卡就绪: ${iface}"
-      return 0
+      up=1
+      if ip -4 addr show "${iface}" 2>/dev/null | grep -q "inet "; then
+        echo "[bird-ble] DDS 网卡就绪: ${iface} (已有 IPv4)"
+        return 0
+      fi
     fi
     sleep 0.5
   done
-  echo "[bird-ble] 警告: ${iface} 未 UP，ROS2 桥接可能启动失败（稍后自动重试）" >&2
+  if [ "${up}" = "1" ]; then
+    echo "[bird-ble] 警告: ${iface} 已 UP 但尚无 IPv4，先启动 BLE（ROS 桥会重试）" >&2
+  else
+    echo "[bird-ble] 警告: ${iface} 未 UP，ROS2 桥接可能启动失败（稍后自动重试）" >&2
+  fi
 }
 wait_dds_network
 
 # 注意：不要阻塞等待 midware/joint_states。
 # 否则 GATT 服务迟迟不启动 → 手机能搜到名称/残留广播但连不上。
-# ROS2 由 ble_ros_bridge 后台等待；指令在栈未就绪时会打 warn。
 if ! pgrep -f hightorque_controller_node >/dev/null 2>&1; then
   echo "[bird-ble] 提示: 控制器尚未运行，先启动 BLE；请确认 systemctl status ros2-bringup" >&2
 fi
@@ -91,9 +110,12 @@ pkill -f 'locate_face_cpp/build/locate_face' 2>/dev/null || true
 pkill -f 'locate_face\.py' 2>/dev/null || true
 pkill -f 'face_yunet_worker' 2>/dev/null || true
 
-# BFM：确保 joy_mapper 回中不发零速（与 install.sh 同一套逻辑）
+# joy_mapper 热替换放到后台，避免拖慢 GATT 注册、与冷启动抢资源
 if [ -x "${BT_DIR}/ensure_bfm_joy_mapper.sh" ]; then
-  "${BT_DIR}/ensure_bfm_joy_mapper.sh" || echo "[bird-ble] warn: ensure_bfm_joy_mapper 失败" >&2
+  (
+    sleep 8
+    "${BT_DIR}/ensure_bfm_joy_mapper.sh" || true
+  ) >/tmp/ensure_bfm_joy_mapper.boot.log 2>&1 &
 fi
 
 EXTRA_ARGS=()

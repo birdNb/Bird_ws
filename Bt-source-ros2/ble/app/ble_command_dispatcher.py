@@ -403,14 +403,14 @@ class CommandDispatcher:
             return
 
         if kind == CommandKind.GAIT:
+            # 不在此立即回显：成功后由 ble_ros_bridge._notify_gait 回传，
+            # 避免 IMU 未就绪等拒绝时小程序误以为已进入行走。
             self._log_rx(wire)
             try:
                 self._handle(kind, payload)
             except Exception as e:
                 self._log_warn(f"步态处理失败: {e}")
                 return
-            if self._echo_confirm is not None:
-                self._echo_confirm(text)
             return
 
         if kind == CommandKind.SPRINT:

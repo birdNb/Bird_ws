@@ -24,6 +24,12 @@ done
 
 cd "${WS}"
 
+# Yesense 常落在 ttyUSB1，量产配置写死 ttyUSB0 → 无 /imu → GAIT ON 被拒
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+if [ -x "${SCRIPT_DIR}/ensure_imu_serial.sh" ]; then
+  "${SCRIPT_DIR}/ensure_imu_serial.sh" >>"${LOG_FILE}" 2>&1 || true
+fi
+
 set +u
 # shellcheck disable=SC1091
 source /opt/ros/foxy/setup.bash

@@ -455,22 +455,44 @@ class BleGattServer:
             self._voice_remind.on_ble_connected()
         self._schedule_connect_hint()
         self._start_link_watchdog()
-        self._stop_advertising_while_connected()
+        # 勿在刚连上立刻 UnregisterAdvertisement：USB 棒冷启动时会导致
+        # 手机连上却写不了 FFE1，约数秒后被手机断开。握手完成后再停广播。
+        self._schedule_stop_advertising_after_handshake()
+
+    def _schedule_stop_advertising_after_handshake(self) -> None:
+        """连接后先保持广播，等握手（M_default 或 notify）再停，避免 USB 棒断写。"""
+        if self._adv_stop_pending:
+            return
+
+        def _maybe_stop() -> bool:
+            if not self._connected_devices:
+                return False
+            if self._default_mode_received or self._notify_enabled:
+                self._stop_advertising_while_connected()
+                return False
+            # 仍未握手：再等一轮（最长约 15s 仍保持广播可写）
+            return True
+
+        GLib.timeout_add(1500, _maybe_stop)
 
     def _stop_advertising_while_connected(self) -> None:
-        """连接后停止 BLE 广播，避免其他手机扫到并抢占连接。"""
+        """连接且握手后停止 BLE 广播，避免其他手机扫到并抢占连接。"""
         if self._adv_stop_pending:
+            return
+        if not self._connected_devices:
             return
         self._adv_stop_pending = True
         self._adv_reregister_pending = False
 
         hci_dev = self._adapter_path.split("/")[-1] if self._adapter_path else "hci0"
+        _ = hci_dev
         plat = detect_platform() if detect_platform else None
-        log_info("已连接：停止 BLE 广播（断连后自动恢复可扫描）")
+        is_usb = bool(plat and getattr(plat, "is_usb_bt", lambda: False)())
+        log_info("已连接且已握手：停止 BLE 广播保活（断连后自动恢复可扫描）")
 
         def _stop_hw() -> None:
             try:
-                # 连接期间只停保活线程 + 注销 D-Bus 广播。
+                # 连接期间只停保活线程。
                 # 勿在链路仍连接时执行 hci/btmgmt advertising off，否则手机会瞬间断连。
                 if _stop_adv_keeper is not None:
                     _stop_adv_keeper()
@@ -478,6 +500,11 @@ class BleGattServer:
                 log_warn(f"停止 BLE 广播保活失败: {e}")
 
         threading.Thread(target=_stop_hw, daemon=True).start()
+
+        # USB 棒：连接期间不 UnregisterAdvertisement，否则易出现「能连不能写」
+        if is_usb:
+            log_info("USB 蓝牙：连接期间保留 D-Bus 广播注册，仅停保活线程")
+            return
 
         if not self._adv_registered or self._adv_manager is None or self._adv is None:
             return
@@ -1001,6 +1028,8 @@ class BleGattServer:
             log_info("[ble] 收到握手 M_default")
             self._default_mode_received = True
             self._try_report_ready()
+            # 握手成功后再停广播（避免冷启动连上却写不了）
+            self._stop_advertising_while_connected()
             return
         if kind.value == "locate_face":
             if self._locate_face is not None:
@@ -1181,6 +1210,7 @@ class BleGattServer:
         if self._telemetry is not None:
             self._telemetry.on_subscribed(emit_snapshot=True)
         self._try_report_ready()
+        self._stop_advertising_while_connected()
 
     def _on_notify_stop(self) -> None:
         self._notify_active = False

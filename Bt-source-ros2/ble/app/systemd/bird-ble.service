@@ -3,6 +3,8 @@ Description=Bird BLE GATT Remote Control (BT_Control_0717)
 Documentation=file://@PKG_DIR@/docs/BLE_PROTOCOL.md
 After=bluetooth.service network-online.target ros2-bringup.service
 Wants=bluetooth.service network-online.target ros2-bringup.service
+# 蓝牙守护进程起来后再拉 GATT，减少冷启动「能连不能写」
+Requires=bluetooth.service
 
 [Service]
 Type=simple

@@ -134,4 +134,23 @@ echo " 以后更新 BLE:  cd ${PKG_DIR} && sudo ./install.sh"
 echo " ROS2 开机自启: sudo ${BIRD_WS}/Bt-source-ros2/scripts/install-ros2-autostart.sh"
 echo " 状态: sudo systemctl status bird-ble"
 echo " 日志: journalctl -u bird-ble -f"
+# IMU 串口：GAIT ON 依赖 /imu；CP2102 若在 ttyUSB1 / 权限 660 则补链并 chmod
+IMU_FIX="${BIRD_WS}/Bt-source-ros2/scripts/ensure_imu_serial.sh"
+UDEV_SRC="${BIRD_WS}/Bt-source-ros2/scripts/99-bird-yesense-imu.rules"
+if [ -f "${UDEV_SRC}" ]; then
+  install -m 0644 "${UDEV_SRC}" /etc/udev/rules.d/99-bird-yesense-imu.rules
+  udevadm control --reload-rules 2>/dev/null || true
+  udevadm trigger --subsystem-match=tty 2>/dev/null || true
+fi
+if [ -x "${IMU_FIX}" ]; then
+  "${IMU_FIX}" || true
+fi
+# 保证运行用户可访问串口（需重新登录才完整生效；chmod 已兜底）
+if id "${INSTALL_USER}" >/dev/null 2>&1; then
+  usermod -aG dialout "${INSTALL_USER}" 2>/dev/null || true
+fi
 "${APP_DIR}/scripts/check.sh" || true
+echo ""
+echo "若无法进入行走：确认串口可打开后看 /imu；yesense 每 5s 重试，chmod 后可不重启："
+echo "  ls -la /dev/ttyUSB* ; python3 -c \"open('/dev/ttyUSB0','rb')\""
+echo "  仍无 /imu 则重启 ./ros2_start.sh"

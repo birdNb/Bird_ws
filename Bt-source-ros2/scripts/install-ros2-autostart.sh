@@ -73,8 +73,19 @@ if [ ! -f "${BOOT_SRC}" ] || [ ! -f "${UNIT_SRC}" ]; then
   exit 1
 fi
 
-chmod 0755 "${BOOT_SRC}" "${SCRIPT_DIR}/ros2_start.sh" 2>/dev/null || true
+chmod 0755 "${BOOT_SRC}" "${SCRIPT_DIR}/ros2_start.sh" "${SCRIPT_DIR}/ensure_imu_serial.sh" 2>/dev/null || true
 install -m 0644 "${UNIT_SRC}" "${UNIT_DST}"
+
+# udev：CP2102N → /dev/ttyUSB0（Yesense），避免枚举成 ttyUSB1 导致无 /imu
+UDEV_SRC="${SCRIPT_DIR}/99-bird-yesense-imu.rules"
+UDEV_DST="/etc/udev/rules.d/99-bird-yesense-imu.rules"
+if [ -f "${UDEV_SRC}" ]; then
+  install -m 0644 "${UDEV_SRC}" "${UDEV_DST}"
+  udevadm control --reload-rules 2>/dev/null || true
+  udevadm trigger --subsystem-match=tty 2>/dev/null || true
+  "${SCRIPT_DIR}/ensure_imu_serial.sh" || true
+  echo "[ok] 已安装 IMU 串口 udev/软链（/dev/ttyUSB0）"
+fi
 
 cat >"${DEFAULT_ENV}" <<EOF
 BIRD_USER=${INSTALL_USER}

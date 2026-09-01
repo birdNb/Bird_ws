@@ -105,7 +105,7 @@ P0Y0      # 平滑回中（同 neck0）
 neck0     # 回中
 ```
 
-板端发布 `/pi_plus_absolute`（`head_yaw_joint` / `head_pitch_joint`），实现见 `ble_neck_bridge.py`。
+板端解析后走 ROS2 量产电机接口：`/request_control`（头 yaw/pitch）+ `/control_command`；并兼容发布 `/pi_plus_absolute`（`head_yaw_joint` / `head_pitch_joint`）。实现见 `ble_neck_bridge.py`。需 `hightorque_midware_node` 在线。
 
 ### 1.5 人脸跟踪（locate_face）
 
@@ -400,8 +400,8 @@ LT OFF
 | `GAIT OFF`        | 步态   | STANDBY           | `toggle_policy` + 摇杆回中            | `GAIT OFF`            |                             |
 | `LT ON`           | 加速   | LT 扳机            | `/joy` `axes[2]=-1`                 | `ACK:LT ON`           | 与摇杆并行                     |
 | `LT OFF`          | 加速   | 松开 LT            | `/joy` 松开扳机                         | `ACK:LT OFF`          | 断连自动 OFF                  |
-| `P{n}Y{m}`        | 脖子   | 步进解析             | `/pi_plus_absolute`                 | 无                     | 每步 10°；`P0Y0` 平滑回中        |
-| `neck0`           | 脖子   | 回中               | `/pi_plus_absolute`                 | 无                     | 平滑回中                      |
+| `P{n}Y{m}`        | 脖子   | 步进解析             | `/request_control`+`/control_command` | 无                     | 每步 10°；兼发 `/pi_plus_absolute` |
+| `neck0`           | 脖子   | 回中               | 同上                                  | 无                     | 平滑回中；`P0Y0` 同效            |
 | `locate_face ON`  | 头追   | 启进程              | `locate_face_cpp`                   | `ACK:locate_face ON`  |                           |
 | `locate_face OFF` | 头追   | 停进程 + 回中         | 杀进程 + 脖子回中                          | `ACK:locate_face OFF` |                           |
 | `MP ON`           | 电机电源 | `power_switch=1` | `/power_switch_control`             | 原文 `MP ON`            | 长按语义                      |

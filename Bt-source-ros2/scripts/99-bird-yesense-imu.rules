@@ -1,0 +1,2 @@
+# Yesense IMU (Silicon Labs CP2102N) → /dev/ttyUSB0 + 全局可读写（避免未进 dialout 打不开）
+SUBSYSTEM=="tty", ATTRS{idVendor}=="10c4", ATTRS{idProduct}=="ea60", SYMLINK+="ttyUSB0 yesense_imu", MODE="0666", GROUP="dialout"
