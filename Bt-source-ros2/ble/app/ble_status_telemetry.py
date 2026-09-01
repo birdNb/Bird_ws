@@ -30,6 +30,7 @@ MotorPowerFn = Callable[[], Optional[str]]
 BatteryFn = Callable[[], Optional[int]]
 FeatureFn = Callable[[], Optional[str]]
 BatteryListener = Callable[[int], None]
+LanIpListener = Callable[[str], None]
 
 from ble_log import log_info, log_tx, log_warn
 
@@ -196,15 +197,18 @@ class BleStatusTelemetry:
         motor_power_fn: Optional[MotorPowerFn] = None,
         battery_fn: Optional[BatteryFn] = None,
         on_battery_pct: Optional[BatteryListener] = None,
+        on_lan_ip: Optional[LanIpListener] = None,
     ) -> None:
         self._notify = notify
         self._motor_power_fn = motor_power_fn
         self._battery_fn = battery_fn
         self._on_battery_listener = on_battery_pct
+        self._on_lan_ip = on_lan_ip
         self._stop = threading.Event()
         self._subscribed = threading.Event()
         self._lock = threading.Lock()
         self._last_ip: Optional[str] = None
+        self._voice_ip_announced: Optional[str] = None
         self._last_pwr_sent: Optional[int] = None
         self._last_mp_sent: Optional[str] = None
         self._last_fsm: Optional[int] = DEFAULT_FSM
@@ -526,11 +530,25 @@ class BleStatusTelemetry:
         return True
 
     def _send_ip(self, ip: str, force: bool = False) -> None:
+        announce = False
         with self._lock:
-            if not force and ip == self._last_ip:
+            if self._voice_ip_announced != ip:
+                announce = True
+                self._voice_ip_announced = ip
+            elif not force and ip == self._last_ip:
                 return
             self._last_ip = ip
+        if announce:
+            self._emit_lan_ip(ip)
         self._tx(f"IP:{ip}")
+
+    def _emit_lan_ip(self, ip: str) -> None:
+        if self._on_lan_ip is None or not ip:
+            return
+        try:
+            self._on_lan_ip(ip)
+        except Exception as e:
+            log_warn(f"[voice] 局域网 IP 回调失败: {e}")
 
     def _maybe_send_pwr(self, raw_pct: int, force: bool = False) -> None:
         if not self._subscribed.is_set():

@@ -274,12 +274,46 @@ class VoiceRemindPlayer:
         self.play("wifi_changed")
 
     def on_wifi_connected(self) -> None:
-        """WiFi 连接成功。"""
-        self.play("wifi_connected")
+        """WiFi 连接成功（IP 播报改由 announce_lan_ip，避免重复/漏播）。"""
+        # 保留接口兼容；实际「局域网已连接+IP」在检测到 IP 时统一播报
+        return
 
     def on_wifi_disconnected(self) -> None:
         """WiFi 连接断开或配网失败。"""
         self.play("wifi_disconnected")
+
+    def announce_lan_ip(self, ip: str, *, force: bool = False) -> None:
+        """检测到局域网 IP 后直接播报「局域网已连接，当前IP地址…」。"""
+        ip = (ip or "").strip()
+        if not ip:
+            return
+        if not self._enabled:
+            return
+        if not self._prompts_enabled:
+            return
+        key = f"lan_ip:{ip}"
+        now = time.monotonic()
+        last = self._last_play_ts.get(key, 0.0)
+        # 同一 IP 45s 内不重复（开机多路回调去重）
+        if now - last < 45.0:
+            return
+        self._last_play_ts[key] = now
+        try:
+            from .ip_tts import synthesize_ip_wav
+        except ImportError:
+            try:
+                from ip_tts import synthesize_ip_wav  # type: ignore
+            except ImportError:
+                self._log("[voice] 无法加载 ip_tts，跳过 IP 播报")
+                return
+        path = synthesize_ip_wav(ip)
+        if not path:
+            self._log(f"[voice] IP 语音合成失败: {ip}")
+            return
+        self._ensure_worker()
+        self._queue.put(("file", path, f"局域网已连接 IP:{ip}"))
+        self._queue.put(("unlink", path, ""))
+        self._log(f"[voice] 已入队 IP 播报: {ip}")
 
     def on_battery_pct(self, pct: int) -> None:
         if not self._enabled or not self._system_prompts_ok:
@@ -314,6 +348,14 @@ class VoiceRemindPlayer:
                 continue
             if item is None:
                 break
+            if isinstance(item, tuple) and item[0] == "unlink":
+                _, path, _ = item
+                try:
+                    if path and os.path.isfile(path):
+                        os.remove(path)
+                except OSError:
+                    pass
+                continue
             if isinstance(item, tuple) and item[0] == "file":
                 _, path, label = item
             else:
@@ -323,6 +365,8 @@ class VoiceRemindPlayer:
                     continue
                 label = PROMPTS.get(prompt_id, (prompt_id, prompt_id))[1]
             if self._play_cmd is None:
+                continue
+            if not path or not os.path.isfile(path):
                 continue
             proc: Optional[subprocess.Popen[bytes]] = None
             try:
@@ -334,7 +378,7 @@ class VoiceRemindPlayer:
                 with self._play_lock:
                     self._current_proc = proc
                 # 正常播完；对话打断时由 _stop_current_proc 终止本进程
-                proc.wait(timeout=30.0)
+                proc.wait(timeout=45.0)
                 self._log(f"[voice] 播放: {label}")
             except (OSError, subprocess.SubprocessError) as e:
                 self._log(f"[voice] 播放失败 {label}: {e}")

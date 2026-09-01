@@ -966,6 +966,13 @@ class BleGattServer:
         from ble_wifi_manager import RESULT_DISCONNECTED
 
         self._send_command_echo(RESULT_DISCONNECTED)
+        if self._telemetry is not None:
+            try:
+                with self._telemetry._lock:
+                    self._telemetry._voice_ip_announced = None
+                    self._telemetry._last_ip = None
+            except Exception:
+                pass
         if self._voice_remind is not None:
             self._voice_remind.on_wifi_disconnected()
 
@@ -973,12 +980,11 @@ class BleGattServer:
         from ble_wifi_manager import RESULT_OK
 
         self._send_command_echo(RESULT_OK)
-        if self._voice_remind is not None:
-            self._voice_remind.on_wifi_connected()
+        # IP 语音：有地址就播（不依赖「重连」专用提示音）
         self._send_wifi_ip()
 
     def _send_wifi_ip(self) -> None:
-        """DHCP 可能晚于关联，轮询后再单独推 IP:x.x.x.x。"""
+        """DHCP 可能晚于关联，轮询后再推 IP 并播报。"""
         try:
             from ble_status_telemetry import read_lan_ip
         except ImportError:
@@ -994,10 +1000,18 @@ class BleGattServer:
             self._send_command_echo(f"IP:{ip}")
             if self._telemetry is not None:
                 try:
+                    # 走 telemetry，统一去重 + 语音
+                    self._telemetry._send_ip(ip, force=True)
+                except Exception:
                     with self._telemetry._lock:
                         self._telemetry._last_ip = ip
-                except Exception:
-                    pass
+                    if self._voice_remind is not None:
+                        self._voice_remind.announce_lan_ip(ip, force=True)
+            elif self._voice_remind is not None:
+                try:
+                    self._voice_remind.announce_lan_ip(ip, force=True)
+                except Exception as e:
+                    log_warn(f"[voice] IP 播报失败: {e}")
         else:
             log_warn("[wifi] 已连接但尚未拿到局域网 IP")
 
@@ -1617,8 +1631,43 @@ class BleGattServer:
             on_battery_pct=(
                 self._voice_remind.on_battery_pct if self._voice_remind else None
             ),
+            on_lan_ip=(
+                (lambda ip: self._voice_remind.announce_lan_ip(ip, force=True))
+                if self._voice_remind is not None
+                else None
+            ),
         )
         self._telemetry.start()
+        # 开机时 WiFi 往往已连上：主动查一次 IP，有则立刻播报
+        threading.Thread(target=self._announce_ip_at_boot, daemon=True).start()
+
+    def _announce_ip_at_boot(self) -> None:
+        """不依赖 WiFi 重连事件：轮询到局域网 IP 就播报。"""
+        time.sleep(2.5)
+        try:
+            from ble_status_telemetry import read_lan_ip
+        except ImportError:
+            return
+        ip = None
+        for _ in range(40):
+            if self._voice_remind is None:
+                return
+            ip = read_lan_ip()
+            if ip:
+                break
+            time.sleep(0.5)
+        if not ip:
+            log_info("[voice] 开机未检测到局域网 IP，跳过播报")
+            return
+        log_info(f"[voice] 开机检测到局域网 IP: {ip}")
+        if self._telemetry is not None:
+            try:
+                self._telemetry._send_ip(ip, force=True)
+                return
+            except Exception as e:
+                log_warn(f"[voice] telemetry IP 播报失败: {e}")
+        if self._voice_remind is not None:
+            self._voice_remind.announce_lan_ip(ip)
 
     def _read_motor_power_wire(self) -> Optional[str]:
         if self._ros_bridge is None:
