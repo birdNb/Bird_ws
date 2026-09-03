@@ -37,7 +37,8 @@ mkdir -p "$(dirname "${_RUNTIME_DDS}")"
     fi
   done
   echo '  </Peers>'
-  echo '  <MaxAutoParticipantIndex>30</MaxAutoParticipantIndex>'
+  # 量产节点 + BLE 桥/遥测/mapper，30 易耗尽导致 midware/controller 起不来
+  echo '  <MaxAutoParticipantIndex>120</MaxAutoParticipantIndex>'
   echo '</Discovery></Domain></CycloneDDS>'
 } > "${_RUNTIME_DDS}"
 

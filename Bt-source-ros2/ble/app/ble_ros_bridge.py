@@ -197,7 +197,7 @@ MODE_LABELS: Dict[str, str] = {
 }
 
 _POWER_GATED_KINDS = frozenset(
-    {"stick", "mode", "action", "gait", "sprint", "upper_state", "policy"}
+    {"stick", "action", "gait", "sprint", "upper_state", "policy"}
 )
 
 from ble_neck_bridge import NeckController
@@ -448,7 +448,7 @@ class BleRosBridge:
         return self._fsm_value
 
     def get_mode_wire(self) -> str:
-        """小程序主显示字段 mode:M_* 。ROS2 启动默认 EXEC_DEFAULT。"""
+        """小程序主显示字段 mode:M_* 。以控制器 current_mode 为准，避免本地残留 fsm 覆盖。"""
         fsm = self.get_fsm_value()
         mode = _norm_label(self._current_mode)
         if mode == "protect" or fsm == FSM_PROTECT:
@@ -460,6 +460,9 @@ class BleRosBridge:
             FSM_RESET_FAIL,
         ):
             return "M_resetzero"
+        # default_bt 已执行默认模式：勿被残留 INIT/ERROR 打回 M_init
+        if mode == "default_bt":
+            return "M_default"
         if mode == "init" or fsm in (FSM_INIT, FSM_ERROR, FSM_CANDIDATE_DEFAULT):
             return "M_init"
         return "M_default"
@@ -507,7 +510,12 @@ class BleRosBridge:
         if kind == "stick":
             self.handle_text(text)
         elif kind == "mode":
-            self.handle_text(text)
+            # 直接走模式入口，避免二次 parse 失败导致“指令无效果”
+            key = (text or "").strip().lower()
+            if key in MODE_LABELS:
+                self._trigger_mode(key)
+            else:
+                self.handle_text(text)
         elif kind == "action":
             self._trigger_action(text)
         elif kind == "neck":
@@ -625,7 +633,7 @@ class BleRosBridge:
 
                 if not rclpy.ok():
                     rclpy.init(args=None)
-                n = Node(f"ble_dds_probe_{os.getpid()}_{attempt}")
+                n = Node("ble_dds_probe")
                 n.destroy_node()
                 return True
             except Exception as e:
@@ -634,6 +642,36 @@ class BleRosBridge:
                 if self._stop.wait(timeout=1.5):
                     return False
         return False
+
+    def _wait_ros2_stack_ready(self, timeout: float = 180.0) -> bool:
+        """等 controller + midware 进程就绪再建桥（与 bird-ble-boot 一致）。"""
+        deadline = time.monotonic() + timeout
+        warned = False
+        while not self._stop.is_set() and time.monotonic() < deadline:
+            try:
+                import subprocess
+
+                ctrl = subprocess.run(
+                    ["pgrep", "-f", "hightorque_controller_node"],
+                    capture_output=True,
+                    check=False,
+                )
+                mid = subprocess.run(
+                    ["pgrep", "-f", "hightorque_midware_node"],
+                    capture_output=True,
+                    check=False,
+                )
+                if ctrl.returncode == 0 and mid.returncode == 0:
+                    return not self._stop.wait(timeout=2.0)
+            except Exception:
+                pass
+            if not warned:
+                self._log("[ros] 等待 hightorque_controller_node + hightorque_midware_node…")
+                warned = True
+            if self._stop.wait(timeout=1.0):
+                return False
+        self._log("[ros][warn] 等待 ROS2 核心超时，仍尝试建桥")
+        return True
 
     def _ros_main_impl(self) -> None:
         _bootstrap_ros_python_path()
@@ -650,9 +688,11 @@ class BleRosBridge:
             self._log("[ros] 请用 ./start.sh 启动（内部 ros_env.sh 会 source ROS2 Foxy）")
             return
 
-        # 等 DDS 真正可用再 create_node，避免 wlan0 UDP 未就绪时狂刷失败占满 CPU
+        # 等 DDS + 量产核心（含 midware）再 create_node，避免抢 Participant / 无电机
         if not self._wait_dds_domain_ready():
             raise RuntimeError("CycloneDDS 未就绪（wlan0/UDP）")
+        if not self._wait_ros2_stack_ready():
+            raise RuntimeError("ROS2 核心未就绪（controller/midware）")
 
         if not rclpy.ok():
             rclpy.init(args=None)
@@ -1364,11 +1404,17 @@ class BleRosBridge:
         except Exception:
             pass
 
-    def _notify_mode(self, mode_key: str) -> None:
+    def _notify_mode(self, mode_key: str, *, voice: bool = False) -> None:
+        """通知 UI/语音。默认不播报（被动同步）；显式 M_* 指令传 voice=True。"""
         if self._mode_listener is None:
             return
         try:
-            self._mode_listener(mode_key)
+            self._mode_listener(mode_key, voice=voice)
+        except TypeError:
+            try:
+                self._mode_listener(mode_key)
+            except Exception:
+                pass
         except Exception:
             pass
 
@@ -1453,7 +1499,9 @@ class BleRosBridge:
         if mode == "init":
             return FSM_INIT
         if mode == "default_bt":
-            if self._fsm_value in FSM_MENU_STATES:
+            # 仅保留「候选菜单」本地态；INIT/ERROR 残留必须纠正为 EXEC_DEFAULT，
+            # 否则 get_mode_wire 会把已成功的 default 显示成 M_init（模式切换假失效）
+            if self._fsm_value in (FSM_CANDIDATE_DEFAULT, FSM_CANDIDATE_RESET_ZERO):
                 return None
             return FSM_EXEC_DEFAULT
         if mode == "none":
@@ -1461,11 +1509,12 @@ class BleRosBridge:
         return None
 
     def _emit_mode_display(self) -> None:
+        """同步小程序 mode 显示；被动状态变化不播报。"""
         wire = self.get_mode_wire()
         if wire == self._last_mode_wire:
             return
         self._last_mode_wire = wire
-        self._notify_mode(wire.lower())
+        self._notify_mode(wire.lower(), voice=False)
 
     def _in_fsm_menu(self) -> bool:
         if self.get_fsm_value() in FSM_MENU_STATES:
@@ -1638,7 +1687,8 @@ class BleRosBridge:
 
     def _trigger_mode(self, mode_key: str) -> None:
         label = MODE_LABELS.get(mode_key, mode_key)
-        self._notify_mode(mode_key)
+        # 仅小程序/指令下发的 M_* 播报模式音
+        self._notify_mode(mode_key, voice=True)
         threading.Thread(
             target=self._mode_worker,
             args=(mode_key, label),

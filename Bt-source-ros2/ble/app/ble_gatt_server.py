@@ -1573,7 +1573,7 @@ class BleGattServer:
         elif action == "squat":
             self._voice_remind.on_squat()
 
-    def _on_ros_mode(self, mode_key: str) -> None:
+    def _on_ros_mode(self, mode_key: str, voice: bool = True) -> None:
         if self._telemetry is not None:
             fsm = None
             if self._ros_bridge is not None:
@@ -1585,7 +1585,8 @@ class BleGattServer:
                 self._telemetry.push_mode_command(mode_key, fsm=fsm, force=True)
             except Exception:
                 pass
-        if self._voice_remind is not None:
+        # 仅显式模式指令播报；连接/握手/状态同步不播
+        if voice and self._voice_remind is not None:
             self._voice_remind.on_mode(mode_key)
 
     def _on_ros_sprint(self, enabled: bool) -> None:

@@ -1,9 +1,9 @@
 [Unit]
 Description=Bird BLE GATT Remote Control (BT_Control_0717)
 Documentation=file://@PKG_DIR@/docs/BLE_PROTOCOL.md
+# 先等量产栈服务单元启动；进程级就绪由 bird-ble-boot.sh 硬等待 midware/controller
 After=bluetooth.service network-online.target ros2-bringup.service
 Wants=bluetooth.service network-online.target ros2-bringup.service
-# 蓝牙守护进程起来后再拉 GATT，减少冷启动「能连不能写」
 Requires=bluetooth.service
 
 [Service]
@@ -24,9 +24,13 @@ Environment=PULSE_SERVER=unix:/run/user/@BIRD_BLE_UID@/pulse/native
 Environment=XDG_RUNTIME_DIR=/run/user/@BIRD_BLE_UID@
 Environment=HOME=@BIRD_HOME@
 Environment=BLE_DEVICE_NAME_FILE=/var/lib/bird-ble/ble_device_name.conf
+Environment=ROS2_WAIT_SEC=300
+# 低于量产栈，避免抢 CPU
+Nice=5
+CPUWeight=50
 ExecStart=@BT_DIR@/systemd/bird-ble-boot.sh
 Restart=always
-RestartSec=3
+RestartSec=5
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=bird-ble
